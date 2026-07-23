@@ -9,7 +9,7 @@ struct ContentView: View {
                 Section("Runtime") {
                     pathRow("Workspace", text: $model.workspacePath, action: model.chooseWorkspace)
                     pathRow("Agent profile", text: $model.agentConfigPath, action: model.chooseAgent)
-                    TextField("Settings config (optional)", text: $model.settingsConfigPath)
+                    TextField("Settings override (auto-discovered if blank)", text: $model.settingsConfigPath)
                     Button("Connect and initialize", action: model.connect).disabled(model.isBusy || model.isConnected)
                     Text(model.status).foregroundStyle(.secondary)
                 }

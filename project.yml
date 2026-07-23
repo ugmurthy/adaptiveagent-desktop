@@ -16,9 +16,9 @@ targets:
     platform: macOS
     sources:
       - Sources/AdaptiveAgentDesktop
-    resources:
       - path: Resources/AgentRuntime
         type: folder
+        buildPhase: resources
     settings:
       base:
         PRODUCT_NAME: AdaptiveAgentDesktop
@@ -36,3 +36,6 @@ targets:
       - Tests/AdaptiveAgentDesktopTests
     dependencies:
       - target: AdaptiveAgentDesktop
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES

@@ -23,7 +23,7 @@ final class AppModel: ObservableObject {
         case approval(runId: String, message: String)
         case clarification(runId: String, message: String)
     }
-    private let client = SidecarClient()
+    private var client = RuntimeClient()
 
     func chooseWorkspace() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
@@ -36,64 +36,72 @@ final class AppModel: ObservableObject {
     }
 
     func connect() { perform {
-        guard ProcessInfo.processInfo.environment["DATABASE_URL"]?.isEmpty == false else {
-            throw SidecarError.protocolViolation("DATABASE_URL is required in the app process environment")
+        let client = self.client
+        do {
+            self.status = "Starting runtime…"
+            try await client.start(notificationHandler: { [weak self] method, params in
+                await self?.receive(method: method, params: params)
+            }, errorHandler: { [weak self] message in
+                await self?.recordError(message)
+            }, terminationHandler: { [weak self] status in
+                await self?.runtimeTerminated(status: status)
+            })
+            self.status = "Initializing runtime…"
+            var fields: [String: JSONValue] = [:]
+            if !self.workspacePath.isEmpty { fields["cwd"] = .string(self.workspacePath) }
+            if !self.agentConfigPath.isEmpty { fields["agentConfigPath"] = .string(self.agentConfigPath) }
+            if !self.settingsConfigPath.isEmpty { fields["settingsConfigPath"] = .string(self.settingsConfigPath) }
+            let result = try await client.initializeRuntime(params: fields)
+            self.isConnected = true
+            self.status = "Ready"
+            self.events.append("Initialized\n\(result.prettyPrinted)")
+        } catch {
+            await client.shutdown()
+            self.client = RuntimeClient()
+            throw error
         }
-        try await self.client.start(eventHandler: { [weak self] event in
-            await self?.receive(event)
-        }, errorHandler: { [weak self] message in
-            await self?.recordError(message)
-        })
-        var fields: [String: JSONValue] = ["runtimeMode": .string("postgres")]
-        if !self.workspacePath.isEmpty { fields["cwd"] = .string(self.workspacePath) }
-        if !self.agentConfigPath.isEmpty { fields["agentConfigPath"] = .string(self.agentConfigPath) }
-        if !self.settingsConfigPath.isEmpty { fields["settingsConfigPath"] = .string(self.settingsConfigPath) }
-        let result = try await self.client.send(type: "runtime.initialize", fields: fields)
-        self.isConnected = true
-        self.status = "Ready"
-        self.events.append("Initialized\n\(result.prettyPrinted)")
     } }
 
     func startRun() { perform {
         var fields: [String: JSONValue] = ["goal": .string(self.goal)]
         if !self.sessionId.isEmpty { fields["sessionId"] = .string(self.sessionId) }
-        let result = try await self.client.send(type: "run.start", fields: fields)
+        let result = try await self.client.send(method: "agent/run", params: fields)
         self.acceptResult(result)
     } }
 
     func sendChat() { perform {
         var fields: [String: JSONValue] = ["message": .string(self.message)]
         if !self.sessionId.isEmpty { fields["sessionId"] = .string(self.sessionId) }
-        let result = try await self.client.send(type: "chat.send", fields: fields)
+        let result = try await self.client.send(method: "agent/chat", params: fields)
         self.message = ""; self.acceptResult(result)
     } }
 
     func steer() { perform {
-        let result = try await self.client.send(type: "run.steer", fields: ["runId": .string(self.currentRunId), "message": .string(self.steerMessage)])
+        let result = try await self.client.send(method: "run/steer", params: ["runId": .string(self.currentRunId), "message": .string(self.steerMessage)])
         self.steerMessage = ""; self.acceptResult(result)
     } }
 
-    func interrupt() { runCommand("run.interrupt") }
-    func inspect() { runCommand("run.inspect") }
-    func resume() { runCommand("run.resume") }
-    func retry() { runCommand("run.retry") }
+    func interrupt() { runCommand("run/interrupt") }
+    func inspect() { runCommand("run/inspect") }
+    func resume() { runCommand("run/resume") }
+    func retry() { runCommand("run/retry") }
 
     func resolveApproval(_ approved: Bool) { perform {
         guard case .approval(let runId, _) = self.interaction else { return }
-        let result = try await self.client.send(type: "approval.resolve", fields: ["runId": .string(runId), "approved": .bool(approved)])
+        let result = try await self.client.send(method: "interaction/resolveApproval", params: ["runId": .string(runId), "approved": .bool(approved)])
         self.interaction = nil; self.acceptResult(result)
     } }
 
     func resolveClarification() { perform {
         guard case .clarification(let runId, _) = self.interaction else { return }
-        let result = try await self.client.send(type: "clarification.resolve", fields: ["runId": .string(runId), "answer": .string(self.interactionText)])
+        let result = try await self.client.send(method: "interaction/resolveClarification", params: ["runId": .string(runId), "answer": .string(self.interactionText)])
         self.interaction = nil; self.interactionText = ""; self.acceptResult(result)
     } }
 
     func shutdown() async { await client.shutdown() }
 
-    private func runCommand(_ type: String) { perform {
-        let result = try await self.client.send(type: type, fields: ["runId": .string(self.currentRunId)])
+    private func runCommand(_ method: String) { perform {
+        let result = try await self.client.send(method: method, params: ["runId": .string(self.currentRunId)])
         self.acceptResult(result)
     } }
 
@@ -115,14 +123,20 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func receive(_ event: JSONValue) {
-        events.append(event.prettyPrinted)
-        guard let object = event.objectValue,
+    private func receive(method: String, params: JSONValue) {
+        events.append("\(method)\n\(params.prettyPrinted)")
+        guard method == "agent/event",
+              let object = params.objectValue,
               object["type"]?.stringValue == "run.created",
               let runId = object["runId"]?.stringValue,
               let rootRunId = object["payload"]?.objectValue?["rootRunId"]?.stringValue,
               runId == rootRunId else { return }
         currentRunId = rootRunId
     }
-    private func recordError(_ message: String) { events.append("Runtime stderr: \(message)") }
+    private func recordError(_ message: String) { events.append("Runtime diagnostic: \(message)") }
+    private func runtimeTerminated(status: Int32) {
+        isConnected = false
+        self.status = "Runtime exited with status \(status)"
+        client = RuntimeClient()
+    }
 }

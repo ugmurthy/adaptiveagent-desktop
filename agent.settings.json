@@ -1,0 +1,76 @@
+{
+
+"env": {
+    "WEB_SEARCH_PROVIDER": "serper",
+    "WEB_READ_PAGE_PROVIDER":"parallel",
+    "PARALLEL_API_KEY":"$PARALLEL_API_KEY",
+    "SERPER_API_KEY": "$SERPER_API_KEY",
+    "WEB_TOOL_TIMEOUT_MS": "5000",
+      "BRAVE_SEARCH_COST_USD_PER_REQUEST": "0.001",
+      "SERPER_SEARCH_COST_USD_PER_REQUEST": "0.001",
+      "PARALLEL_SEARCH_COST_USD_PER_REQUEST": "0.005",
+      "PARALLEL_EXTRACT_COST_USD_PER_REQUEST": "0.01"
+},
+
+"runtime":{
+   "mode":"postgres",
+   "autoMigrate": true
+},
+  "logging": {
+    "enabled": false,
+    "level": "debug",
+    "destination": "file",
+    "filePath": "./logs/engineering.log",
+    "pretty": true
+  },
+  "interaction": {
+    "autoApprove": true,
+    
+    "approvalMode": "auto",
+    "clarificationMode": "interactive"
+  },
+ 
+   "agents": {
+    "dirs": [ "$HOME/.adaptiveAgent/agents"]
+   },
+   "skills": {
+    "dirs": ["./skills", "$HOME/.adaptiveAgent/skills"],
+    "allowExampleSkills": false
+   },
+"tui": {
+    "messages": {
+      "user": {
+        "showPrefix": true,
+        "prefix": "blue",
+        "body": "blue"
+      },
+      "assistant": {
+        "showPrefix": false,
+        "prefix": "green",
+        "body": ["bold", "green"]
+      },
+      "progress": {
+        "showPrefix": false,
+        "body": "green"
+      },
+      "run": {
+        "showPrefix": true,
+        "prefix": "default",
+        "body": "blue"
+      },
+      "system": {
+        "showPrefix": true,
+        "prefix": "yellow",
+        "body": "yellow"
+      },
+      "event": {
+        "showPrefix": true,
+        "prefix": "dim",
+        "body": "default"
+      }
+    }
+  
+  }
+}
+
+
