@@ -65,3 +65,4 @@ The standard **About AdaptiveAgent Desktop** panel displays the marketing versio
 - Runtime stderr is captured separately and displayed as diagnostic event entries; it is never parsed as protocol traffic.
 
 This development slice inherits the complete app process environment. Production distribution should narrow inherited variables and add an explicit secret-management design without moving runtime behavior into the renderer.
+
