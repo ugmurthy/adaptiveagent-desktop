@@ -72,6 +72,250 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(buffer.append(Data(" line\n".utf8)).map { String(decoding: $0, as: UTF8.self) }, ["partial line"])
     }
 
+    @MainActor
+    func testAppModelUsesLaunchDirectoryAndLocalSettingsForInitialization() async throws {
+        let workspace = try temporaryDirectoryURL()
+        let settings = workspace.appendingPathComponent("agent.settings.json")
+        try "{}".write(to: settings, atomically: true, encoding: .utf8)
+        let requestLog = temporaryFileURL(named: "app-model-requests.log")
+        let executable = try makeRuntimeScript(#"""
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.10","bridgeVersion":"0.1.0","pid":123}}'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
+  id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
+  method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
+  case "$method" in
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.10"}}' ;;
+    runtime/initialize)
+      printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":["write_file"]}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path))
+      ;;
+    runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
+    *) exit 91 ;;
+  esac
+done
+"""#)
+        let client = RuntimeClient(executableURL: executable, responseTimeout: .seconds(2))
+        let model = AppModel(client: client, workingDirectoryURL: workspace)
+
+        XCTAssertEqual(model.workspacePath, workspace.standardizedFileURL.path)
+        XCTAssertEqual(model.settingsConfigPath, settings.path)
+        model.bootstrap()
+        for _ in 0..<100 where !model.isConnected {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(model.isConnected, model.status)
+        XCTAssertEqual(model.agentName, "Default Agent")
+        XCTAssertEqual(model.effectiveWorkspaceRoot, workspace.path)
+
+        let requests = try String(contentsOf: requestLog, encoding: .utf8)
+            .split(separator: "\n")
+            .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+        let runtimeInitialize = try XCTUnwrap(requests.first {
+            $0.objectValue?["method"] == .string("runtime/initialize")
+        })
+        let params = try XCTUnwrap(runtimeInitialize.objectValue?["params"]?.objectValue)
+        XCTAssertEqual(params["cwd"], .string(workspace.path))
+        XCTAssertEqual(params["settingsConfigPath"], .string(settings.path))
+        XCTAssertEqual(params["approvalMode"], .string("manual"))
+        XCTAssertEqual(params["clarificationMode"], .string("interactive"))
+        XCTAssertNil(params["agentConfigPath"])
+        await model.shutdown()
+    }
+
+    @MainActor
+    func testRunActionCanInspectAnEnteredRunIDWithoutAnExistingRecord() async throws {
+        let workspace = try temporaryDirectoryURL()
+        let requestLog = temporaryFileURL(named: "entered-run-action-requests.log")
+        let executable = try makeRuntimeScript(#"""
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.10","bridgeVersion":"0.1.0","pid":123}}'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
+  id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
+  method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
+  case "$method" in
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.10"}}' ;;
+    runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"runtimeMode":"memory"}}\n' "$id" ;;
+    run/inspect) printf '{"jsonrpc":"2.0","id":"%s","result":{"run":{"id":"persisted-run","status":"failed"},"events":[]}}\n' "$id" ;;
+    runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
+    *) exit 91 ;;
+  esac
+done
+"""#)
+        let client = RuntimeClient(executableURL: executable, responseTimeout: .seconds(2))
+        let model = AppModel(client: client, workingDirectoryURL: workspace)
+        model.bootstrap()
+        for _ in 0..<100 where !model.isConnected {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(model.isConnected, model.status)
+        XCTAssertTrue(model.runs.isEmpty)
+
+        model.runCommand("run/inspect", runId: "  persisted-run  ")
+        for _ in 0..<100 {
+            if model.runs.first?.output != nil, model.runs.first?.isRequestInFlight == false { break }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+
+        let record = try XCTUnwrap(model.runs.first)
+        XCTAssertEqual(model.selectedRunItemID, record.id)
+        XCTAssertEqual(record.latestRunId, "persisted-run")
+        XCTAssertEqual(record.status, .failed)
+        XCTAssertEqual(record.output?.objectValue?["run"]?.objectValue?["id"], .string("persisted-run"))
+
+        let requests = try String(contentsOf: requestLog, encoding: .utf8)
+            .split(separator: "\n")
+            .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+        let inspection = try XCTUnwrap(requests.first {
+            $0.objectValue?["method"] == .string("run/inspect")
+        })
+        XCTAssertEqual(inspection.objectValue?["params"]?.objectValue?["runId"], .string("persisted-run"))
+        await model.shutdown()
+    }
+
+    @MainActor
+    func testRunResultApprovalEventsAndStructuredWrittenFilesArePresented() throws {
+        let workspace = try temporaryDirectoryURL()
+        let sourceDirectory = workspace.appendingPathComponent("Sources", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
+        let writtenFile = sourceDirectory.appendingPathComponent("Generated.swift")
+        let editedFile = sourceDirectory.appendingPathComponent("Existing.swift")
+        try "generated".write(to: writtenFile, atomically: true, encoding: .utf8)
+        try "edited".write(to: editedFile, atomically: true, encoding: .utf8)
+
+        let model = AppModel(workingDirectoryURL: workspace)
+        model.effectiveWorkspaceRoot = workspace.path
+        let recordID = UUID()
+        model.runs = [AppModel.RunRecord(id: recordID, kind: .run, title: "Generate files")]
+        model.acceptResult(.object([
+            "status": .string("success"),
+            "runId": .string("root-run"),
+            "output": .string("# Done\n\nGenerated the requested files.")
+        ]), for: recordID)
+
+        XCTAssertEqual(model.runs[0].status, .succeeded)
+        XCTAssertEqual(model.runs[0].output, .string("# Done\n\nGenerated the requested files."))
+
+        model.receive(method: "agent/event", params: .object([
+            "schemaVersion": .number(1),
+            "type": .string("delegate.spawned"),
+            "runId": .string("root-run"),
+            "payload": .object(["childRunId": .string("child-run"), "rootRunId": .string("root-run")])
+        ]))
+        model.receive(method: "agent/event", params: .object([
+            "schemaVersion": .number(1),
+            "type": .string("approval.requested"),
+            "runId": .string("child-run"),
+            "payload": .object([
+                "toolName": .string("shell_exec"),
+                "input": .object(["command": .string("git status")])
+            ])
+        ]))
+        XCTAssertEqual(model.runs[0].status, .waitingForApproval)
+        guard case .approval(let toolName, let input, _) = model.runs[0].interaction?.kind else {
+            return XCTFail("approval.requested should create an approval interaction")
+        }
+        XCTAssertEqual(toolName, "shell_exec")
+        XCTAssertEqual(input?.objectValue?["command"], .string("git status"))
+        XCTAssertEqual(model.runs[0].interaction?.runId, "child-run")
+
+        model.acceptResult(.object([
+            "status": .string("approval_requested"),
+            "runId": .string("root-run"),
+            "message": .string("Approval required")
+        ]), for: recordID)
+        XCTAssertEqual(model.runs[0].interaction?.runId, "child-run", "the paused root response must not replace the requesting child run")
+        model.runs[0].interaction?.isResolving = true
+        model.acceptResult(.object(["runId": .string("child-run"), "approved": .bool(true)]), for: recordID)
+        XCTAssertNil(model.runs[0].interaction)
+        XCTAssertEqual(model.runs[0].status, .running)
+        XCTAssertEqual(model.runs[0].latestRunId, "root-run")
+
+        model.receive(method: "agent/event", params: toolCompletedEvent(
+            runId: "root-run",
+            toolName: "write_file",
+            output: ["path": .string(writtenFile.path), "sizeBytes": .number(9)]
+        ))
+        model.receive(method: "agent/event", params: toolCompletedEvent(
+            runId: "child-run",
+            toolName: "edit_file",
+            output: ["path": .string(editedFile.path), "changed": .bool(true)]
+        ))
+        model.receive(method: "agent/event", params: toolCompletedEvent(
+            runId: "root-run",
+            toolName: "edit_file",
+            output: ["path": .string(writtenFile.path), "changed": .bool(false)]
+        ))
+        model.receive(method: "agent/event", params: toolCompletedEvent(
+            runId: "root-run",
+            toolName: "write_file",
+            output: ["path": .string(workspace.deletingLastPathComponent().appendingPathComponent("outside.txt").path)]
+        ))
+
+        XCTAssertEqual(model.runs[0].files.count, 2)
+        XCTAssertEqual(model.runs[0].files.map(\.path), [writtenFile.path, editedFile.path].sorted())
+        let childFile = try XCTUnwrap(model.runs[0].files.first { $0.path == editedFile.path })
+        XCTAssertEqual(childFile.operation, .edited)
+        XCTAssertEqual(childFile.sourceRunId, "child-run")
+        XCTAssertEqual(model.relativeDisplayPath(for: childFile), "Sources/Existing.swift")
+        XCTAssertTrue(model.fileExists(childFile))
+    }
+
+    func testRuntimeProcessUsesSuppliedWorkingDirectory() async throws {
+        let workspace = try temporaryDirectoryURL()
+        let pwdLog = temporaryFileURL(named: "pwd.txt")
+        let executable = try makeRuntimeScript(#"""
+pwd > \#(shellQuote(pwdLog.path))
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.10","bridgeVersion":"0.1.0","pid":123}}'
+while IFS= read -r line; do
+  id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
+  method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
+  case "$method" in
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.10"}}' ;;
+    runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id" ;;
+    runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
+    *) exit 91 ;;
+  esac
+done
+"""#)
+        let client = RuntimeClient(executableURL: executable, responseTimeout: .seconds(2))
+        try await client.start(workingDirectoryURL: workspace, notificationHandler: { _, _ in }, errorHandler: { _ in })
+        _ = try await client.initializeRuntime()
+        await client.shutdown()
+        let reportedPath = try String(contentsOf: pwdLog, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(
+            URL(fileURLWithPath: reportedPath).resolvingSymlinksInPath().path,
+            workspace.resolvingSymlinksInPath().path
+        )
+    }
+
+    func testLongRunningAgentRequestCanDisableTheStandardResponseTimeout() async throws {
+        let executable = try makeRuntimeScript(#"""
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.10","bridgeVersion":"0.1.0","pid":123}}'
+while IFS= read -r line; do
+  id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
+  method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
+  case "$method" in
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.10"}}' ;;
+    runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id" ;;
+    agent/run) sleep 0.15; printf '{"jsonrpc":"2.0","id":"%s","result":{"status":"success","runId":"slow-run","output":"Done"}}\n' "$id" ;;
+    runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
+    *) exit 91 ;;
+  esac
+done
+"""#)
+        let client = RuntimeClient(executableURL: executable, responseTimeout: .milliseconds(30))
+        try await client.start(notificationHandler: { _, _ in }, errorHandler: { _ in })
+        _ = try await client.initializeRuntime()
+        let result = try await client.send(
+            method: "agent/run",
+            params: ["goal": .string("Wait")],
+            timeoutPolicy: .none
+        )
+        XCTAssertEqual(result.objectValue?["runId"], .string("slow-run"))
+        await client.shutdown()
+    }
+
     func testHandshakeRuntimeGateNotificationsErrorsAndGracefulShutdown() async throws {
         let logURL = temporaryFileURL(named: "requests.log")
         let shutdownURL = temporaryFileURL(named: "shutdown.txt")
@@ -95,6 +339,9 @@ while IFS= read -r line; do
       ;;
     agent/run)
       printf '{"jsonrpc":"2.0","id":"%s","result":{"runId":"run-1"}}\n' "$id"
+      ;;
+    interaction/resolveApproval)
+      printf '{"jsonrpc":"2.0","id":"%s","result":{"runId":"run-1","approved":true}}\n' "$id"
       ;;
     runtime/info)
       printf '{"jsonrpc":"2.0","id":"%s","error":{"code":-32602,"message":"No info","data":{"protocolCode":"INVALID_PARAMS"}}}\n' "$id"
@@ -163,6 +410,22 @@ done
         } catch {
             XCTAssertEqual(error as? RuntimeClientError, .remote(code: -32602, protocolCode: "INVALID_PARAMS", message: "No info"))
         }
+
+        let approval = try await client.send(
+            method: "interaction/resolveApproval",
+            params: ["runId": .string("run-1"), "approved": .bool(true)]
+        )
+        XCTAssertEqual(approval.objectValue?["approved"], .bool(true))
+        let approvalRequest = try XCTUnwrap(
+            try String(contentsOf: logURL, encoding: .utf8)
+                .split(separator: "\n")
+                .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+                .first { $0.objectValue?["method"] == .string("interaction/resolveApproval") }
+        )
+        XCTAssertEqual(approvalRequest.objectValue?["jsonrpc"], .string("2.0"))
+        XCTAssertNotNil(approvalRequest.objectValue?["id"])
+        XCTAssertEqual(approvalRequest.objectValue?["params"]?.objectValue?["runId"], .string("run-1"))
+        XCTAssertEqual(approvalRequest.objectValue?["params"]?.objectValue?["approved"], .bool(true))
 
         await client.shutdown()
         XCTAssertEqual(try String(contentsOf: shutdownURL, encoding: .utf8), "response-before-eof")
@@ -238,7 +501,12 @@ printf '%s\n' '{"version":1,"id":"old","type":"response","ok":true,"result":{}}'
 sleep 5
 """#)
         let client = RuntimeClient(executableURL: executable, responseTimeout: .seconds(2))
-        try await client.start(notificationHandler: { _, _ in }, errorHandler: { _ in })
+        let terminations = TerminationRecorder()
+        try await client.start(
+            notificationHandler: { _, _ in },
+            errorHandler: { _ in },
+            terminationHandler: { status in await terminations.append(status) }
+        )
         do {
             _ = try await client.send(method: "runtime/info")
             XCTFail("legacy operational response should fail")
@@ -247,6 +515,12 @@ sleep 5
                 return XCTFail("expected protocolViolation, got \(error)")
             }
         }
+        for _ in 0..<50 {
+            if !(await terminations.values).isEmpty { break }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        let terminationValues = await terminations.values
+        XCTAssertFalse(terminationValues.isEmpty, "post-initialization protocol failure must notify the app that the runtime stopped")
         await client.shutdown()
     }
 
@@ -287,6 +561,27 @@ exit 7
         return url
     }
 
+    private func temporaryDirectoryURL() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AdaptiveAgentDesktopTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+
+    private func toolCompletedEvent(
+        runId: String,
+        toolName: String,
+        output: [String: JSONValue]
+    ) -> JSONValue {
+        .object([
+            "schemaVersion": .number(1),
+            "type": .string("tool.completed"),
+            "runId": .string(runId),
+            "payload": .object(["toolName": .string(toolName), "output": .object(output)])
+        ])
+    }
+
     private func shellQuote(_ value: String) -> String {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
@@ -306,5 +601,13 @@ private actor NotificationRecorder {
 
     func append(method: String, params: JSONValue) {
         values.append((method, params))
+    }
+}
+
+private actor TerminationRecorder {
+    private(set) var values: [Int32] = []
+
+    func append(_ status: Int32) {
+        values.append(status)
     }
 }

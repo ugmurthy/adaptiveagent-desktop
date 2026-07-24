@@ -1,69 +1,1241 @@
+import AppKit
+import MarkdownUI
 import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.openSettings) private var openSettings
+    @State private var inspectorPresented = false
 
     var body: some View {
-        HSplitView {
-            Form {
-                Section("Runtime") {
-                    pathRow("Workspace", text: $model.workspacePath, action: model.chooseWorkspace)
-                    pathRow("Agent profile", text: $model.agentConfigPath, action: model.chooseAgent)
-                    TextField("Settings override (auto-discovered if blank)", text: $model.settingsConfigPath)
-                    Button("Connect and initialize", action: model.connect).disabled(model.isBusy || model.isConnected)
-                    Text(model.status).foregroundStyle(.secondary)
-                }
-                Section("Run") {
-                    TextEditor(text: $model.goal).frame(minHeight: 90)
-                    TextField("Session ID (optional)", text: $model.sessionId)
-                    Button("Start run", action: model.startRun).disabled(!model.isConnected || model.isBusy || model.goal.isEmpty)
-                    HStack {
-                        TextField("Chat message", text: $model.message)
-                        Button("Send", action: model.sendChat).disabled(!model.isConnected || model.message.isEmpty)
+        NavigationSplitView {
+            runSidebar
+                .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
+        } detail: {
+            detail
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(minWidth: 980, minHeight: 680)
+        .toolbar { toolbar }
+        .inspector(isPresented: $inspectorPresented) {
+            RuntimeInspectorView()
+                .environmentObject(model)
+                .inspectorColumnWidth(min: 280, ideal: 340, max: 480)
+        }
+        .sheet(isPresented: $model.showConfiguration) {
+            ConfigurationView()
+                .environmentObject(model)
+        }
+        .alert("Quit AdaptiveAgent Desktop?", isPresented: $model.showQuitConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Quit", role: .destructive, action: model.confirmQuit)
+        } message: {
+            Text("One or more runs still need attention or are in progress. The agent runtime will be shut down before the app exits.")
+        }
+        .task { model.bootstrap() }
+    }
+
+    private var runSidebar: some View {
+        VStack(spacing: 0) {
+            List(selection: $model.selectedRunItemID) {
+                if !activeRuns.isEmpty {
+                    Section("Active") {
+                        ForEach(activeRuns) { record in
+                            RunRow(record: record).tag(record.id)
+                        }
                     }
-                    TextField("Current run ID", text: $model.currentRunId)
-                    HStack {
-                        Button("Inspect", action: model.inspect)
-                        Button("Resume", action: model.resume)
-                        Button("Retry", action: model.retry)
-                        Button("Interrupt", action: model.interrupt)
-                    }.disabled(model.currentRunId.isEmpty)
-                    HStack {
-                        TextField("Steering message", text: $model.steerMessage)
-                        Button("Steer", action: model.steer)
-                    }.disabled(model.currentRunId.isEmpty || model.steerMessage.isEmpty)
                 }
-                if let interaction = model.interaction {
-                    interactionView(interaction)
+                if !recentRuns.isEmpty {
+                    Section("Recent") {
+                        ForEach(recentRuns) { record in
+                            RunRow(record: record).tag(record.id)
+                        }
+                    }
+                }
+            }
+            .overlay {
+                if model.runs.isEmpty {
+                    ContentUnavailableView(
+                        "No Runs Yet",
+                        systemImage: "sparkles",
+                        description: Text("Start a run or chat in this workspace.")
+                    )
+                }
+            }
+
+            Divider()
+            HStack {
+                Menu {
+                    Button("New Run", systemImage: "play.fill", action: model.newRun)
+                    Button("New Chat", systemImage: "bubble.left.and.bubble.right.fill", action: model.newChat)
+                } label: {
+                    Label("New", systemImage: "plus")
+                }
+                .menuStyle(.borderlessButton)
+                Spacer()
+                Text("\(model.runs.count)")
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 40)
+        }
+    }
+
+    @ViewBuilder private var detail: some View {
+        if let record = model.selectedRun {
+            RunDetailView(record: record)
+                .environmentObject(model)
+        } else if model.isConnected {
+            NewRequestView()
+                .environmentObject(model)
+        } else {
+            ConnectionStateView()
+                .environmentObject(model)
+        }
+    }
+
+    @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+        ToolbarItem(placement: .principal) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(model.isConnected ? Color.green : model.isBusy ? Color.orange : Color.red)
+                    .frame(width: 7, height: 7)
+                Text(model.isConnected ? (model.agentName.isEmpty ? "Ready" : model.agentName) : model.status)
+                    .lineLimit(1)
+                if model.isConnected, !model.runtimeMode.isEmpty {
+                    Text(model.runtimeMode.uppercased())
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(.quaternary, in: Capsule())
+                }
+            }
+            .help(model.effectiveWorkspaceRoot.isEmpty ? model.workspacePath : model.effectiveWorkspaceRoot)
+        }
+
+        ToolbarItemGroup(placement: .primaryAction) {
+            Menu {
+                Button("New Run", systemImage: "play.fill", action: model.newRun)
+                    .keyboardShortcut("n")
+                Button("New Chat", systemImage: "bubble.left.and.bubble.right.fill", action: model.newChat)
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
+            } label: {
+                Label("New", systemImage: "plus")
+            }
+            .disabled(!model.isConnected)
+
+            Menu {
+                Button("Markdown Appearance…", systemImage: "textformat") {
+                    openSettings()
+                }
+                Divider()
+                Button("Workspace Configuration…", systemImage: "externaldrive") {
+                    model.showConfiguration = true
+                }
+            } label: {
+                Label("Settings", systemImage: "gearshape")
+            }
+            .help("Appearance and workspace settings")
+
+            Button {
+                inspectorPresented.toggle()
+            } label: {
+                Label("Inspector", systemImage: "sidebar.trailing")
+            }
+            .help("Show runtime inspector")
+
+            Button(action: model.requestQuit) {
+                Label("Quit", systemImage: "power")
+            }
+            .help("Quit AdaptiveAgent Desktop (⌘Q)")
+        }
+    }
+
+    private var activeRuns: [AppModel.RunRecord] { model.runs.filter { $0.status.isActive } }
+    private var recentRuns: [AppModel.RunRecord] { model.runs.filter { !$0.status.isActive } }
+}
+
+private struct RunRow: View {
+    let record: AppModel.RunRecord
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: record.kind.systemImage)
+                .foregroundStyle(statusColor)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(record.title)
+                    .lineLimit(2)
+                HStack(spacing: 5) {
+                    if record.isRequestInFlight {
+                        ProgressView().controlSize(.mini)
+                    }
+                    Text(record.status.rawValue)
+                    if !record.files.isEmpty {
+                        Text("·")
+                        Image(systemName: "doc.on.doc")
+                        Text("\(record.files.filter { !$0.isSupportFile }.count)")
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 3)
+    }
+
+    private var statusColor: Color {
+        switch record.status {
+        case .queued, .running: return .accentColor
+        case .waitingForApproval, .waitingForClarification: return .orange
+        case .succeeded: return .green
+        case .failed: return .red
+        case .unknown, .interrupted: return .secondary
+        }
+    }
+}
+
+private struct NewRequestView: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var existingRunID = ""
+
+    var body: some View {
+        VStack(spacing: 26) {
+            Spacer()
+            VStack(spacing: 9) {
+                Image(systemName: model.draftKind == .run ? "sparkles" : "bubble.left.and.bubble.right")
+                    .font(.system(size: 34, weight: .light))
+                    .foregroundStyle(.tint)
+                Text(model.draftKind == .run ? "What should the agent do?" : "Start a conversation")
+                    .font(.title2.weight(.semibold))
+                Text(workspaceSummary)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            VStack(spacing: 14) {
+                Picker("Request type", selection: $model.draftKind) {
+                    ForEach(AppModel.RunKind.allCases) { kind in
+                        Label(kind.rawValue, systemImage: kind.systemImage).tag(kind)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 260)
+
+                ZStack(alignment: .topLeading) {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Color(nsColor: .textBackgroundColor))
+                        .stroke(.separator, lineWidth: 1)
+                    TextEditor(text: $model.draftText)
+                        .font(.body)
+                        .scrollContentBackground(.hidden)
+                        .padding(10)
+                    if model.draftText.isEmpty {
+                        Text(model.draftKind == .run ? "Describe a goal…" : "Write a message…")
+                            .foregroundStyle(.tertiary)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 17)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .frame(maxWidth: 700, minHeight: 150, maxHeight: 230)
+
+                HStack {
+                    if model.isWaitingForRunIdentity {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Creating run…").foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(model.draftKind == .run ? "Start Run" : "Start Chat", action: model.submitDraft)
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.return, modifiers: [.command])
+                        .disabled(model.draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isWaitingForRunIdentity)
+                }
+                .frame(maxWidth: 700)
+            }
+
+            existingRunActions
+            Spacer()
+        }
+        .padding(36)
+    }
+
+    private var existingRunActions: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.title3)
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Existing Run")
+                    .font(.callout.weight(.medium))
+                Text("Enter a run ID to inspect or manage a run available to this runtime.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 16)
+            TextField("Run ID", text: $existingRunID)
+                .textFieldStyle(.roundedBorder)
+                .font(.body.monospaced())
+                .frame(width: 250)
+            RunActionsMenu { method in
+                model.runCommand(method, runId: existingRunID)
+            }
+            .disabled(existingRunID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .padding(.horizontal, 16)
+        .frame(maxWidth: 700, minHeight: 68)
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 11))
+        .overlay {
+            RoundedRectangle(cornerRadius: 11)
+                .stroke(.separator)
+        }
+    }
+
+    private var workspaceSummary: String {
+        let path = model.effectiveWorkspaceRoot.isEmpty ? model.workspacePath : model.effectiveWorkspaceRoot
+        return URL(fileURLWithPath: path).lastPathComponent
+    }
+}
+
+private struct ConnectionStateView: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        VStack(spacing: 16) {
+            if model.isBusy {
+                ProgressView()
+                    .controlSize(.large)
+                Text(model.status).font(.headline)
+                Text(model.workspacePath)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            } else {
+                ContentUnavailableView {
+                    Label("Runtime Not Ready", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(model.status)
+                } actions: {
+                    HStack {
+                        Button("Configure") { model.showConfiguration = true }
+                        Button("Try Again", action: model.connect)
+                            .buttonStyle(.borderedProminent)
+                    }
+                }
+            }
+        }
+        .padding(40)
+    }
+}
+
+private struct RunDetailView: View {
+    @EnvironmentObject private var model: AppModel
+    let record: AppModel.RunRecord
+
+    var body: some View {
+        VStack(spacing: 0) {
+            runHeader
+            Divider()
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 24) {
+                    if record.kind == .chat {
+                        chatTranscript
+                    } else {
+                        runOutput
+                    }
+
+                    if let interaction = record.interaction {
+                        InteractionCard(recordID: record.id, interaction: interaction)
+                            .environmentObject(model)
+                    }
+
+                    if let error = record.errorMessage {
+                        ErrorCard(message: error)
+                    }
+
+                    if !record.files.isEmpty {
+                        FilesChangedView(record: record)
+                            .environmentObject(model)
+                    }
+                }
+                .frame(maxWidth: 820, alignment: .leading)
+                .padding(.horizontal, 34)
+                .padding(.vertical, 28)
+                .frame(maxWidth: .infinity, alignment: .top)
+            }
+
+            if record.kind == .chat {
+                Divider()
+                chatComposer
+            } else if record.status == .running, record.latestRunId != nil {
+                Divider()
+                steerComposer
+            }
+        }
+    }
+
+    private var runHeader: some View {
+        HStack(spacing: 12) {
+            Image(systemName: record.kind.systemImage)
+                .font(.title3)
+                .foregroundStyle(.tint)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(record.title)
+                    .font(.headline)
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    StatusBadge(status: record.status)
+                    if let runId = record.latestRunId {
+                        Text(runId)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+            Spacer()
+            if record.isRequestInFlight { ProgressView().controlSize(.small) }
+            RunActionsMenu { method in
+                model.runCommand(method, for: record.id)
+            }
+            .disabled(record.latestRunId == nil)
+        }
+        .padding(.horizontal, 22)
+        .frame(height: 66)
+    }
+
+    @ViewBuilder private var runOutput: some View {
+        if let output = record.output {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("RESULT").sectionLabel()
+                OutputView(output: output)
+            }
+        } else if record.isRequestInFlight || record.status == .running || record.status == .queued {
+            HStack(spacing: 10) {
+                ProgressView().controlSize(.small)
+                Text("The agent is working…").foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, minHeight: 180)
+        } else if record.interaction == nil && record.errorMessage == nil {
+            Text("No result was returned.")
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, minHeight: 180)
+        }
+    }
+
+    private var chatTranscript: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            ForEach(record.chatMessages) { message in
+                if message.role == .user {
+                    HStack {
+                        Spacer(minLength: 80)
+                        Text(message.content)
+                            .textSelection(.enabled)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            .background(Color.accentColor.opacity(0.13), in: RoundedRectangle(cornerRadius: 12))
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text(model.agentName.isEmpty ? "AGENT" : model.agentName.uppercased())
+                            .sectionLabel()
+                        MarkdownText(content: message.content)
+                    }
+                }
+            }
+            if record.isRequestInFlight {
+                HStack(spacing: 9) {
+                    ProgressView().controlSize(.small)
+                    Text("Thinking…").foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private var chatComposer: some View {
+        HStack(alignment: .bottom, spacing: 10) {
+            TextField("Message \(model.agentName.isEmpty ? "agent" : model.agentName)…", text: $model.chatMessage, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(1...5)
+                .onSubmit(model.sendChatMessage)
+            Button(action: model.sendChatMessage) {
+                Image(systemName: "arrow.up.circle.fill").font(.title2)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(model.chatMessage.isEmpty ? Color.secondary : Color.accentColor)
+            .disabled(record.isRequestInFlight || model.chatMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .help("Send message")
+        }
+        .padding(14)
+        .background(.bar)
+    }
+
+    private var steerComposer: some View {
+        HStack(spacing: 10) {
+            TextField("Steer this run…", text: $model.steerMessage)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(model.steerSelectedRun)
+            Button("Steer", action: model.steerSelectedRun)
+                .disabled(model.steerMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .padding(14)
+        .background(.bar)
+    }
+}
+
+private struct StatusBadge: View {
+    let status: AppModel.RunStatus
+
+    var body: some View {
+        Text(status.rawValue)
+            .font(.caption.weight(.medium))
+            .foregroundStyle(color)
+    }
+
+    private var color: Color {
+        switch status {
+        case .queued, .running: return .accentColor
+        case .waitingForApproval, .waitingForClarification: return .orange
+        case .succeeded: return .green
+        case .failed: return .red
+        case .unknown, .interrupted: return .secondary
+        }
+    }
+}
+
+private struct RunActionsMenu: View {
+    let action: (String) -> Void
+
+    var body: some View {
+        Menu {
+            Button("Inspect", systemImage: "info.circle") { action("run/inspect") }
+            Divider()
+            Button("Resume", systemImage: "play") { action("run/resume") }
+            Button("Retry", systemImage: "arrow.clockwise") { action("run/retry") }
+            Button("Recover", systemImage: "lifepreserver") { action("run/recover") }
+            Button("Continue", systemImage: "arrow.right.circle") { action("run/continue") }
+            Divider()
+            Button("Interrupt", systemImage: "stop.fill", role: .destructive) { action("run/interrupt") }
+        } label: {
+            Label("Run Actions", systemImage: "ellipsis.circle")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+    }
+}
+
+private struct OutputView: View {
+    let output: JSONValue
+
+    var body: some View {
+        if let markdown = output.stringValue {
+            MarkdownText(content: markdown)
+        } else {
+            ScrollView(.horizontal) {
+                Text(output.prettyPrinted)
+                    .font(.body.monospaced())
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(14)
+            .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
+        }
+    }
+}
+
+private struct MarkdownText: View {
+    let content: String
+    private var preferences = MarkdownPreferences()
+
+    init(content: String) {
+        self.content = content
+    }
+
+    var body: some View {
+        Markdown(content)
+            .markdownTheme(theme)
+            .markdownImageProvider(NonLoadingMarkdownImageProvider())
+            .markdownInlineImageProvider(NonLoadingMarkdownImageProvider())
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .lineSpacing(3)
+            .padding(CGFloat(preferences.pageMargin))
+            .background(preferences.pageBackgroundColor)
+    }
+
+    private var theme: Theme {
+        Theme.gitHub
+            .text {
+                FontFamily(preferences.bodyFont.markdownFamily)
+                FontSize(CGFloat(preferences.bodySize))
+                ForegroundColor(Color.primary)
+                BackgroundColor(nil)
+            }
+            .code {
+                FontFamily(preferences.codeFont.markdownFamily)
+                FontSize(CGFloat(preferences.codeSize))
+                BackgroundColor(Color.secondary.opacity(0.12))
+            }
+            .heading1 { configuration in
+                markdownHeading(
+                    configuration,
+                    font: preferences.headingFont.markdownFamily,
+                    size: preferences.heading1Size,
+                    showsDivider: true
+                )
+            }
+            .heading2 { configuration in
+                markdownHeading(
+                    configuration,
+                    font: preferences.headingFont.markdownFamily,
+                    size: preferences.heading2Size,
+                    showsDivider: true
+                )
+            }
+            .heading3 { configuration in
+                markdownHeading(
+                    configuration,
+                    font: preferences.headingFont.markdownFamily,
+                    size: preferences.heading3Size
+                )
+            }
+            .heading4 { configuration in
+                markdownHeading(
+                    configuration,
+                    font: preferences.headingFont.markdownFamily,
+                    size: preferences.heading4Size
+                )
+            }
+            .heading5 { configuration in
+                markdownHeading(
+                    configuration,
+                    font: preferences.headingFont.markdownFamily,
+                    size: preferences.heading5Size
+                )
+            }
+            .heading6 { configuration in
+                markdownHeading(
+                    configuration,
+                    font: preferences.headingFont.markdownFamily,
+                    size: preferences.heading6Size
+                )
+            }
+            .codeBlock { configuration in
+                ScrollView(.horizontal) {
+                    configuration.label
+                        .fixedSize(horizontal: false, vertical: true)
+                        .relativeLineSpacing(.em(0.225))
+                        .markdownTextStyle {
+                            FontFamily(preferences.codeFont.markdownFamily)
+                            FontSize(CGFloat(preferences.codeSize))
+                            BackgroundColor(nil)
+                        }
+                        .padding(16)
+                }
+                .background(Color.secondary.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .markdownMargin(top: 0, bottom: 16)
+            }
+    }
+}
+
+@MainActor private func markdownHeading(
+    _ configuration: BlockConfiguration,
+    font: FontProperties.Family,
+    size: Double,
+    showsDivider: Bool = false
+) -> some View {
+    VStack(alignment: .leading, spacing: 0) {
+        configuration.label
+            .fixedSize(horizontal: false, vertical: true)
+            .relativeLineSpacing(.em(0.125))
+            .markdownMargin(top: 24, bottom: 16)
+            .markdownTextStyle {
+                FontFamily(font)
+                FontWeight(.semibold)
+                FontSize(CGFloat(size))
+                BackgroundColor(nil)
+            }
+        if showsDivider {
+            Divider()
+        }
+    }
+}
+
+private struct NonLoadingMarkdownImageProvider: ImageProvider, InlineImageProvider {
+    func makeImage(url _: URL?) -> some View {
+        Label("Image preview unavailable", systemImage: "photo")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .padding(.vertical, 4)
+    }
+
+    func image(with _: URL, label _: String) async throws -> Image {
+        Image(systemName: "photo")
+    }
+}
+
+private enum MarkdownFont: String, CaseIterable, Identifiable {
+    case system
+    case serif
+    case rounded
+    case monospaced
+
+    var id: Self { self }
+
+    var name: String {
+        switch self {
+        case .system: return "System Sans"
+        case .serif: return "System Serif"
+        case .rounded: return "System Rounded"
+        case .monospaced: return "System Monospaced"
+        }
+    }
+
+    var markdownFamily: FontProperties.Family {
+        switch self {
+        case .system: return .system(.default)
+        case .serif: return .system(.serif)
+        case .rounded: return .system(.rounded)
+        case .monospaced: return .system(.monospaced)
+        }
+    }
+}
+
+private struct MarkdownPreferences: DynamicProperty {
+    private enum Key {
+        static let bodyFont = "markdown.appearance.bodyFont"
+        static let headingFont = "markdown.appearance.headingFont"
+        static let codeFont = "markdown.appearance.codeFont"
+        static let bodySize = "markdown.appearance.bodySize"
+        static let heading1Size = "markdown.appearance.heading1Size"
+        static let heading2Size = "markdown.appearance.heading2Size"
+        static let heading3Size = "markdown.appearance.heading3Size"
+        static let heading4Size = "markdown.appearance.heading4Size"
+        static let heading5Size = "markdown.appearance.heading5Size"
+        static let heading6Size = "markdown.appearance.heading6Size"
+        static let codeSize = "markdown.appearance.codeSize"
+        static let pageMargin = "markdown.appearance.pageMargin"
+        static let usesSystemBackground = "markdown.appearance.usesSystemBackground"
+        static let backgroundRed = "markdown.appearance.backgroundRed"
+        static let backgroundGreen = "markdown.appearance.backgroundGreen"
+        static let backgroundBlue = "markdown.appearance.backgroundBlue"
+    }
+
+    @AppStorage(Key.bodyFont) var bodyFont: MarkdownFont = .system
+    @AppStorage(Key.headingFont) var headingFont: MarkdownFont = .system
+    @AppStorage(Key.codeFont) var codeFont: MarkdownFont = .monospaced
+    @AppStorage(Key.bodySize) var bodySize = 16.0
+    @AppStorage(Key.heading1Size) var heading1Size = 32.0
+    @AppStorage(Key.heading2Size) var heading2Size = 24.0
+    @AppStorage(Key.heading3Size) var heading3Size = 20.0
+    @AppStorage(Key.heading4Size) var heading4Size = 16.0
+    @AppStorage(Key.heading5Size) var heading5Size = 14.0
+    @AppStorage(Key.heading6Size) var heading6Size = 14.0
+    @AppStorage(Key.codeSize) var codeSize = 14.0
+    @AppStorage(Key.pageMargin) var pageMargin = 0.0
+    @AppStorage(Key.usesSystemBackground) var usesSystemBackground = true
+    @AppStorage(Key.backgroundRed) var backgroundRed = 1.0
+    @AppStorage(Key.backgroundGreen) var backgroundGreen = 1.0
+    @AppStorage(Key.backgroundBlue) var backgroundBlue = 1.0
+
+    var bodyFontBinding: Binding<MarkdownFont> { $bodyFont }
+    var headingFontBinding: Binding<MarkdownFont> { $headingFont }
+    var codeFontBinding: Binding<MarkdownFont> { $codeFont }
+    var bodySizeBinding: Binding<Double> { $bodySize }
+    var heading1SizeBinding: Binding<Double> { $heading1Size }
+    var heading2SizeBinding: Binding<Double> { $heading2Size }
+    var heading3SizeBinding: Binding<Double> { $heading3Size }
+    var heading4SizeBinding: Binding<Double> { $heading4Size }
+    var heading5SizeBinding: Binding<Double> { $heading5Size }
+    var heading6SizeBinding: Binding<Double> { $heading6Size }
+    var codeSizeBinding: Binding<Double> { $codeSize }
+    var pageMarginBinding: Binding<Double> { $pageMargin }
+    var usesSystemBackgroundBinding: Binding<Bool> { $usesSystemBackground }
+
+    var pageBackgroundColor: Color {
+        usesSystemBackground
+            ? .clear
+            : Color(red: backgroundRed, green: backgroundGreen, blue: backgroundBlue)
+    }
+
+    var customBackgroundColorBinding: Binding<Color> {
+        Binding(
+            get: { Color(red: backgroundRed, green: backgroundGreen, blue: backgroundBlue) },
+            set: { color in
+                guard let converted = NSColor(color).usingColorSpace(.sRGB) else { return }
+                backgroundRed = Double(converted.redComponent)
+                backgroundGreen = Double(converted.greenComponent)
+                backgroundBlue = Double(converted.blueComponent)
+            }
+        )
+    }
+
+    func reset() {
+        bodyFont = .system
+        headingFont = .system
+        codeFont = .monospaced
+        bodySize = 16
+        heading1Size = 32
+        heading2Size = 24
+        heading3Size = 20
+        heading4Size = 16
+        heading5Size = 14
+        heading6Size = 14
+        codeSize = 14
+        pageMargin = 0
+        usesSystemBackground = true
+        backgroundRed = 1
+        backgroundGreen = 1
+        backgroundBlue = 1
+    }
+}
+
+struct MarkdownSettingsView: View {
+    private var preferences = MarkdownPreferences()
+
+    private static let preview = """
+    # Field Notes
+
+    ## A clearer reading experience
+
+    Good typography lets the content lead. Adjust this page until **headings**, body copy, and `inline code` feel comfortable.
+
+    ### Details matter
+
+    > A generous margin gives every idea room to breathe.
+
+    ```swift
+    let response = await agent.run(goal)
+    ```
+    """
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Form {
+                Section("Typefaces") {
+                    fontPicker("Body", selection: preferences.bodyFontBinding)
+                    fontPicker("Headings", selection: preferences.headingFontBinding)
+                    fontPicker("Code", selection: preferences.codeFontBinding)
+                }
+
+                Section("Type Scale") {
+                    sizeControl("Body", value: preferences.bodySizeBinding, range: 12...24)
+                    sizeControl("Heading 1", value: preferences.heading1SizeBinding, range: 20...48)
+                    sizeControl("Heading 2", value: preferences.heading2SizeBinding, range: 18...40)
+                    sizeControl("Heading 3", value: preferences.heading3SizeBinding, range: 16...32)
+                    sizeControl("Heading 4", value: preferences.heading4SizeBinding, range: 12...28)
+                    sizeControl("Heading 5", value: preferences.heading5SizeBinding, range: 12...24)
+                    sizeControl("Heading 6", value: preferences.heading6SizeBinding, range: 12...24)
+                    sizeControl("Code", value: preferences.codeSizeBinding, range: 10...22)
+                }
+
+                Section("Page") {
+                    sizeControl("Margin", value: preferences.pageMarginBinding, range: 0...64)
+                    Toggle("Use the current surface background", isOn: preferences.usesSystemBackgroundBinding)
+                    ColorPicker(
+                        "Custom background",
+                        selection: preferences.customBackgroundColorBinding,
+                        supportsOpacity: false
+                    )
+                    .disabled(preferences.usesSystemBackground)
                 }
             }
             .formStyle(.grouped)
-            .frame(minWidth: 390)
+            .frame(width: 430)
 
-            VStack(alignment: .leading) {
-                Text("Events").font(.headline)
-                List(Array(model.events.enumerated()), id: \.offset) { _, event in
-                    Text(event).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+            Divider()
+
+            VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("LIVE PREVIEW")
+                        .sectionLabel()
+                    Text("Changes are saved automatically and applied to every markdown response.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                 }
-            }.padding().frame(minWidth: 480)
-        }.frame(minWidth: 900, minHeight: 620)
+
+                ScrollView {
+                    MarkdownText(content: Self.preview)
+                }
+                .background(Color(nsColor: .windowBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(.separator)
+                }
+
+                HStack {
+                    Spacer()
+                    Button("Restore Defaults", action: preferences.reset)
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(width: 900, height: 640)
+    }
+
+    private func fontPicker(_ title: String, selection: Binding<MarkdownFont>) -> some View {
+        Picker(title, selection: selection) {
+            ForEach(MarkdownFont.allCases) { font in
+                Text(font.name).tag(font)
+            }
+        }
+    }
+
+    private func sizeControl(
+        _ title: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>
+    ) -> some View {
+        LabeledContent(title) {
+            HStack(spacing: 10) {
+                Slider(value: value, in: range, step: 1)
+                    .frame(width: 150)
+                Text("\(Int(value.wrappedValue)) pt")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, alignment: .trailing)
+            }
+        }
+    }
+}
+
+private struct InteractionCard: View {
+    @EnvironmentObject private var model: AppModel
+    let recordID: UUID
+    let interaction: AppModel.Interaction
+    @State private var clarificationAnswer = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 9) {
+                Image(systemName: icon)
+                    .foregroundStyle(.orange)
+                Text(title)
+                    .font(.headline)
+                Spacer()
+                if interaction.isResolving { ProgressView().controlSize(.small) }
+            }
+
+            Text(interaction.message)
+            interactionDetails
+
+            if let error = interaction.errorMessage {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+            }
+
+            actions
+        }
+        .padding(18)
+        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.orange.opacity(0.35)))
+    }
+
+    @ViewBuilder private var interactionDetails: some View {
+        switch interaction.kind {
+        case .approval(let toolName, let input, let assistantContent):
+            if let assistantContent, !assistantContent.isEmpty {
+                MarkdownText(content: assistantContent)
+            }
+            if let toolName {
+                LabeledContent("Tool") {
+                    Text(toolName).font(.body.monospaced())
+                }
+            }
+            if let input {
+                ScrollView(.horizontal) {
+                    Text(input.prettyPrinted)
+                        .font(.callout.monospaced())
+                        .textSelection(.enabled)
+                }
+                .padding(10)
+                .background(.background.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
+            }
+        case .clarification(let suggestions):
+            if !suggestions.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack {
+                        ForEach(suggestions, id: \.self) { suggestion in
+                            Button(suggestion) { clarificationAnswer = suggestion }
+                                .buttonStyle(.bordered)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var actions: some View {
+        switch interaction.kind {
+        case .approval:
+            HStack {
+                Spacer()
+                Button("Reject", role: .destructive) { model.resolveApproval(false, for: recordID) }
+                    .disabled(interaction.isResolving)
+                Button("Approve") { model.resolveApproval(true, for: recordID) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(interaction.isResolving)
+            }
+        case .clarification:
+            HStack {
+                TextField("Answer", text: $clarificationAnswer)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { model.resolveClarification(clarificationAnswer, for: recordID) }
+                Button("Send") { model.resolveClarification(clarificationAnswer, for: recordID) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(clarificationAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || interaction.isResolving)
+            }
+        }
+    }
+
+    private var title: String {
+        switch interaction.kind {
+        case .approval: return "Approval required"
+        case .clarification: return "Input required"
+        }
+    }
+
+    private var icon: String {
+        switch interaction.kind {
+        case .approval: return "checkmark.shield"
+        case .clarification: return "questionmark.bubble"
+        }
+    }
+}
+
+private struct ErrorCard: View {
+    let message: String
+
+    var body: some View {
+        Label {
+            Text(message).textSelection(.enabled)
+        } icon: {
+            Image(systemName: "xmark.octagon.fill")
+        }
+        .foregroundStyle(.red)
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.red.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+private struct FilesChangedView: View {
+    @EnvironmentObject private var model: AppModel
+    let record: AppModel.RunRecord
+
+    private var primaryFiles: [AppModel.RunFile] { record.files.filter { !$0.isSupportFile } }
+    private var supportFiles: [AppModel.RunFile] { record.files.filter(\.isSupportFile) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("FILES CHANGED · \(primaryFiles.count)").sectionLabel()
+                Spacer()
+                if record.files.filter({ model.fileExists($0) }).count > 1 {
+                    Button("Show All in Finder") { model.revealAllFiles(for: record.id) }
+                        .buttonStyle(.link)
+                }
+            }
+
+            VStack(spacing: 0) {
+                ForEach(Array(primaryFiles.enumerated()), id: \.element.id) { index, file in
+                    if index > 0 { Divider() }
+                    FileRow(file: file)
+                        .environmentObject(model)
+                }
+            }
+            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
+
+            if !supportFiles.isEmpty {
+                DisclosureGroup("Generated support files (\(supportFiles.count))") {
+                    VStack(spacing: 0) {
+                        ForEach(Array(supportFiles.enumerated()), id: \.element.id) { index, file in
+                            if index > 0 { Divider() }
+                            FileRow(file: file)
+                                .environmentObject(model)
+                        }
+                    }
+                    .padding(.top, 8)
+                }
+                .font(.callout)
+            }
+
+            Text("Tracks successful write_file and edit_file operations. Shell commands may change additional files.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+    }
+}
+
+private struct FileRow: View {
+    @EnvironmentObject private var model: AppModel
+    let file: AppModel.RunFile
+
+    var body: some View {
+        HStack(spacing: 11) {
+            Image(systemName: "doc.text")
+                .foregroundStyle(.secondary)
+                .frame(width: 20)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model.relativeDisplayPath(for: file))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(file.operation.rawValue)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if model.fileExists(file) {
+                Button("Show in Finder") { model.revealFile(file) }
+                    .buttonStyle(.link)
+            } else {
+                Text("File no longer exists")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .contextMenu {
+            Button("Show in Finder") { model.revealFile(file) }
+                .disabled(!model.fileExists(file))
+            Button("Copy Path") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(file.path, forType: .string)
+            }
+        }
+        .help(file.path)
+    }
+}
+
+private struct RuntimeInspectorView: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        Form {
+            Section("Runtime") {
+                LabeledContent("Status", value: model.status)
+                if !model.agentName.isEmpty { LabeledContent("Agent", value: model.agentName) }
+                if !model.agentId.isEmpty { LabeledContent("Agent ID", value: model.agentId) }
+                if !model.runtimeMode.isEmpty { LabeledContent("Mode", value: model.runtimeMode) }
+            }
+
+            Section("Workspace") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Root").font(.caption).foregroundStyle(.secondary)
+                    Text(model.effectiveWorkspaceRoot.isEmpty ? model.workspacePath : model.effectiveWorkspaceRoot)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                }
+                if !model.shellCwd.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Shell directory").font(.caption).foregroundStyle(.secondary)
+                        Text(model.shellCwd).font(.caption.monospaced()).textSelection(.enabled)
+                    }
+                }
+                Button("Edit Configuration") { model.showConfiguration = true }
+            }
+
+            if !model.registeredToolNames.isEmpty {
+                Section("Tools") {
+                    Text(model.registeredToolNames.joined(separator: ", "))
+                        .font(.caption)
+                        .textSelection(.enabled)
+                }
+            }
+
+            Section("Protocol Events") {
+                if model.events.isEmpty {
+                    Text("No events received.").foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(model.events.suffix(100).enumerated()), id: \.offset) { _, event in
+                        Text(event)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .padding(.vertical, 3)
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+private struct ConfigurationView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Workspace Configuration").font(.title2.weight(.semibold))
+                    Text("The runtime resolves settings and the selected agent from this workspace.")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(24)
+
+            Divider()
+
+            Form {
+                Section("Workspace") {
+                    pathRow("Working directory", text: $model.workspacePath, action: model.chooseWorkspace)
+                    Text("This path is sent as runtime/initialize cwd and used as the agent runtime process directory.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Section("Configuration Overrides") {
+                    pathRow("Settings", text: $model.settingsConfigPath, action: model.chooseSettings)
+                    pathRow("Agent", text: $model.agentConfigPath, action: model.chooseAgent)
+                    Text("Leave overrides blank to use agent.settings.json, environment, workspace, and global defaults.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .formStyle(.grouped)
+
+            Divider()
+            HStack {
+                if model.hasActiveWork {
+                    Label("Applying changes interrupts active runs.", systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                Button(model.isConnected ? "Restart Runtime" : "Initialize", action: model.applyConfiguration)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.workspacePath.isEmpty || model.isBusy)
+            }
+            .padding(18)
+        }
+        .frame(width: 680, height: 480)
     }
 
     private func pathRow(_ title: String, text: Binding<String>, action: @escaping () -> Void) -> some View {
-        HStack { TextField(title, text: text); Button("Choose…", action: action) }
-    }
-
-    @ViewBuilder private func interactionView(_ interaction: AppModel.Interaction) -> some View {
-        Section("Input required") {
-            switch interaction {
-            case .approval(_, let message):
-                Text(message)
-                HStack { Button("Approve") { model.resolveApproval(true) }; Button("Reject") { model.resolveApproval(false) } }
-            case .clarification(_, let message):
-                Text(message)
-                TextField("Answer", text: $model.interactionText)
-                Button("Send answer", action: model.resolveClarification).disabled(model.interactionText.isEmpty)
-            }
+        HStack {
+            TextField(title, text: text)
+                .font(.body.monospaced())
+            Button("Choose…", action: action)
         }
+    }
+}
+
+private extension View {
+    func sectionLabel() -> some View {
+        font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .tracking(0.8)
     }
 }

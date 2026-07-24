@@ -50,7 +50,11 @@ The settings override field may be left blank. During initialization the runtime
 }
 ```
 
-Choose a workspace directory and agent profile JSON, connect, and then start a run or send a session chat message. The event pane receives incremental `agent/event` notifications. Run results expose approval and clarification controls when requested, plus steer, inspect, resume, retry, and interrupt controls.
+Choose a workspace directory and agent profile JSON, connect, and then start a run or send a session chat message. The event pane receives incremental `agent/event` notifications. Run results expose approval and clarification controls when requested, plus steering and a **Run Actions** menu with inspect, resume, retry, recover, continue, and interrupt operations.
+
+When no run is selected, use the **Existing Run** field on the new-request screen to enter a run ID and invoke the same actions. The app attaches that ID as a tracked sidebar record so status changes, inspection output, and errors remain visible in the normal run detail. The ID must be available to the initialized runtime: runs from previous launches generally require Postgres, while memory-mode runs are available only for the lifetime of their runtime process.
+
+The standard **About AdaptiveAgent Desktop** panel displays the marketing version and build number configured in `project.yml`.
 
 ## Architecture and security boundary
 

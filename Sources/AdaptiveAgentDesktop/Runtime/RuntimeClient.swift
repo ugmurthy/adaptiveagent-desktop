@@ -40,6 +40,12 @@ struct NDJSONBuffer {
     }
 }
 
+enum RuntimeResponseTimeout {
+    case standard
+    case duration(Duration)
+    case none
+}
+
 actor RuntimeClient {
     typealias NotificationHandler = @Sendable (String, JSONValue) async -> Void
     typealias ErrorHandler = @Sendable (String) async -> Void
@@ -89,6 +95,7 @@ actor RuntimeClient {
     }
 
     func start(
+        workingDirectoryURL: URL? = nil,
         notificationHandler: @escaping NotificationHandler,
         errorHandler: @escaping ErrorHandler,
         terminationHandler: @escaping TerminationHandler = { _ in }
@@ -108,6 +115,7 @@ actor RuntimeClient {
             throw RuntimeClientError.executableMissing
         }
         process.executableURL = executable
+        process.currentDirectoryURL = workingDirectoryURL
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
@@ -157,7 +165,11 @@ actor RuntimeClient {
         return result
     }
 
-    func send(method: String, params: [String: JSONValue] = [:]) async throws -> JSONValue {
+    func send(
+        method: String,
+        params: [String: JSONValue] = [:],
+        timeoutPolicy: RuntimeResponseTimeout = .standard
+    ) async throws -> JSONValue {
         guard protocolInitialized else { throw RuntimeClientError.notInitialized("Bridge protocol") }
         guard !isShuttingDown else { throw RuntimeClientError.protocolViolation("runtime is shutting down") }
         guard method != "initialize", method != "runtime/initialize", method != "runtime/shutdown" else {
@@ -166,23 +178,31 @@ actor RuntimeClient {
         if method.hasPrefix("agent/") || method.hasPrefix("run/") || method.hasPrefix("interaction/") {
             guard runtimeInitialized else { throw RuntimeClientError.notInitialized("Agent runtime") }
         }
-        return try await request(method: method, params: params)
+        return try await request(method: method, params: params, timeoutPolicy: timeoutPolicy)
     }
 
     private func request(
         method: String,
         params: [String: JSONValue] = [:],
         id: JSONRPCID = .string(UUID().uuidString),
-        timeout: Duration? = nil
+        timeoutPolicy: RuntimeResponseTimeout = .standard
     ) async throws -> JSONValue {
         guard process.isRunning else { throw RuntimeClientError.terminated(process.terminationStatus) }
         let data = try ProtocolCodec.encodeRequest(id: id, method: method, params: params)
         return try await withCheckedThrowingContinuation { continuation in
             pending[id] = continuation
-            responseTimeoutTasks[id] = Task { [weak self, responseTimeout] in
-                try? await Task.sleep(for: timeout ?? responseTimeout)
-                guard !Task.isCancelled else { return }
-                await self?.responseTimedOut(id: id, method: method)
+            let timeout: Duration?
+            switch timeoutPolicy {
+            case .standard: timeout = responseTimeout
+            case .duration(let duration): timeout = duration
+            case .none: timeout = nil
+            }
+            if let timeout {
+                responseTimeoutTasks[id] = Task { [weak self] in
+                    try? await Task.sleep(for: timeout)
+                    guard !Task.isCancelled else { return }
+                    await self?.responseTimedOut(id: id, method: method)
+                }
             }
             do { try stdinPipe.fileHandleForWriting.write(contentsOf: data) }
             catch {
@@ -202,7 +222,10 @@ actor RuntimeClient {
         expectedTermination = true
         if protocolInitialized {
             do {
-                _ = try await request(method: "runtime/shutdown", timeout: shutdownResponseTimeout)
+                _ = try await request(
+                    method: "runtime/shutdown",
+                    timeoutPolicy: .duration(shutdownResponseTimeout)
+                )
             } catch {
                 await errorHandler?(error.localizedDescription)
             }
@@ -234,14 +257,20 @@ actor RuntimeClient {
         let stdoutSink = stdoutContinuation
         stdout.readabilityHandler = { handle in
             let data = handle.availableData
-            if data.isEmpty { stdoutSink?.finish() }
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                stdoutSink?.finish()
+            }
             else { stdoutSink?.yield(data) }
         }
         let stderr = stderrPipe.fileHandleForReading
         let stderrSink = stderrContinuation
         stderr.readabilityHandler = { handle in
             let data = handle.availableData
-            if data.isEmpty { stderrSink?.finish() }
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                stderrSink?.finish()
+            }
             else { stderrSink?.yield(data) }
         }
         stdoutTask = Task { [weak self] in
@@ -341,6 +370,7 @@ actor RuntimeClient {
         responseTimeoutTasks.values.forEach { $0.cancel() }
         responseTimeoutTasks.removeAll()
         continuations.forEach { $0.resume(throwing: error) }
+        stopReaders()
         if !expectedTermination {
             await errorHandler?(error.localizedDescription)
             await terminationHandler?(status)
@@ -379,8 +409,13 @@ actor RuntimeClient {
         responseTimeoutTasks.values.forEach { $0.cancel() }
         responseTimeoutTasks.removeAll()
         continuations.forEach { $0.resume(throwing: reportedError) }
-        expectedTermination = true
-        if process.isRunning { process.terminate() }
+        let shouldNotifyTermination = protocolInitialized
+        expectedTermination = !shouldNotifyTermination
+        if process.isRunning {
+            process.terminate()
+        } else if shouldNotifyTermination {
+            await terminationHandler?(process.terminationStatus)
+        }
         await errorHandler?(reportedError.localizedDescription)
     }
 

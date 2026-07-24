@@ -20,7 +20,7 @@
     "enabled": false,
     "level": "debug",
     "destination": "file",
-    "filePath": "./logs/engineering.log",
+    "filePath": "./logs/adaptiveagent-desktop.log",
     "pretty": true
   },
   "interaction": {
