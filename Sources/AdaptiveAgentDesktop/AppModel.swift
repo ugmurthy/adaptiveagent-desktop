@@ -4,12 +4,53 @@ import Foundation
 
 @MainActor
 final class AppModel: ObservableObject {
+    static let supportedRuntimeModes = ["memory", "postgres"]
+    static let supportedProviders = ["openrouter", "ollama", "mistral", "mesh"]
+    static let supportedApprovalModes = ["auto", "manual", "reject"]
+    static let supportedClarificationModes = ["interactive", "fail"]
+
     enum RunKind: String, CaseIterable, Identifiable {
         case run = "Run"
         case chat = "Chat"
 
         var id: Self { self }
         var systemImage: String { self == .run ? "play.fill" : "bubble.left.and.bubble.right.fill" }
+    }
+
+    enum RunDetailMode: Equatable {
+        case results
+        case inspection
+    }
+
+    struct RunTab: Identifiable, Equatable {
+        let id: UUID
+        var selectedRunID: UUID?
+        var draftKind: RunKind
+        var draftText: String
+        var chatMessage: String
+        var steerMessage: String
+        var scrollPosition: String?
+        var detailMode: RunDetailMode
+
+        init(
+            id: UUID = UUID(),
+            selectedRunID: UUID? = nil,
+            draftKind: RunKind = .run,
+            draftText: String = "",
+            chatMessage: String = "",
+            steerMessage: String = "",
+            scrollPosition: String? = nil,
+            detailMode: RunDetailMode = .results
+        ) {
+            self.id = id
+            self.selectedRunID = selectedRunID
+            self.draftKind = draftKind
+            self.draftText = draftText
+            self.chatMessage = chatMessage
+            self.steerMessage = steerMessage
+            self.scrollPosition = scrollPosition
+            self.detailMode = detailMode
+        }
     }
 
     enum RunStatus: String {
@@ -28,6 +69,12 @@ final class AppModel: ObservableObject {
             case .unknown, .succeeded, .failed, .interrupted: return false
             }
         }
+    }
+
+    enum AuxiliaryOperation: Hashable {
+        case inspect
+        case steer
+        case interrupt
     }
 
     struct ChatMessage: Identifiable, Equatable {
@@ -69,14 +116,26 @@ final class AppModel: ObservableObject {
         var runIds: [String] = []
         var status: RunStatus = .queued
         var output: JSONValue?
+        var inspection: JSONValue?
         var errorMessage: String?
         var interaction: Interaction?
         var files: [RunFile] = []
         var chatMessages: [ChatMessage] = []
         var isRequestInFlight = false
+        var auxiliaryOperations: Set<AuxiliaryOperation> = []
+        var auxiliaryErrorMessage: String?
 
         var latestRunId: String? { runIds.last }
+        var hasRequestInFlight: Bool { isRequestInFlight || !auxiliaryOperations.isEmpty }
     }
+
+    private struct InspectionCacheMetadata {
+        let runId: String
+        let eventGeneration: UInt64
+        let fetchedAt: ContinuousClock.Instant
+    }
+
+    private static let inspectionMinimumRefreshInterval: Duration = .seconds(5)
 
     @Published var workspacePath = ""
     @Published var agentConfigPath = ""
@@ -95,12 +154,16 @@ final class AppModel: ObservableObject {
     @Published var shellCwd = ""
     @Published var registeredToolNames: [String] = []
 
+    @Published var configuredRuntimeMode = ""
+    @Published var configuredProvider = ""
+    @Published var configuredModel = ""
+    @Published var configuredApprovalMode = "manual"
+    @Published var configuredClarificationMode = "interactive"
+    @Published private(set) var settingsConfigurationError: String?
+
     @Published var runs: [RunRecord] = []
-    @Published var selectedRunItemID: UUID?
-    @Published var draftKind: RunKind = .run
-    @Published var draftText = ""
-    @Published var chatMessage = ""
-    @Published var steerMessage = ""
+    @Published private(set) var tabs: [RunTab] = []
+    @Published private(set) var selectedTabID: UUID?
 
     private var client: RuntimeClient
     private var didBootstrap = false
@@ -109,6 +172,10 @@ final class AppModel: ObservableObject {
     private var runToRoot: [String: String] = [:]
     private var recordByRoot: [String: UUID] = [:]
     private var resolvedInteractions: Set<UUID> = []
+    private var loadedSettingsConfigPath: String?
+    private var eventGenerationByRunID: [String: UInt64] = [:]
+    private var inspectionCacheMetadata: [UUID: InspectionCacheMetadata] = [:]
+    private let inspectionClock = ContinuousClock()
 
     init(
         client: RuntimeClient = RuntimeClient(),
@@ -117,13 +184,24 @@ final class AppModel: ObservableObject {
         let launchDirectory = (workingDirectoryURL
             ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true))
             .standardizedFileURL
+        let initialTab = RunTab()
         self.client = client
+        tabs = [initialTab]
+        selectedTabID = initialTab.id
         workspacePath = launchDirectory.path
         let localSettings = launchDirectory.appendingPathComponent("agent.settings.json", isDirectory: false)
         if FileManager.default.isReadableFile(atPath: localSettings.path) {
             settingsConfigPath = localSettings.path
         }
+        reloadSettingsConfiguration()
     }
+
+    var selectedTab: RunTab? {
+        guard let selectedTabID else { return nil }
+        return tabs.first { $0.id == selectedTabID }
+    }
+
+    var selectedRunItemID: UUID? { selectedTab?.selectedRunID }
 
     var selectedRun: RunRecord? {
         guard let selectedRunItemID else { return nil }
@@ -131,7 +209,7 @@ final class AppModel: ObservableObject {
     }
 
     var hasActiveWork: Bool {
-        runs.contains { $0.status.isActive || $0.isRequestInFlight }
+        runs.contains { $0.status.isActive || $0.hasRequestInFlight }
     }
 
     var isWaitingForRunIdentity: Bool { !pendingRootAssignments.isEmpty }
@@ -152,6 +230,14 @@ final class AppModel: ObservableObject {
     }
 
     func applyConfiguration() {
+        let settingsPath = settingsConfigPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if loadedSettingsConfigPath != settingsPath {
+            reloadSettingsConfiguration()
+        }
+        guard settingsConfigurationError == nil else {
+            showConfiguration = true
+            return
+        }
         showConfiguration = false
         guard !isBusy else { return }
         isBusy = true
@@ -159,9 +245,9 @@ final class AppModel: ObservableObject {
             if isConnected {
                 status = "Restarting runtime…"
                 await client.shutdown()
+                client = RuntimeClient()
             }
             markActiveRunsInterrupted()
-            client = RuntimeClient()
             isConnected = false
             resetRuntimeMappings()
             await connectRuntime()
@@ -178,6 +264,7 @@ final class AppModel: ObservableObject {
         workspacePath = url.path
         let localSettings = url.appendingPathComponent("agent.settings.json", isDirectory: false)
         settingsConfigPath = FileManager.default.isReadableFile(atPath: localSettings.path) ? localSettings.path : ""
+        reloadSettingsConfiguration()
     }
 
     func chooseAgent() {
@@ -192,51 +279,206 @@ final class AppModel: ObservableObject {
         panel.allowedContentTypes = [.json]
         guard panel.runModal() == .OK else { return }
         settingsConfigPath = panel.url?.path ?? ""
+        reloadSettingsConfiguration()
+    }
+
+    func reloadSettingsConfiguration() {
+        configuredRuntimeMode = ""
+        configuredProvider = ""
+        configuredModel = ""
+        configuredApprovalMode = "manual"
+        configuredClarificationMode = "interactive"
+        settingsConfigurationError = nil
+
+        let path = settingsConfigPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        loadedSettingsConfigPath = path
+        guard !path.isEmpty else { return }
+
+        do {
+            let data = try Data(contentsOf: URL(fileURLWithPath: path))
+            let settings = try JSONDecoder().decode(DesktopSettingsSeed.self, from: data)
+            var unsupportedValues: [String] = []
+
+            if let mode = settings.runtime?.mode {
+                if Self.supportedRuntimeModes.contains(mode) {
+                    configuredRuntimeMode = mode
+                } else {
+                    unsupportedValues.append("runtime.mode \(mode)")
+                }
+            }
+
+            if let provider = settings.model?.overrideProvider {
+                if Self.supportedProviders.contains(provider) {
+                    configuredProvider = provider
+                } else {
+                    unsupportedValues.append("model.overrideProvider \(provider)")
+                }
+            }
+            configuredModel = settings.model?.overrideModel ?? ""
+
+            if let approvalMode = settings.interaction?.approvalMode {
+                if Self.supportedApprovalModes.contains(approvalMode) {
+                    configuredApprovalMode = approvalMode
+                } else {
+                    unsupportedValues.append("interaction.approvalMode \(approvalMode)")
+                }
+            } else if let autoApprove = settings.interaction?.autoApprove {
+                configuredApprovalMode = autoApprove ? "auto" : "manual"
+            }
+
+            if let clarificationMode = settings.interaction?.clarificationMode {
+                if Self.supportedClarificationModes.contains(clarificationMode) {
+                    configuredClarificationMode = clarificationMode
+                } else {
+                    unsupportedValues.append("interaction.clarificationMode \(clarificationMode)")
+                }
+            } else if let interactive = settings.interaction?.interactive {
+                configuredClarificationMode = interactive ? "interactive" : "fail"
+            }
+
+            if !unsupportedValues.isEmpty {
+                settingsConfigurationError = "Unsupported settings value: \(unsupportedValues.joined(separator: ", "))."
+            }
+        } catch {
+            settingsConfigurationError = "Could not load settings values: \(error.localizedDescription)"
+        }
+    }
+
+    func tab(withID tabID: UUID) -> RunTab? {
+        tabs.first { $0.id == tabID }
+    }
+
+    func selectTab(_ tabID: UUID) {
+        guard tabs.contains(where: { $0.id == tabID }) else { return }
+        selectedTabID = tabID
+    }
+
+    func closeTab(_ tabID: UUID) {
+        guard let closingIndex = tabs.firstIndex(where: { $0.id == tabID }) else { return }
+        let wasSelected = selectedTabID == tabID
+        tabs.remove(at: closingIndex)
+
+        if tabs.isEmpty {
+            let replacement = RunTab()
+            tabs = [replacement]
+            selectedTabID = replacement.id
+        } else if wasSelected {
+            selectedTabID = tabs[min(closingIndex, tabs.count - 1)].id
+        }
+    }
+
+    func openRunTab(_ recordID: UUID) {
+        guard let record = runs.first(where: { $0.id == recordID }) else { return }
+        if let existing = tabs.first(where: { $0.selectedRunID == recordID }) {
+            selectedTabID = existing.id
+            return
+        }
+
+        if let index = selectedTabIndex, isReusableDraft(tabs[index]) {
+            tabs[index].selectedRunID = recordID
+            tabs[index].draftKind = record.kind
+            tabs[index].scrollPosition = nil
+            return
+        }
+
+        let tab = RunTab(selectedRunID: recordID, draftKind: record.kind)
+        tabs.append(tab)
+        selectedTabID = tab.id
     }
 
     func newRun() {
-        draftKind = .run
-        draftText = ""
-        selectedRunItemID = nil
+        openDraftTab(kind: .run)
     }
 
     func newChat() {
-        draftKind = .chat
-        draftText = ""
-        selectedRunItemID = nil
+        openDraftTab(kind: .chat)
     }
 
-    func submitDraft() {
-        let text = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+    func setDraftKind(_ kind: RunKind, forTab tabID: UUID) {
+        updateTab(tabID) { $0.draftKind = kind }
+    }
+
+    func setDraftText(_ text: String, forTab tabID: UUID) {
+        updateTab(tabID) { $0.draftText = text }
+    }
+
+    func setChatMessage(_ message: String, forTab tabID: UUID) {
+        updateTab(tabID) { $0.chatMessage = message }
+    }
+
+    func setSteerMessage(_ message: String, forTab tabID: UUID) {
+        updateTab(tabID) { $0.steerMessage = message }
+    }
+
+    func setScrollPosition(_ position: String?, forTab tabID: UUID) {
+        updateTab(tabID) { $0.scrollPosition = position }
+    }
+
+    func setDetailMode(_ mode: RunDetailMode, forTab tabID: UUID) {
+        updateTab(tabID) {
+            $0.detailMode = mode
+            $0.scrollPosition = nil
+        }
+    }
+
+    private var selectedTabIndex: Int? {
+        guard let selectedTabID else { return nil }
+        return tabs.firstIndex { $0.id == selectedTabID }
+    }
+
+    private func openDraftTab(kind: RunKind) {
+        let tab = RunTab(draftKind: kind)
+        tabs.append(tab)
+        selectedTabID = tab.id
+    }
+
+    private func isReusableDraft(_ tab: RunTab) -> Bool {
+        tab.selectedRunID == nil
+            && tab.draftText.isEmpty
+            && tab.chatMessage.isEmpty
+            && tab.steerMessage.isEmpty
+    }
+
+    private func updateTab(_ tabID: UUID, _ update: (inout RunTab) -> Void) {
+        guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
+        update(&tabs[index])
+    }
+
+    func submitDraft(in tabID: UUID) {
+        guard let tabIndex = tabs.firstIndex(where: { $0.id == tabID && $0.selectedRunID == nil }) else { return }
+        let kind = tabs[tabIndex].draftKind
+        let text = tabs[tabIndex].draftText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard isConnected, !text.isEmpty, !isWaitingForRunIdentity else { return }
 
         let recordID = UUID()
-        let sessionId = draftKind == .chat ? UUID().uuidString : nil
+        let sessionId = kind == .chat ? UUID().uuidString : nil
         var record = RunRecord(
             id: recordID,
-            kind: draftKind,
+            kind: kind,
             title: title(for: text),
             sessionId: sessionId,
             status: .queued,
             isRequestInFlight: true
         )
-        if draftKind == .chat {
+        if kind == .chat {
             record.chatMessages.append(ChatMessage(role: .user, content: text))
         }
         runs.insert(record, at: 0)
-        selectedRunItemID = recordID
-        draftText = ""
+        tabs[tabIndex].selectedRunID = recordID
+        tabs[tabIndex].draftText = ""
+        tabs[tabIndex].scrollPosition = nil
 
-        let method = draftKind == .run ? "agent/run" : "agent/chat"
-        var fields: [String: JSONValue] = [draftKind == .run ? "goal" : "message": .string(text)]
+        let method = kind == .run ? "agent/run" : "agent/chat"
+        var fields: [String: JSONValue] = [kind == .run ? "goal" : "message": .string(text)]
         if let sessionId { fields["sessionId"] = .string(sessionId) }
         beginAgentRequest(method: method, fields: fields, recordID: recordID)
     }
 
-    func sendChatMessage() {
-        let text = chatMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let recordID = selectedRunItemID,
-              let index = runs.firstIndex(where: { $0.id == recordID }),
+    func sendChatMessage(in tabID: UUID) {
+        guard let tabIndex = tabs.firstIndex(where: { $0.id == tabID }),
+              let recordID = tabs[tabIndex].selectedRunID else { return }
+        let text = tabs[tabIndex].chatMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let index = runs.firstIndex(where: { $0.id == recordID }),
               runs[index].kind == .chat,
               !runs[index].isRequestInFlight,
               !text.isEmpty,
@@ -249,7 +491,7 @@ final class AppModel: ObservableObject {
         runs[index].interaction = nil
         var fields: [String: JSONValue] = ["message": .string(text)]
         if let sessionId = runs[index].sessionId { fields["sessionId"] = .string(sessionId) }
-        chatMessage = ""
+        tabs[tabIndex].chatMessage = ""
         beginAgentRequest(method: "agent/chat", fields: fields, recordID: recordID)
     }
 
@@ -271,7 +513,7 @@ final class AppModel: ObservableObject {
                     params: ["runId": .string(interaction.runId), "approved": .bool(approved)],
                     timeoutPolicy: .none
                 )
-                acceptResult(result, for: recordID)
+                acceptApprovalResolution(result, approved: approved, for: recordID)
             } catch {
                 interactionFailed(error, for: recordID)
             }
@@ -305,13 +547,17 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func steerSelectedRun() {
-        let message = steerMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let recordID = selectedRunItemID,
-              let index = runs.firstIndex(where: { $0.id == recordID }),
+    func steerRun(in tabID: UUID) {
+        guard let tabIndex = tabs.firstIndex(where: { $0.id == tabID }),
+              let recordID = tabs[tabIndex].selectedRunID else { return }
+        let message = tabs[tabIndex].steerMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let index = runs.firstIndex(where: { $0.id == recordID }),
               let runId = runs[index].latestRunId,
+              !runs[index].auxiliaryOperations.contains(.steer),
               !message.isEmpty else { return }
-        steerMessage = ""
+        tabs[tabIndex].steerMessage = ""
+        runs[index].auxiliaryOperations.insert(.steer)
+        runs[index].auxiliaryErrorMessage = nil
         Task {
             do {
                 let result = try await client.send(
@@ -319,9 +565,9 @@ final class AppModel: ObservableObject {
                     params: ["runId": .string(runId), "message": .string(message)],
                     timeoutPolicy: .none
                 )
-                acceptResult(result, for: recordID)
+                acceptSteeringResult(result, for: recordID)
             } catch {
-                recordRequestFailed(error, for: recordID)
+                auxiliaryRequestFailed(error, operation: .steer, for: recordID)
             }
         }
     }
@@ -331,7 +577,8 @@ final class AppModel: ObservableObject {
         guard isConnected, !runId.isEmpty else { return }
 
         if let record = runs.first(where: { $0.runIds.contains(runId) }) {
-            selectedRunItemID = record.id
+            openRunTab(record.id)
+            if method == "run/inspect" { showInspection(for: record.id) }
             sendRunCommand(method, runId: runId, recordID: record.id)
             return
         }
@@ -346,28 +593,57 @@ final class AppModel: ObservableObject {
             status: .unknown
         ), at: 0)
         bind(rootRunId: runId, to: recordID)
-        selectedRunItemID = recordID
+        openRunTab(recordID)
+        if method == "run/inspect" { showInspection(for: recordID) }
         sendRunCommand(method, runId: runId, recordID: recordID)
     }
 
     func runCommand(_ method: String, for recordID: UUID) {
         guard let index = runs.firstIndex(where: { $0.id == recordID }),
               let runId = runs[index].latestRunId else { return }
+        if method == "run/inspect" { showInspection(for: recordID) }
         sendRunCommand(method, runId: runId, recordID: recordID)
+    }
+
+    private func showInspection(for recordID: UUID) {
+        guard let tabID = tabs.first(where: { $0.selectedRunID == recordID })?.id else { return }
+        setDetailMode(.inspection, forTab: tabID)
     }
 
     private func sendRunCommand(_ method: String, runId: String, recordID: UUID) {
         guard let index = runs.firstIndex(where: { $0.id == recordID }) else { return }
+        if method == "run/inspect", canReuseInspection(for: recordID, runId: runId, at: index) {
+            runs[index].auxiliaryErrorMessage = nil
+            return
+        }
         let longRunning = ["run/resume", "run/retry", "run/recover", "run/continue"].contains(method)
         let mayCreateRun = ["run/recover", "run/continue"].contains(method)
-        runs[index].isRequestInFlight = true
-        runs[index].errorMessage = nil
-        if longRunning {
-            runs[index].status = .running
+        let auxiliaryOperation: AuxiliaryOperation? = switch method {
+        case "run/inspect": .inspect
+        case "run/interrupt": .interrupt
+        default: nil
         }
-        if mayCreateRun {
-            pendingRootAssignments.append(recordID)
+        guard !mayCreateRun || !isWaitingForRunIdentity else { return }
+        if let auxiliaryOperation {
+            guard !runs[index].auxiliaryOperations.contains(auxiliaryOperation) else { return }
+            if method != "run/inspect" {
+                inspectionCacheMetadata.removeValue(forKey: recordID)
+            }
+            runs[index].auxiliaryOperations.insert(auxiliaryOperation)
+            runs[index].auxiliaryErrorMessage = nil
+        } else {
+            guard !runs[index].isRequestInFlight else { return }
+            inspectionCacheMetadata.removeValue(forKey: recordID)
+            runs[index].isRequestInFlight = true
+            runs[index].errorMessage = nil
+            if longRunning {
+                runs[index].status = .running
+            }
+            if mayCreateRun {
+                pendingRootAssignments.append(recordID)
+            }
         }
+        let inspectionEventGeneration = method == "run/inspect" ? eventGenerationByRunID[runId, default: 0] : nil
         Task {
             do {
                 let result = try await client.send(
@@ -375,20 +651,32 @@ final class AppModel: ObservableObject {
                     params: ["runId": .string(runId)],
                     timeoutPolicy: longRunning ? .none : .standard
                 )
-                appendEvent("\(method) response\n\(result.prettyPrinted)")
-                if method == "run/inspect" {
-                    acceptInspection(result, for: recordID)
-                } else {
-                    acceptResult(result, for: recordID)
-                    if method == "run/interrupt",
-                       let index = runs.firstIndex(where: { $0.id == recordID }) {
-                        runs[index].status = .interrupted
-                    }
-                }
+                try acceptRunCommandResult(
+                    result,
+                    method: method,
+                    for: recordID,
+                    requestedRunId: runId,
+                    inspectionEventGeneration: inspectionEventGeneration
+                )
             } catch {
-                recordRequestFailed(error, for: recordID)
+                if let auxiliaryOperation {
+                    auxiliaryRequestFailed(error, operation: auxiliaryOperation, for: recordID)
+                } else {
+                    recordRequestFailed(error, for: recordID)
+                }
             }
         }
+    }
+
+    private func canReuseInspection(for recordID: UUID, runId: String, at index: Int) -> Bool {
+        guard runs[index].inspection != nil,
+              let metadata = inspectionCacheMetadata[recordID],
+              metadata.runId == runId else { return false }
+        let hasNotChanged = eventGenerationByRunID[runId, default: 0] == metadata.eventGeneration
+        let isWithinRefreshInterval = inspectionClock.now
+            < metadata.fetchedAt.advanced(by: Self.inspectionMinimumRefreshInterval)
+        let isTerminal = !runs[index].status.isActive && runs[index].status != .unknown
+        return isWithinRefreshInterval || (hasNotChanged && isTerminal)
     }
 
     func revealFile(_ file: RunFile) {
@@ -507,13 +795,85 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // Internal for focused protocol result tests.
+    func acceptApprovalResolution(_ result: JSONValue, approved: Bool, for recordID: UUID) {
+        guard !approved else {
+            acceptResult(result, for: recordID)
+            return
+        }
+
+        appendEvent("Approval resolution\n\(result.prettyPrinted)")
+        guard let index = runs.firstIndex(where: { $0.id == recordID }) else { return }
+        runs[index].isRequestInFlight = false
+        runs[index].interaction = nil
+        resolvedInteractions.remove(recordID)
+
+        guard let run = result.objectValue?["run"]?.objectValue,
+              let status = runtimeStatus(run["status"]?.stringValue) else {
+            recordRequestFailed(
+                RuntimeClientError.protocolViolation("approval rejection response is missing run status"),
+                for: recordID
+            )
+            return
+        }
+        runs[index].status = status
+        if status == .failed {
+            runs[index].errorMessage = run["errorMessage"]?.stringValue
+                ?? run["error"]?.stringValue
+                ?? "Approval was rejected."
+        }
+    }
+
+    // Internal for focused protocol result tests.
+    func acceptRunCommandResult(
+        _ result: JSONValue,
+        method: String,
+        for recordID: UUID,
+        requestedRunId: String? = nil,
+        inspectionEventGeneration: UInt64? = nil
+    ) throws {
+        let diagnostic = method == "run/inspect"
+            ? Self.inspectionDiagnostic(result)
+            : Self.protocolDiagnostic(result)
+        appendEvent("\(method) response\n\(diagnostic)")
+        switch method {
+        case "run/inspect":
+            finishAuxiliaryOperation(.inspect, for: recordID)
+            acceptInspection(
+                result,
+                for: recordID,
+                requestedRunId: requestedRunId,
+                eventGeneration: inspectionEventGeneration
+            )
+        case "run/interrupt":
+            finishAuxiliaryOperation(.interrupt, for: recordID)
+            if let index = runs.firstIndex(where: { $0.id == recordID }), runs[index].status.isActive {
+                runs[index].status = .interrupted
+            }
+        case "run/recover":
+            guard let recoveredResult = result.objectValue?["result"] else {
+                throw RuntimeClientError.protocolViolation("run/recover response is missing its nested result")
+            }
+            acceptResult(recoveredResult, for: recordID)
+        default:
+            acceptResult(result, for: recordID)
+        }
+    }
+
+    // Internal for focused protocol result tests.
+    func acceptSteeringResult(_ result: JSONValue, for recordID: UUID) {
+        appendEvent("run/steer response\n\(result.prettyPrinted)")
+        finishAuxiliaryOperation(.steer, for: recordID)
+    }
+
     // Internal for focused event/result tests.
-    func receive(method: String, params: JSONValue) {
-        appendEvent("\(method)\n\(params.prettyPrinted)")
+    func receive(method: String, params: JSONValue, diagnostic: String? = nil) {
+        appendEvent("\(method)\n\(diagnostic ?? Self.protocolDiagnostic(params))")
         guard method == "agent/event",
               let event = params.objectValue,
               let type = event["type"]?.stringValue,
               let runId = event["runId"]?.stringValue else { return }
+        eventGenerationByRunID[runId, default: 0] &+= 1
         let payload = event["payload"]?.objectValue ?? [:]
 
         if type == "delegate.spawned",
@@ -536,22 +896,26 @@ final class AppModel: ObservableObject {
             return
         }
 
+        let rootRunId = payload["rootRunId"]?.stringValue ?? runToRoot[runId] ?? runId
+        let isRootEvent = rootRunId == runId
         switch type {
         case "run.started":
+            guard isRootEvent else { return }
             updateStatus(.running, forRunId: runId)
         case "run.completed":
-            guard let index = recordIndex(forRunId: runId) else { return }
+            guard isRootEvent, let index = recordIndex(forRunId: runId) else { return }
             runs[index].status = .succeeded
             runs[index].isRequestInFlight = false
             runs[index].interaction = nil
             if let output = payload["output"] { applyOutput(output, to: index) }
         case "run.failed", "replan.required":
-            guard let index = recordIndex(forRunId: runId) else { return }
+            guard isRootEvent, let index = recordIndex(forRunId: runId) else { return }
             runs[index].status = payload["code"]?.stringValue == "INTERRUPTED" ? .interrupted : .failed
             runs[index].isRequestInFlight = false
             runs[index].interaction = nil
             runs[index].errorMessage = payload["error"]?.stringValue ?? "The run failed."
         case "run.status_changed":
+            guard isRootEvent else { return }
             handleStatusChange(payload["toStatus"]?.stringValue, runId: runId)
         case "approval.requested":
             guard let index = recordIndex(forRunId: runId) else { return }
@@ -591,7 +955,8 @@ final class AppModel: ObservableObject {
             try await client.start(
                 workingDirectoryURL: workingDirectory,
                 notificationHandler: { [weak self] method, params in
-                    await self?.receive(method: method, params: params)
+                    let diagnostic = AppModel.protocolDiagnostic(params)
+                    await self?.receive(method: method, params: params, diagnostic: diagnostic)
                 },
                 errorHandler: { [weak self] message in
                     await self?.recordDiagnostic(message)
@@ -603,11 +968,14 @@ final class AppModel: ObservableObject {
             status = "Loading workspace configuration…"
             var fields: [String: JSONValue] = [
                 "cwd": .string(workingDirectory.path),
-                "approvalMode": .string("manual"),
-                "clarificationMode": .string("interactive")
+                "approvalMode": .string(configuredApprovalMode),
+                "clarificationMode": .string(configuredClarificationMode)
             ]
             if !agentConfigPath.isEmpty { fields["agentConfigPath"] = .string(agentConfigPath) }
             if !settingsConfigPath.isEmpty { fields["settingsConfigPath"] = .string(settingsConfigPath) }
+            if !configuredRuntimeMode.isEmpty { fields["runtimeMode"] = .string(configuredRuntimeMode) }
+            if !configuredProvider.isEmpty { fields["provider"] = .string(configuredProvider) }
+            if !configuredModel.isEmpty { fields["model"] = .string(configuredModel) }
             let result = try await client.initializeRuntime(params: fields)
             applyRuntimeInformation(result, fallbackWorkspace: workingDirectory.path)
             isConnected = true
@@ -669,27 +1037,38 @@ final class AppModel: ObservableObject {
     }
 
     private func handleStatusChange(_ status: String?, runId: String) {
+        guard let status = runtimeStatus(status) else { return }
+        updateStatus(status, forRunId: runId)
+    }
+
+    private func runtimeStatus(_ status: String?) -> RunStatus? {
         switch status {
-        case "queued": updateStatus(.queued, forRunId: runId)
-        case "running": updateStatus(.running, forRunId: runId)
-        case "completed", "success", "succeeded": updateStatus(.succeeded, forRunId: runId)
-        case "failed": updateStatus(.failed, forRunId: runId)
-        case "interrupted": updateStatus(.interrupted, forRunId: runId)
-        default: break
+        case "queued": .queued
+        case "running": .running
+        case "completed", "success", "succeeded": .succeeded
+        case "failed": .failed
+        case "interrupted": .interrupted
+        default: nil
         }
     }
 
-    private func acceptInspection(_ result: JSONValue, for recordID: UUID) {
+    private func acceptInspection(
+        _ result: JSONValue,
+        for recordID: UUID,
+        requestedRunId: String?,
+        eventGeneration: UInt64?
+    ) {
         guard let index = runs.firstIndex(where: { $0.id == recordID }) else { return }
-        runs[index].isRequestInFlight = false
-        runs[index].errorMessage = nil
-        if runs[index].output == nil {
-            runs[index].output = result
-        }
+        runs[index].inspection = result
 
         let inspectedRun = result.objectValue?["run"]?.objectValue
-        let runId = inspectedRun?["id"]?.stringValue ?? runs[index].latestRunId
+        let runId = inspectedRun?["id"]?.stringValue ?? requestedRunId ?? runs[index].latestRunId
         if let runId {
+            inspectionCacheMetadata[recordID] = InspectionCacheMetadata(
+                runId: runId,
+                eventGeneration: eventGeneration ?? eventGenerationByRunID[runId, default: 0],
+                fetchedAt: inspectionClock.now
+            )
             handleStatusChange(inspectedRun?["status"]?.stringValue, runId: runId)
         }
     }
@@ -779,6 +1158,20 @@ final class AppModel: ObservableObject {
         appendEvent("Error: \(error.localizedDescription)")
     }
 
+    // Internal for focused auxiliary-command lifecycle tests.
+    func auxiliaryRequestFailed(_ error: Error, operation: AuxiliaryOperation, for recordID: UUID) {
+        guard let index = runs.firstIndex(where: { $0.id == recordID }) else { return }
+        runs[index].auxiliaryOperations.remove(operation)
+        runs[index].auxiliaryErrorMessage = error.localizedDescription
+        appendEvent("Auxiliary command error: \(error.localizedDescription)")
+    }
+
+    private func finishAuxiliaryOperation(_ operation: AuxiliaryOperation, for recordID: UUID) {
+        guard let index = runs.firstIndex(where: { $0.id == recordID }) else { return }
+        runs[index].auxiliaryOperations.remove(operation)
+        runs[index].auxiliaryErrorMessage = nil
+    }
+
     private func interactionFailed(_ error: Error, for recordID: UUID) {
         guard let index = runs.firstIndex(where: { $0.id == recordID }),
               var interaction = runs[index].interaction else { return }
@@ -805,6 +1198,30 @@ final class AppModel: ObservableObject {
         if events.count > 500 { events.removeFirst(events.count - 500) }
     }
 
+    private nonisolated static func protocolDiagnostic(_ value: JSONValue) -> String {
+        let maximumBytes = 64 * 1024
+        guard let data = try? JSONEncoder().encode(value) else { return String(describing: value) }
+        guard data.count > maximumBytes else { return String(decoding: data, as: UTF8.self) }
+        return String(decoding: data.prefix(maximumBytes), as: UTF8.self) + "\n… diagnostic truncated"
+    }
+
+    private nonisolated static func inspectionDiagnostic(_ result: JSONValue) -> String {
+        guard let object = result.objectValue else { return protocolDiagnostic(result) }
+        let run = object["run"]?.objectValue
+        let eventCount: Int
+        if case .array(let events)? = object["events"] {
+            eventCount = events.count
+        } else {
+            eventCount = 0
+        }
+        return [
+            "runId: \(run?["id"]?.stringValue ?? "unknown")",
+            "status: \(run?["status"]?.stringValue ?? "unknown")",
+            "version: \(run?["version"]?.numberDescription ?? "unknown")",
+            "events: \(eventCount)"
+        ].joined(separator: "\n")
+    }
+
     private func recordDiagnostic(_ message: String) {
         appendEvent("Runtime diagnostic: \(message)")
     }
@@ -818,9 +1235,12 @@ final class AppModel: ObservableObject {
     }
 
     private func markActiveRunsInterrupted() {
-        for index in runs.indices where runs[index].status.isActive || runs[index].isRequestInFlight {
-            runs[index].status = .interrupted
+        for index in runs.indices {
+            if runs[index].status.isActive || runs[index].isRequestInFlight {
+                runs[index].status = .interrupted
+            }
             runs[index].isRequestInFlight = false
+            runs[index].auxiliaryOperations.removeAll()
         }
     }
 
@@ -829,6 +1249,8 @@ final class AppModel: ObservableObject {
         runToRoot.removeAll()
         recordByRoot.removeAll()
         resolvedInteractions.removeAll()
+        eventGenerationByRunID.removeAll()
+        inspectionCacheMetadata.removeAll()
         agentName = ""
         agentId = ""
         runtimeMode = ""
@@ -847,9 +1269,36 @@ final class AppModel: ObservableObject {
     }
 }
 
+private struct DesktopSettingsSeed: Decodable {
+    struct Runtime: Decodable {
+        let mode: String?
+    }
+
+    struct Model: Decodable {
+        let overrideProvider: String?
+        let overrideModel: String?
+    }
+
+    struct Interaction: Decodable {
+        let autoApprove: Bool?
+        let approvalMode: String?
+        let interactive: Bool?
+        let clarificationMode: String?
+    }
+
+    let runtime: Runtime?
+    let model: Model?
+    let interaction: Interaction?
+}
+
 private extension JSONValue {
     var stringArray: [String]? {
         guard case .array(let values) = self else { return nil }
         return values.compactMap(\.stringValue)
+    }
+
+    var numberDescription: String? {
+        guard case .number(let value) = self else { return nil }
+        return Int(exactly: value).map(String.init) ?? String(value)
     }
 }

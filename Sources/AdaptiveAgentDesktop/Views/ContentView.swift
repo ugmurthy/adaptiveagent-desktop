@@ -37,7 +37,7 @@ struct ContentView: View {
 
     private var runSidebar: some View {
         VStack(spacing: 0) {
-            List(selection: $model.selectedRunItemID) {
+            List(selection: sidebarSelection) {
                 if !activeRuns.isEmpty {
                     Section("Active") {
                         ForEach(activeRuns) { record in
@@ -83,15 +83,26 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var detail: some View {
-        if let record = model.selectedRun {
-            RunDetailView(record: record)
+        VStack(spacing: 0) {
+            RunTabsBar()
                 .environmentObject(model)
-        } else if model.isConnected {
-            NewRequestView()
-                .environmentObject(model)
-        } else {
-            ConnectionStateView()
-                .environmentObject(model)
+            Divider()
+            Group {
+                if let tab = model.selectedTab,
+                   let recordID = tab.selectedRunID,
+                   let record = model.runs.first(where: { $0.id == recordID }) {
+                    RunDetailView(record: record, tabID: tab.id)
+                        .environmentObject(model)
+                } else if let tab = model.selectedTab, model.isConnected {
+                    NewRequestView(tabID: tab.id)
+                        .environmentObject(model)
+                        .id(tab.id)
+                } else {
+                    ConnectionStateView()
+                        .environmentObject(model)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -155,6 +166,159 @@ struct ContentView: View {
 
     private var activeRuns: [AppModel.RunRecord] { model.runs.filter { $0.status.isActive } }
     private var recentRuns: [AppModel.RunRecord] { model.runs.filter { !$0.status.isActive } }
+
+    private var sidebarSelection: Binding<UUID?> {
+        Binding(
+            get: { model.selectedRunItemID },
+            set: { recordID in
+                if let recordID { model.openRunTab(recordID) }
+            }
+        )
+    }
+}
+
+private struct RunTabsBar: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 6) {
+                    ForEach(model.tabs) { tab in
+                        RunTabCell(
+                            tab: tab,
+                            record: tab.selectedRunID.flatMap { recordID in
+                                model.runs.first { $0.id == recordID }
+                            },
+                            isSelected: model.selectedTabID == tab.id,
+                            select: { model.selectTab(tab.id) },
+                            close: { model.closeTab(tab.id) }
+                        )
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+            }
+
+            Divider()
+                .frame(height: 22)
+
+            Button(action: model.newRun) {
+                Image(systemName: "plus")
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .disabled(!model.isConnected)
+            .help("Open a new tab")
+            .accessibilityLabel("New tab")
+            .padding(.horizontal, 6)
+        }
+        .frame(height: 40)
+        .background(.bar)
+    }
+}
+
+private struct RunTabCell: View {
+    let tab: AppModel.RunTab
+    let record: AppModel.RunRecord?
+    let isSelected: Bool
+    let select: () -> Void
+    let close: () -> Void
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Button(action: select) {
+                HStack(spacing: 7) {
+                    Image(systemName: record?.kind.systemImage ?? tab.draftKind.systemImage)
+                        .font(.caption)
+                        .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                    Text(record?.title ?? "New \(tab.draftKind.rawValue)")
+                        .font(.caption.weight(isSelected ? .semibold : .regular))
+                        .lineLimit(1)
+                    if let record {
+                        RunTabStatusBadge(record: record)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Button(action: close) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Close tab")
+            .accessibilityLabel("Close \(record?.title ?? "New \(tab.draftKind.rawValue)") tab")
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 4)
+        .frame(minWidth: 120, maxWidth: 280, minHeight: 28)
+        .background(
+            isSelected ? Color(nsColor: .controlBackgroundColor) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 7)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(isSelected ? Color.primary.opacity(0.14) : Color.clear)
+        }
+    }
+}
+
+private struct RunTabStatusBadge: View {
+    let record: AppModel.RunRecord
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if record.hasRequestInFlight, record.interaction == nil {
+                ProgressView()
+                    .controlSize(.mini)
+            } else {
+                Image(systemName: symbol)
+                    .font(.system(size: 8, weight: .bold))
+            }
+            Text(label)
+                .lineLimit(1)
+        }
+        .font(.caption2.weight(.medium))
+        .foregroundStyle(color)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(color.opacity(0.11), in: Capsule())
+    }
+
+    private var label: String {
+        switch record.status {
+        case .waitingForApproval: return "Approval"
+        case .waitingForClarification: return "Question"
+        default: return record.status.rawValue
+        }
+    }
+
+    private var symbol: String {
+        switch record.status {
+        case .queued, .running: return "circle.fill"
+        case .waitingForApproval: return "hand.raised.fill"
+        case .waitingForClarification: return "questionmark.bubble.fill"
+        case .succeeded: return "checkmark"
+        case .failed: return "exclamationmark"
+        case .unknown, .interrupted: return "minus"
+        }
+    }
+
+    private var color: Color {
+        switch record.status {
+        case .queued, .running: return .accentColor
+        case .waitingForApproval, .waitingForClarification: return .orange
+        case .succeeded: return .green
+        case .failed: return .red
+        case .unknown, .interrupted: return .secondary
+        }
+    }
 }
 
 private struct RunRow: View {
@@ -169,7 +333,7 @@ private struct RunRow: View {
                 Text(record.title)
                     .lineLimit(2)
                 HStack(spacing: 5) {
-                    if record.isRequestInFlight {
+                    if record.hasRequestInFlight {
                         ProgressView().controlSize(.mini)
                     }
                     Text(record.status.rawValue)
@@ -199,16 +363,17 @@ private struct RunRow: View {
 
 private struct NewRequestView: View {
     @EnvironmentObject private var model: AppModel
+    let tabID: UUID
     @State private var existingRunID = ""
 
     var body: some View {
         VStack(spacing: 26) {
             Spacer()
             VStack(spacing: 9) {
-                Image(systemName: model.draftKind == .run ? "sparkles" : "bubble.left.and.bubble.right")
+                Image(systemName: draftKind == .run ? "sparkles" : "bubble.left.and.bubble.right")
                     .font(.system(size: 34, weight: .light))
                     .foregroundStyle(.tint)
-                Text(model.draftKind == .run ? "What should the agent do?" : "Start a conversation")
+                Text(draftKind == .run ? "What should the agent do?" : "Start a conversation")
                     .font(.title2.weight(.semibold))
                 Text(workspaceSummary)
                     .font(.callout)
@@ -217,7 +382,7 @@ private struct NewRequestView: View {
             }
 
             VStack(spacing: 14) {
-                Picker("Request type", selection: $model.draftKind) {
+                Picker("Request type", selection: draftKindBinding) {
                     ForEach(AppModel.RunKind.allCases) { kind in
                         Label(kind.rawValue, systemImage: kind.systemImage).tag(kind)
                     }
@@ -229,12 +394,12 @@ private struct NewRequestView: View {
                     RoundedRectangle(cornerRadius: 12)
                         .fill(Color(nsColor: .textBackgroundColor))
                         .stroke(.separator, lineWidth: 1)
-                    TextEditor(text: $model.draftText)
+                    TextEditor(text: draftTextBinding)
                         .font(.body)
                         .scrollContentBackground(.hidden)
                         .padding(10)
-                    if model.draftText.isEmpty {
-                        Text(model.draftKind == .run ? "Describe a goal…" : "Write a message…")
+                    if draftText.isEmpty {
+                        Text(draftKind == .run ? "Describe a goal…" : "Write a message…")
                             .foregroundStyle(.tertiary)
                             .padding(.horizontal, 16)
                             .padding(.vertical, 17)
@@ -250,10 +415,12 @@ private struct NewRequestView: View {
                         Text("Creating run…").foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button(model.draftKind == .run ? "Start Run" : "Start Chat", action: model.submitDraft)
+                    Button(draftKind == .run ? "Start Run" : "Start Chat") {
+                        model.submitDraft(in: tabID)
+                    }
                         .buttonStyle(.borderedProminent)
                         .keyboardShortcut(.return, modifiers: [.command])
-                        .disabled(model.draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isWaitingForRunIdentity)
+                        .disabled(draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isWaitingForRunIdentity)
                 }
                 .frame(maxWidth: 700)
             }
@@ -299,6 +466,28 @@ private struct NewRequestView: View {
         let path = model.effectiveWorkspaceRoot.isEmpty ? model.workspacePath : model.effectiveWorkspaceRoot
         return URL(fileURLWithPath: path).lastPathComponent
     }
+
+    private var draftKind: AppModel.RunKind {
+        model.tab(withID: tabID)?.draftKind ?? .run
+    }
+
+    private var draftText: String {
+        model.tab(withID: tabID)?.draftText ?? ""
+    }
+
+    private var draftKindBinding: Binding<AppModel.RunKind> {
+        Binding(
+            get: { model.tab(withID: tabID)?.draftKind ?? .run },
+            set: { model.setDraftKind($0, forTab: tabID) }
+        )
+    }
+
+    private var draftTextBinding: Binding<String> {
+        Binding(
+            get: { model.tab(withID: tabID)?.draftText ?? "" },
+            set: { model.setDraftText($0, forTab: tabID) }
+        )
+    }
 }
 
 private struct ConnectionStateView: View {
@@ -335,6 +524,7 @@ private struct ConnectionStateView: View {
 private struct RunDetailView: View {
     @EnvironmentObject private var model: AppModel
     let record: AppModel.RunRecord
+    let tabID: UUID
 
     var body: some View {
         VStack(spacing: 0) {
@@ -342,31 +532,45 @@ private struct RunDetailView: View {
             Divider()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 24) {
-                    if record.kind == .chat {
+                    if detailMode == .inspection {
+                        inspectionOutput
+                            .id("run-inspection")
+                    } else if record.kind == .chat {
                         chatTranscript
                     } else {
                         runOutput
+                            .id("run-output")
                     }
 
                     if let interaction = record.interaction {
                         InteractionCard(recordID: record.id, interaction: interaction)
                             .environmentObject(model)
+                            .id("interaction-\(record.id.uuidString)")
                     }
 
                     if let error = record.errorMessage {
                         ErrorCard(message: error)
+                            .id("error")
+                    }
+
+                    if let error = record.auxiliaryErrorMessage {
+                        ErrorCard(message: error)
+                            .id("auxiliary-error")
                     }
 
                     if !record.files.isEmpty {
                         FilesChangedView(record: record)
                             .environmentObject(model)
+                            .id("files")
                     }
                 }
+                .scrollTargetLayout()
                 .frame(maxWidth: 820, alignment: .leading)
                 .padding(.horizontal, 34)
                 .padding(.vertical, 28)
                 .frame(maxWidth: .infinity, alignment: .top)
             }
+            .scrollPosition(id: scrollPositionBinding, anchor: .center)
 
             if record.kind == .chat {
                 Divider()
@@ -399,14 +603,35 @@ private struct RunDetailView: View {
                 }
             }
             Spacer()
-            if record.isRequestInFlight { ProgressView().controlSize(.small) }
-            RunActionsMenu { method in
+            if record.hasRequestInFlight { ProgressView().controlSize(.small) }
+            RunActionsMenu(record: record, showResults: {
+                model.setDetailMode(.results, forTab: tabID)
+            }) { method in
                 model.runCommand(method, for: record.id)
             }
             .disabled(record.latestRunId == nil)
         }
         .padding(.horizontal, 22)
         .frame(height: 66)
+    }
+
+    @ViewBuilder private var inspectionOutput: some View {
+        if let inspection = record.inspection {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("INSPECTION").sectionLabel()
+                InspectionOutputView(inspection: inspection)
+            }
+        } else if record.auxiliaryOperations.contains(.inspect) {
+            HStack(spacing: 10) {
+                ProgressView().controlSize(.small)
+                Text("Loading inspection…").foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, minHeight: 180)
+        } else {
+            Text("No inspection details were returned.")
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, minHeight: 180)
+        }
     }
 
     @ViewBuilder private var runOutput: some View {
@@ -428,9 +653,9 @@ private struct RunDetailView: View {
         }
     }
 
-    private var chatTranscript: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            ForEach(record.chatMessages) { message in
+    @ViewBuilder private var chatTranscript: some View {
+        ForEach(record.chatMessages) { message in
+            Group {
                 if message.role == .user {
                     HStack {
                         Spacer(minLength: 80)
@@ -448,28 +673,25 @@ private struct RunDetailView: View {
                     }
                 }
             }
-            if record.isRequestInFlight {
-                HStack(spacing: 9) {
-                    ProgressView().controlSize(.small)
-                    Text("Thinking…").foregroundStyle(.secondary)
-                }
+            .id("message-\(message.id.uuidString)")
+        }
+        if record.isRequestInFlight {
+            HStack(spacing: 9) {
+                ProgressView().controlSize(.small)
+                Text("Thinking…").foregroundStyle(.secondary)
             }
         }
     }
 
     private var chatComposer: some View {
         HStack(alignment: .bottom, spacing: 10) {
-            TextField("Message \(model.agentName.isEmpty ? "agent" : model.agentName)…", text: $model.chatMessage, axis: .vertical)
+            TextField("Message \(model.agentName.isEmpty ? "agent" : model.agentName)…", text: chatMessageBinding, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(1...5)
-                .onSubmit(model.sendChatMessage)
-            Button(action: model.sendChatMessage) {
-                Image(systemName: "arrow.up.circle.fill").font(.title2)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(model.chatMessage.isEmpty ? Color.secondary : Color.accentColor)
-            .disabled(record.isRequestInFlight || model.chatMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .help("Send message")
+                .onSubmit { model.sendChatMessage(in: tabID) }
+            Button("Send") { model.sendChatMessage(in: tabID) }
+                .disabled(record.isRequestInFlight || chatMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .help("Send message")
         }
         .padding(14)
         .background(.bar)
@@ -477,14 +699,50 @@ private struct RunDetailView: View {
 
     private var steerComposer: some View {
         HStack(spacing: 10) {
-            TextField("Steer this run…", text: $model.steerMessage)
+            TextField("Steer this run…", text: steerMessageBinding)
                 .textFieldStyle(.roundedBorder)
-                .onSubmit(model.steerSelectedRun)
-            Button("Steer", action: model.steerSelectedRun)
-                .disabled(model.steerMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .onSubmit { model.steerRun(in: tabID) }
+            Button("Steer") { model.steerRun(in: tabID) }
+                .disabled(
+                    steerMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || record.auxiliaryOperations.contains(.steer)
+                )
         }
         .padding(14)
         .background(.bar)
+    }
+
+    private var chatMessage: String {
+        model.tab(withID: tabID)?.chatMessage ?? ""
+    }
+
+    private var steerMessage: String {
+        model.tab(withID: tabID)?.steerMessage ?? ""
+    }
+
+    private var detailMode: AppModel.RunDetailMode {
+        model.tab(withID: tabID)?.detailMode ?? .results
+    }
+
+    private var chatMessageBinding: Binding<String> {
+        Binding(
+            get: { model.tab(withID: tabID)?.chatMessage ?? "" },
+            set: { model.setChatMessage($0, forTab: tabID) }
+        )
+    }
+
+    private var steerMessageBinding: Binding<String> {
+        Binding(
+            get: { model.tab(withID: tabID)?.steerMessage ?? "" },
+            set: { model.setSteerMessage($0, forTab: tabID) }
+        )
+    }
+
+    private var scrollPositionBinding: Binding<String?> {
+        Binding(
+            get: { model.tab(withID: tabID)?.scrollPosition },
+            set: { model.setScrollPosition($0, forTab: tabID) }
+        )
     }
 }
 
@@ -509,18 +767,40 @@ private struct StatusBadge: View {
 }
 
 private struct RunActionsMenu: View {
+    @EnvironmentObject private var model: AppModel
+    let record: AppModel.RunRecord?
+    let showResults: (() -> Void)?
     let action: (String) -> Void
+
+    init(
+        record: AppModel.RunRecord? = nil,
+        showResults: (() -> Void)? = nil,
+        action: @escaping (String) -> Void
+    ) {
+        self.record = record
+        self.showResults = showResults
+        self.action = action
+    }
 
     var body: some View {
         Menu {
+            if let showResults {
+                Button("Results", systemImage: "doc.text") { showResults() }
+            }
             Button("Inspect", systemImage: "info.circle") { action("run/inspect") }
+                .disabled(record?.auxiliaryOperations.contains(.inspect) == true)
             Divider()
             Button("Resume", systemImage: "play") { action("run/resume") }
+                .disabled(record?.isRequestInFlight == true)
             Button("Retry", systemImage: "arrow.clockwise") { action("run/retry") }
+                .disabled(record?.isRequestInFlight == true)
             Button("Recover", systemImage: "lifepreserver") { action("run/recover") }
+                .disabled(model.isWaitingForRunIdentity || record?.isRequestInFlight == true)
             Button("Continue", systemImage: "arrow.right.circle") { action("run/continue") }
+                .disabled(model.isWaitingForRunIdentity || record?.isRequestInFlight == true)
             Divider()
             Button("Interrupt", systemImage: "stop.fill", role: .destructive) { action("run/interrupt") }
+                .disabled(record?.auxiliaryOperations.contains(.interrupt) == true)
         } label: {
             Label("Run Actions", systemImage: "ellipsis.circle")
         }
@@ -529,7 +809,65 @@ private struct RunActionsMenu: View {
     }
 }
 
-private struct OutputView: View {
+private struct InspectionOutputView: View {
+    let inspection: JSONValue
+
+    var body: some View {
+        if let object = inspection.objectValue,
+           case .array(let events)? = object["events"] {
+            VStack(alignment: .leading, spacing: 18) {
+                if let run = object["run"], run != .null {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("RUN").sectionLabel()
+                        OutputView(output: run)
+                            .equatable()
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("EVENTS (\(events.count))").sectionLabel()
+                    if events.isEmpty {
+                        Text("No events recorded.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        LazyVStack(alignment: .leading, spacing: 10) {
+                            ForEach(events.indices, id: \.self) { index in
+                                InspectionEventView(event: events[index], index: index)
+                                    .equatable()
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            OutputView(output: inspection)
+                .equatable()
+        }
+    }
+}
+
+private struct InspectionEventView: View, Equatable {
+    let event: JSONValue
+    let index: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Text(event.objectValue?["type"]?.stringValue ?? "Event \(index + 1)")
+                    .font(.callout.weight(.medium))
+                if let sequence = event.objectValue?["seq"]?.numberText {
+                    Text("#\(sequence)")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            OutputView(output: event)
+                .equatable()
+        }
+    }
+}
+
+private struct OutputView: View, Equatable {
     let output: JSONValue
 
     var body: some View {
@@ -545,6 +883,13 @@ private struct OutputView: View {
             .padding(14)
             .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
         }
+    }
+}
+
+private extension JSONValue {
+    var numberText: String? {
+        guard case .number(let value) = self else { return nil }
+        return Int(exactly: value).map(String.init) ?? String(value)
     }
 }
 
@@ -1198,7 +1543,48 @@ private struct ConfigurationView: View {
                 Section("Configuration Overrides") {
                     pathRow("Settings", text: $model.settingsConfigPath, action: model.chooseSettings)
                     pathRow("Agent", text: $model.agentConfigPath, action: model.chooseAgent)
-                    Text("Leave overrides blank to use agent.settings.json, environment, workspace, and global defaults.")
+                    HStack {
+                        Button("Reload Values", action: model.reloadSettingsConfiguration)
+                            .disabled(model.settingsConfigPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        Spacer()
+                        if let error = model.settingsConfigurationError {
+                            Label(error, systemImage: "exclamationmark.triangle")
+                                .foregroundStyle(.orange)
+                                .lineLimit(2)
+                        }
+                    }
+                    .font(.caption)
+                    Text("The app loads supported non-secret values from the selected settings file. Other settings remain runtime-managed.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Section("Runtime") {
+                    Picker("Mode", selection: $model.configuredRuntimeMode) {
+                        Text("Settings or runtime default").tag("")
+                        Text("Memory").tag("memory")
+                        Text("Postgres").tag("postgres")
+                    }
+                    Picker("Provider", selection: $model.configuredProvider) {
+                        Text("Settings or agent default").tag("")
+                        Text("OpenRouter").tag("openrouter")
+                        Text("Ollama").tag("ollama")
+                        Text("Mistral").tag("mistral")
+                        Text("Mesh").tag("mesh")
+                    }
+                    TextField("Model", text: $model.configuredModel, prompt: Text("Settings or agent default"))
+                        .font(.body.monospaced())
+                }
+                Section("Interaction") {
+                    Picker("Approval", selection: $model.configuredApprovalMode) {
+                        Text("Auto").tag("auto")
+                        Text("Manual").tag("manual")
+                        Text("Reject").tag("reject")
+                    }
+                    Picker("Clarification", selection: $model.configuredClarificationMode) {
+                        Text("Interactive").tag("interactive")
+                        Text("Fail").tag("fail")
+                    }
+                    Text("These values are sent explicitly when the runtime initializes. Manual approval and interactive clarification are used when the settings file does not specify them.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1220,7 +1606,7 @@ private struct ConfigurationView: View {
             }
             .padding(18)
         }
-        .frame(width: 680, height: 480)
+        .frame(width: 680, height: 640)
     }
 
     private func pathRow(_ title: String, text: Binding<String>, action: @escaping () -> Void) -> some View {

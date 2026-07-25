@@ -4,7 +4,7 @@ A restrained macOS 14+ SwiftUI vertical slice for the local AdaptiveAgent runtim
 
 ## Requirements
 
-- macOS 14 or newer and Xcode 15+
+- macOS 14 or newer and Xcode 16+
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`)
 - A local Postgres instance and valid `DATABASE_URL` when settings explicitly select the Postgres runtime
 - A protocol `1.10` standalone `agent-runtime` executable
@@ -39,7 +39,7 @@ During development, you can skip copying the executable into resources by settin
 
 In **Product > Scheme > Edit Scheme > Run > Arguments > Environment Variables**, set `DATABASE_URL` when using Postgres. Provider API keys required by the selected profile must be set there as environment variables as well. The app inherits these values into the child process. It never writes them to `UserDefaults`, files, command payloads, stdout, or the UI. Do not place secrets in the agent/settings JSON.
 
-The settings override field may be left blank. During initialization the runtime discovers settings in this order: `ADAPTIVE_AGENT_SETTINGS`, `<workspace>/agent.settings.json`, then `~/.adaptiveAgent/agent.settings.json`. Entering a path in the field takes precedence over those locations. The settings file can select initialization behavior such as the runtime mode:
+The settings override field may be left blank. During initialization the runtime discovers settings in this order: `ADAPTIVE_AGENT_SETTINGS`, `<workspace>/agent.settings.json`, then `~/.adaptiveAgent/agent.settings.json`. Entering a path in the field takes precedence over those locations. When the app discovers `<workspace>/agent.settings.json` or you select a settings file, its configuration panel seeds editable runtime mode, provider, model, approval, and clarification values from that file. These non-secret values are sent explicitly to `runtime/initialize`; other settings remain runtime-managed. The settings file can select initialization behavior such as the runtime mode:
 
 ```json
 {
@@ -52,6 +52,8 @@ The settings override field may be left blank. During initialization the runtime
 
 Choose a workspace directory and agent profile JSON, connect, and then start a run or send a session chat message. The event pane receives incremental `agent/event` notifications. Run results expose approval and clarification controls when requested, plus steering and a **Run Actions** menu with inspect, resume, retry, recover, continue, and interrupt operations.
 
+Runs and drafts open in app-level tabs above the detail pane. Tabs retain their own draft, chat composer, steering text, selected run, and scroll position while sharing the app's single runtime process. Closing a tab does not interrupt or remove its run; select that run in the history sidebar to reopen it. Background tabs continue showing run status and approval or clarification badges.
+
 When no run is selected, use the **Existing Run** field on the new-request screen to enter a run ID and invoke the same actions. The app attaches that ID as a tracked sidebar record so status changes, inspection output, and errors remain visible in the normal run detail. The ID must be available to the initialized runtime: runs from previous launches generally require Postgres, while memory-mode runs are available only for the lifetime of their runtime process.
 
 The standard **About AdaptiveAgent Desktop** panel displays the marketing version and build number configured in `project.yml`.
@@ -60,9 +62,8 @@ The standard **About AdaptiveAgent Desktop** panel displays the marketing versio
 
 - `RuntimeClient` owns `Process`, separate stdin/stdout/stderr pipes, partial/multiple-line stdout buffering, JSON-RPC request correlation, and clean shutdown.
 - Startup requires a JSON-RPC `runtime/ready` notification, protocol `1.10` negotiation with `initialize`, and then a separate `runtime/initialize` before agent operations.
-- `AppModel` is main-actor isolated and translates UI actions into typed JSON-RPC methods. Runtime initialization leaves runtime mode, provider, and model resolution to `agent.settings.json` unless an RPC override is explicitly added.
-- The Swift renderer does not read workspace/profile contents and has no cloud behavior. Native file panels select paths only; the runtime process performs all runtime and filesystem behavior.
+- `AppModel` is main-actor isolated and translates UI actions into typed JSON-RPC methods. It reads only the non-secret runtime, model-selection, and interaction fields needed to seed editable `runtime/initialize` overrides.
+- The Swift renderer does not read agent profiles or other workspace contents and has no cloud behavior. It ignores secret-related settings fields; native file panels otherwise select paths only, and the runtime process performs runtime and filesystem behavior.
 - Runtime stderr is captured separately and displayed as diagnostic event entries; it is never parsed as protocol traffic.
 
 This development slice inherits the complete app process environment. Production distribution should narrow inherited variables and add an explicit secret-management design without moving runtime behavior into the renderer.
-

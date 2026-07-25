@@ -27,16 +27,40 @@ enum RuntimeClientError: LocalizedError, Equatable {
 
 struct NDJSONBuffer {
     private var data = Data()
+    private let maximumLineBytes: Int
 
-    mutating func append(_ chunk: Data) -> [Data] {
-        data.append(chunk)
+    init(maximumLineBytes: Int = 16 * 1024 * 1024) {
+        self.maximumLineBytes = maximumLineBytes
+    }
+
+    mutating func append(_ chunk: Data) throws -> [Data] {
         var lines: [Data] = []
-        while let newline = data.firstIndex(of: 0x0A) {
-            let line = Data(data[..<newline])
-            data.removeSubrange(...newline)
-            if !line.isEmpty { lines.append(line) }
+        var start = chunk.startIndex
+
+        while start < chunk.endIndex,
+              let newline = chunk[start...].firstIndex(of: 0x0A) {
+            let segment = chunk[start..<newline]
+            guard data.count <= maximumLineBytes - segment.count else {
+                throw RuntimeClientError.protocolViolation("NDJSON line exceeds \(maximumLineBytes) bytes")
+            }
+            data.append(contentsOf: segment)
+            if !data.isEmpty { lines.append(data) }
+            data.removeAll(keepingCapacity: true)
+            start = chunk.index(after: newline)
+        }
+
+        if start < chunk.endIndex {
+            let remainder = chunk[start...]
+            guard data.count <= maximumLineBytes - remainder.count else {
+                throw RuntimeClientError.protocolViolation("NDJSON line exceeds \(maximumLineBytes) bytes")
+            }
+            data.append(contentsOf: remainder)
         }
         return lines
+    }
+
+    mutating func reset() {
+        data.removeAll(keepingCapacity: false)
     }
 }
 
@@ -51,6 +75,11 @@ actor RuntimeClient {
     typealias ErrorHandler = @Sendable (String) async -> Void
     typealias TerminationHandler = @Sendable (Int32) async -> Void
 
+    private struct RuntimeNotification: Sendable {
+        let method: String
+        let params: JSONValue
+    }
+
     private let process = Process()
     private let stdinPipe = Pipe()
     private let stdoutPipe = Pipe()
@@ -59,8 +88,8 @@ actor RuntimeClient {
     private let readyTimeout: Duration
     private let responseTimeout: Duration
     private let shutdownResponseTimeout: Duration
-    private var stdoutBuffer = NDJSONBuffer()
-    private var stderrBuffer = NDJSONBuffer()
+    private var stdoutBuffer = NDJSONBuffer(maximumLineBytes: 16 * 1024 * 1024)
+    private var stderrBuffer = NDJSONBuffer(maximumLineBytes: 256 * 1024)
     private var pending: [JSONRPCID: CheckedContinuation<JSONValue, Error>] = [:]
     private var readyContinuation: CheckedContinuation<RuntimeReady, Error>?
     private var readyMessage: RuntimeReady?
@@ -80,6 +109,9 @@ actor RuntimeClient {
     private var stderrContinuation: AsyncStream<Data>.Continuation?
     private var stdoutTask: Task<Void, Never>?
     private var stderrTask: Task<Void, Never>?
+    private var notificationContinuation: AsyncStream<RuntimeNotification>.Continuation?
+    private var notificationTask: Task<Void, Never>?
+    private var didReportStderrOverflow = false
 
     init(
         executableURL: URL? = nil,
@@ -125,6 +157,7 @@ actor RuntimeClient {
         }
         do {
             try process.run()
+            startNotificationDispatcher()
             startReaders()
             let ready = try await awaitReady()
             guard ready.protocolVersion == ProtocolCodec.version else {
@@ -251,27 +284,39 @@ actor RuntimeClient {
     }
 
     private func startReaders() {
-        let stdoutStream = AsyncStream<Data> { self.stdoutContinuation = $0 }
-        let stderrStream = AsyncStream<Data> { self.stderrContinuation = $0 }
+        let stdoutStream = AsyncStream<Data>(bufferingPolicy: .bufferingOldest(64)) {
+            self.stdoutContinuation = $0
+        }
+        let stderrStream = AsyncStream<Data>(bufferingPolicy: .bufferingOldest(32)) {
+            self.stderrContinuation = $0
+        }
         let stdout = stdoutPipe.fileHandleForReading
         let stdoutSink = stdoutContinuation
-        stdout.readabilityHandler = { handle in
+        stdout.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             if data.isEmpty {
                 handle.readabilityHandler = nil
                 stdoutSink?.finish()
+                return
             }
-            else { stdoutSink?.yield(data) }
+            if case .dropped = stdoutSink?.yield(data) {
+                handle.readabilityHandler = nil
+                stdoutSink?.finish()
+                Task { await self?.stdoutQueueOverflowed() }
+            }
         }
         let stderr = stderrPipe.fileHandleForReading
         let stderrSink = stderrContinuation
-        stderr.readabilityHandler = { handle in
+        stderr.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             if data.isEmpty {
                 handle.readabilityHandler = nil
                 stderrSink?.finish()
+                return
             }
-            else { stderrSink?.yield(data) }
+            if case .dropped = stderrSink?.yield(data) {
+                Task { await self?.stderrQueueOverflowed() }
+            }
         }
         stdoutTask = Task { [weak self] in
             for await data in stdoutStream {
@@ -283,6 +328,18 @@ actor RuntimeClient {
             for await data in stderrStream {
                 guard let self else { return }
                 await self.consumeStderr(data)
+            }
+        }
+    }
+
+    private func startNotificationDispatcher() {
+        let stream = AsyncStream<RuntimeNotification>(bufferingPolicy: .bufferingOldest(256)) {
+            self.notificationContinuation = $0
+        }
+        let handler = notificationHandler
+        notificationTask = Task {
+            for await notification in stream {
+                await handler?(notification.method, notification.params)
             }
         }
     }
@@ -300,8 +357,22 @@ actor RuntimeClient {
         stderrTask = nil
     }
 
+    private func stopNotificationDispatcher() {
+        notificationContinuation?.finish()
+        notificationContinuation = nil
+        notificationTask?.cancel()
+        notificationTask = nil
+    }
+
     private func consumeStdout(_ data: Data) async {
-        for line in stdoutBuffer.append(data) {
+        let lines: [Data]
+        do {
+            lines = try stdoutBuffer.append(data)
+        } catch {
+            await failProtocol(error)
+            return
+        }
+        for line in lines {
             do { try await decodeLine(line) }
             catch {
                 await failProtocol(error)
@@ -311,7 +382,15 @@ actor RuntimeClient {
     }
 
     private func consumeStderr(_ data: Data) async {
-        for line in stderrBuffer.append(data) {
+        let lines: [Data]
+        do {
+            lines = try stderrBuffer.append(data)
+        } catch {
+            stderrBuffer.reset()
+            await errorHandler?("Runtime diagnostic line exceeded 262144 bytes and was discarded.")
+            return
+        }
+        for line in lines {
             if let text = String(data: line, encoding: .utf8), !text.isEmpty {
                 await errorHandler?(text)
             }
@@ -336,7 +415,10 @@ actor RuntimeClient {
             guard method == "agent/event" || method == "cli/output" else {
                 throw RuntimeClientError.protocolViolation("unsupported runtime notification \(method)")
             }
-            await notificationHandler?(method, params)
+            let notification = RuntimeNotification(method: method, params: params)
+            guard case .enqueued = notificationContinuation?.yield(notification) else {
+                throw RuntimeClientError.protocolViolation("runtime notification queue exceeded its capacity")
+            }
         case .success(let id, let result):
             guard let continuation = pending.removeValue(forKey: id) else { return }
             responseTimeoutTasks.removeValue(forKey: id)?.cancel()
@@ -356,6 +438,16 @@ actor RuntimeClient {
         }
     }
 
+    private func stdoutQueueOverflowed() async {
+        await failProtocol(RuntimeClientError.protocolViolation("runtime stdout queue exceeded its capacity"))
+    }
+
+    private func stderrQueueOverflowed() async {
+        guard !didReportStderrOverflow else { return }
+        didReportStderrOverflow = true
+        await errorHandler?("Runtime diagnostics exceeded the display queue capacity; additional diagnostics were discarded.")
+    }
+
     private func terminated(status: Int32) async {
         guard !didTerminate else { return }
         didTerminate = true
@@ -371,6 +463,7 @@ actor RuntimeClient {
         responseTimeoutTasks.removeAll()
         continuations.forEach { $0.resume(throwing: error) }
         stopReaders()
+        stopNotificationDispatcher()
         if !expectedTermination {
             await errorHandler?(error.localizedDescription)
             await terminationHandler?(status)
@@ -440,6 +533,7 @@ actor RuntimeClient {
 
     private func cleanUp() {
         stopReaders()
+        stopNotificationDispatcher()
         readyTimeoutTask?.cancel()
         readyTimeoutTask = nil
         responseTimeoutTasks.values.forEach { $0.cancel() }

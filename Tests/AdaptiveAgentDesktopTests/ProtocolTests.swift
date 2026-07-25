@@ -64,19 +64,40 @@ final class ProtocolTests: XCTestCase {
         XCTAssertThrowsError(try ProtocolCodec.decodeMessage(Data(#"{"jsonrpc":"2.0","method":"agent/event","id":1,"params":{}}"#.utf8)))
     }
 
-    func testNDJSONBufferHandlesFragmentedAndMultipleMessages() {
+    func testNDJSONBufferHandlesFragmentedAndMultipleMessages() throws {
         var buffer = NDJSONBuffer()
-        XCTAssertTrue(buffer.append(Data(#"{"jsonrpc":"2.0""#.utf8)).isEmpty)
-        let lines = buffer.append(Data("}\n{\"jsonrpc\":\"2.0\"}\npartial".utf8))
+        XCTAssertTrue(try buffer.append(Data(#"{"jsonrpc":"2.0""#.utf8)).isEmpty)
+        let lines = try buffer.append(Data("}\n{\"jsonrpc\":\"2.0\"}\npartial".utf8))
         XCTAssertEqual(lines.map { String(decoding: $0, as: UTF8.self) }, [#"{"jsonrpc":"2.0"}"#, #"{"jsonrpc":"2.0"}"#])
-        XCTAssertEqual(buffer.append(Data(" line\n".utf8)).map { String(decoding: $0, as: UTF8.self) }, ["partial line"])
+        XCTAssertEqual(try buffer.append(Data(" line\n".utf8)).map { String(decoding: $0, as: UTF8.self) }, ["partial line"])
+    }
+
+    func testNDJSONBufferRejectsOversizedLines() throws {
+        var buffer = NDJSONBuffer(maximumLineBytes: 4)
+        XCTAssertEqual(try buffer.append(Data("1234\n".utf8)), [Data("1234".utf8)])
+        XCTAssertThrowsError(try buffer.append(Data("12345".utf8)))
     }
 
     @MainActor
     func testAppModelUsesLaunchDirectoryAndLocalSettingsForInitialization() async throws {
         let workspace = try temporaryDirectoryURL()
         let settings = workspace.appendingPathComponent("agent.settings.json")
-        try "{}".write(to: settings, atomically: true, encoding: .utf8)
+        try #"""
+        {
+          "runtime": { "mode": "postgres" },
+          "model": {
+            "overrideProvider": "openrouter",
+            "overrideModel": "qwen/qwen3.5-27b",
+            "overrideApiKeyEnv": "OPENROUTER_API_KEY"
+          },
+          "interaction": {
+            "autoApprove": false,
+            "approvalMode": "auto",
+            "interactive": true,
+            "clarificationMode": "fail"
+          }
+        }
+        """#.write(to: settings, atomically: true, encoding: .utf8)
         let requestLog = temporaryFileURL(named: "app-model-requests.log")
         let executable = try makeRuntimeScript(#"""
 printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.10","bridgeVersion":"0.1.0","pid":123}}'
@@ -99,6 +120,12 @@ done
 
         XCTAssertEqual(model.workspacePath, workspace.standardizedFileURL.path)
         XCTAssertEqual(model.settingsConfigPath, settings.path)
+        XCTAssertEqual(model.configuredRuntimeMode, "postgres")
+        XCTAssertEqual(model.configuredProvider, "openrouter")
+        XCTAssertEqual(model.configuredModel, "qwen/qwen3.5-27b")
+        XCTAssertEqual(model.configuredApprovalMode, "auto", "approvalMode should take precedence over legacy autoApprove")
+        XCTAssertEqual(model.configuredClarificationMode, "fail")
+        XCTAssertNil(model.settingsConfigurationError)
         model.bootstrap()
         for _ in 0..<100 where !model.isConnected {
             try? await Task.sleep(for: .milliseconds(20))
@@ -116,10 +143,151 @@ done
         let params = try XCTUnwrap(runtimeInitialize.objectValue?["params"]?.objectValue)
         XCTAssertEqual(params["cwd"], .string(workspace.path))
         XCTAssertEqual(params["settingsConfigPath"], .string(settings.path))
-        XCTAssertEqual(params["approvalMode"], .string("manual"))
-        XCTAssertEqual(params["clarificationMode"], .string("interactive"))
+        XCTAssertEqual(params["runtimeMode"], .string("postgres"))
+        XCTAssertEqual(params["provider"], .string("openrouter"))
+        XCTAssertEqual(params["model"], .string("qwen/qwen3.5-27b"))
+        XCTAssertEqual(params["approvalMode"], .string("auto"))
+        XCTAssertEqual(params["clarificationMode"], .string("fail"))
+        XCTAssertNil(params["overrideApiKeyEnv"])
+        XCTAssertNil(params["apiKey"])
         XCTAssertNil(params["agentConfigPath"])
         await model.shutdown()
+    }
+
+    @MainActor
+    func testAppModelLoadsLegacyInteractionSettingsAndSafeFallbacks() throws {
+        let workspace = try temporaryDirectoryURL()
+        let settings = workspace.appendingPathComponent("agent.settings.json")
+        try #"""
+        {
+          "interaction": {
+            "autoApprove": true,
+            "interactive": false
+          }
+        }
+        """#.write(to: settings, atomically: true, encoding: .utf8)
+
+        let model = AppModel(workingDirectoryURL: workspace)
+        XCTAssertEqual(model.configuredApprovalMode, "auto")
+        XCTAssertEqual(model.configuredClarificationMode, "fail")
+
+        try "{}".write(to: settings, atomically: true, encoding: .utf8)
+        model.reloadSettingsConfiguration()
+        XCTAssertEqual(model.configuredApprovalMode, "manual")
+        XCTAssertEqual(model.configuredClarificationMode, "interactive")
+        XCTAssertEqual(model.configuredRuntimeMode, "")
+        XCTAssertEqual(model.configuredProvider, "")
+        XCTAssertEqual(model.configuredModel, "")
+    }
+
+    @MainActor
+    func testApplyingTypedSettingsPathReloadsOverridesBeforeInitialization() async throws {
+        let workspace = try temporaryDirectoryURL()
+        let localSettings = workspace.appendingPathComponent("agent.settings.json")
+        let replacementSettings = workspace.appendingPathComponent("replacement.settings.json")
+        try #"{"runtime":{"mode":"postgres"},"interaction":{"approvalMode":"auto"}}"#
+            .write(to: localSettings, atomically: true, encoding: .utf8)
+        try #"{"runtime":{"mode":"memory"},"interaction":{"approvalMode":"manual","clarificationMode":"fail"}}"#
+            .write(to: replacementSettings, atomically: true, encoding: .utf8)
+        let requestLog = temporaryFileURL(named: "typed-settings-requests.log")
+        let executable = try makeRuntimeScript(#"""
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.10","bridgeVersion":"0.1.0","pid":123}}'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
+  id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
+  method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
+  case "$method" in
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.10"}}' ;;
+    runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"runtimeMode":"memory"}}\n' "$id" ;;
+    runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
+    *) exit 91 ;;
+  esac
+done
+"""#)
+        let model = AppModel(
+            client: RuntimeClient(executableURL: executable, responseTimeout: .seconds(2)),
+            workingDirectoryURL: workspace
+        )
+        XCTAssertEqual(model.configuredApprovalMode, "auto")
+        model.settingsConfigPath = replacementSettings.path
+        model.applyConfiguration()
+        for _ in 0..<100 where !model.isConnected {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(model.isConnected, model.status)
+
+        let requests = try String(contentsOf: requestLog, encoding: .utf8)
+            .split(separator: "\n")
+            .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+        let initialization = try XCTUnwrap(requests.first {
+            $0.objectValue?["method"] == .string("runtime/initialize")
+        })
+        let params = try XCTUnwrap(initialization.objectValue?["params"]?.objectValue)
+        XCTAssertEqual(params["settingsConfigPath"], .string(replacementSettings.path))
+        XCTAssertEqual(params["runtimeMode"], .string("memory"))
+        XCTAssertEqual(params["approvalMode"], .string("manual"))
+        XCTAssertEqual(params["clarificationMode"], .string("fail"))
+        await model.shutdown()
+    }
+
+    @MainActor
+    func testRunTabsKeepIndependentUIStateAndReopenClosedRunsWithoutInterrupting() throws {
+        let model = AppModel(workingDirectoryURL: try temporaryDirectoryURL())
+        let firstTabID = try XCTUnwrap(model.selectedTabID)
+        model.setDraftText("First draft", forTab: firstTabID)
+        model.setChatMessage("First chat composer", forTab: firstTabID)
+        model.setSteerMessage("First steering note", forTab: firstTabID)
+        model.setScrollPosition("message-first", forTab: firstTabID)
+        model.setDetailMode(.inspection, forTab: firstTabID)
+
+        model.newChat()
+        let secondTabID = try XCTUnwrap(model.selectedTabID)
+        XCTAssertNotEqual(secondTabID, firstTabID)
+        model.setDraftText("Second draft", forTab: secondTabID)
+        model.setChatMessage("Second chat composer", forTab: secondTabID)
+        model.setSteerMessage("Second steering note", forTab: secondTabID)
+        model.setScrollPosition("message-second", forTab: secondTabID)
+
+        model.selectTab(firstTabID)
+        XCTAssertEqual(model.selectedTab?.draftKind, .run)
+        XCTAssertEqual(model.selectedTab?.draftText, "First draft")
+        XCTAssertEqual(model.selectedTab?.chatMessage, "First chat composer")
+        XCTAssertEqual(model.selectedTab?.steerMessage, "First steering note")
+        XCTAssertNil(model.selectedTab?.scrollPosition, "Changing the detail mode should reset its scroll target")
+        XCTAssertEqual(model.selectedTab?.detailMode, .inspection)
+
+        model.selectTab(secondTabID)
+        XCTAssertEqual(model.selectedTab?.draftKind, .chat)
+        XCTAssertEqual(model.selectedTab?.draftText, "Second draft")
+        XCTAssertEqual(model.selectedTab?.chatMessage, "Second chat composer")
+        XCTAssertEqual(model.selectedTab?.steerMessage, "Second steering note")
+        XCTAssertEqual(model.selectedTab?.scrollPosition, "message-second")
+        XCTAssertEqual(model.selectedTab?.detailMode, .results)
+
+        let recordID = UUID()
+        model.runs = [AppModel.RunRecord(
+            id: recordID,
+            kind: .run,
+            title: "Background run",
+            status: .running,
+            isRequestInFlight: true
+        )]
+        model.openRunTab(recordID)
+        let runTabID = try XCTUnwrap(model.selectedTabID)
+        XCTAssertEqual(model.selectedRunItemID, recordID)
+        XCTAssertEqual(model.tabs.count, 3)
+
+        model.closeTab(runTabID)
+        XCTAssertEqual(model.runs.first?.status, .running)
+        XCTAssertEqual(model.runs.first?.isRequestInFlight, true)
+        XCTAssertNil(model.tabs.first(where: { $0.selectedRunID == recordID }))
+
+        model.openRunTab(recordID)
+        XCTAssertEqual(model.selectedRunItemID, recordID)
+        XCTAssertNotNil(model.tabs.first(where: { $0.selectedRunID == recordID }))
+        let reopenedTabCount = model.tabs.count
+        model.openRunTab(recordID)
+        XCTAssertEqual(model.tabs.count, reopenedTabCount, "An already open run should activate its tab instead of duplicating it")
     }
 
     @MainActor
@@ -135,7 +303,7 @@ while IFS= read -r line; do
   case "$method" in
     initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.10"}}' ;;
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"runtimeMode":"memory"}}\n' "$id" ;;
-    run/inspect) printf '{"jsonrpc":"2.0","id":"%s","result":{"run":{"id":"persisted-run","status":"failed"},"events":[]}}\n' "$id" ;;
+    run/inspect) printf '{"jsonrpc":"2.0","id":"%s","result":{"run":{"id":"persisted-run","status":"running"},"events":[]}}\n' "$id" ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
     *) exit 91 ;;
   esac
@@ -151,25 +319,84 @@ done
         XCTAssertTrue(model.runs.isEmpty)
 
         model.runCommand("run/inspect", runId: "  persisted-run  ")
+        let recordID = try XCTUnwrap(model.runs.first?.id)
+        model.runs[0].output = .string("Original result")
         for _ in 0..<100 {
-            if model.runs.first?.output != nil, model.runs.first?.isRequestInFlight == false { break }
+            if model.runs.first?.inspection != nil, model.runs.first?.isRequestInFlight == false { break }
             try? await Task.sleep(for: .milliseconds(20))
         }
 
         let record = try XCTUnwrap(model.runs.first)
         XCTAssertEqual(model.selectedRunItemID, record.id)
         XCTAssertEqual(record.latestRunId, "persisted-run")
-        XCTAssertEqual(record.status, .failed)
-        XCTAssertEqual(record.output?.objectValue?["run"]?.objectValue?["id"], .string("persisted-run"))
+        XCTAssertEqual(record.status, .running)
+        XCTAssertEqual(record.output, .string("Original result"), "Inspecting must not replace the run result")
+        XCTAssertEqual(record.inspection?.objectValue?["run"]?.objectValue?["id"], .string("persisted-run"))
+        let tabID = try XCTUnwrap(model.selectedTabID)
+        XCTAssertEqual(model.selectedTab?.detailMode, .inspection)
+        model.setDetailMode(.results, forTab: tabID)
+        XCTAssertEqual(model.selectedTab?.detailMode, .results)
+        XCTAssertEqual(model.selectedRunItemID, recordID)
+        model.runCommand("run/inspect", for: recordID)
+        XCTAssertEqual(model.selectedTab?.detailMode, .inspection)
+        try? await Task.sleep(for: .milliseconds(50))
 
         let requests = try String(contentsOf: requestLog, encoding: .utf8)
             .split(separator: "\n")
             .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
-        let inspection = try XCTUnwrap(requests.first {
-            $0.objectValue?["method"] == .string("run/inspect")
+        let runtimeInitialization = try XCTUnwrap(requests.first {
+            $0.objectValue?["method"] == .string("runtime/initialize")
         })
+        let initializationParams = try XCTUnwrap(runtimeInitialization.objectValue?["params"]?.objectValue)
+        XCTAssertEqual(initializationParams["approvalMode"], .string("manual"))
+        XCTAssertEqual(initializationParams["clarificationMode"], .string("interactive"))
+        XCTAssertNil(initializationParams["runtimeMode"])
+        XCTAssertNil(initializationParams["provider"])
+        XCTAssertNil(initializationParams["model"])
+        let inspectionRequests = requests.filter {
+            $0.objectValue?["method"] == .string("run/inspect")
+        }
+        XCTAssertEqual(inspectionRequests.count, 1, "Reopening a recent unchanged inspection should use its cached snapshot")
+        let inspection = try XCTUnwrap(inspectionRequests.first)
         XCTAssertEqual(inspection.objectValue?["params"]?.objectValue?["runId"], .string("persisted-run"))
         await model.shutdown()
+    }
+
+    @MainActor
+    func testInspectionDiagnosticsSummarizeInsteadOfDuplicatingTheFullEventHistory() throws {
+        let model = AppModel(workingDirectoryURL: try temporaryDirectoryURL())
+        let recordID = UUID()
+        model.runs = [AppModel.RunRecord(
+            id: recordID,
+            kind: .run,
+            title: "Large inspection",
+            runIds: ["root-run"]
+        )]
+        let largePayload = String(repeating: "x", count: 128 * 1024)
+        let inspection: JSONValue = .object([
+            "run": .object([
+                "id": .string("root-run"),
+                "status": .string("running"),
+                "version": .number(42)
+            ]),
+            "events": .array([
+                .object([
+                    "seq": .number(1),
+                    "type": .string("tool.completed"),
+                    "payload": .object(["output": .string(largePayload)])
+                ])
+            ])
+        ])
+
+        try model.acceptRunCommandResult(inspection, method: "run/inspect", for: recordID)
+
+        XCTAssertEqual(model.runs[0].inspection, inspection, "The complete snapshot should remain available to the inspection view")
+        let diagnostic = try XCTUnwrap(model.events.last)
+        XCTAssertLessThan(diagnostic.utf8.count, 1_024)
+        XCTAssertTrue(diagnostic.contains("runId: root-run"))
+        XCTAssertTrue(diagnostic.contains("version: 42"))
+        XCTAssertTrue(diagnostic.contains("events: 1"))
+        XCTAssertFalse(diagnostic.contains(largePayload))
     }
 
     @MainActor
@@ -258,6 +485,141 @@ done
         XCTAssertEqual(childFile.sourceRunId, "child-run")
         XCTAssertEqual(model.relativeDisplayPath(for: childFile), "Sources/Existing.swift")
         XCTAssertTrue(model.fileExists(childFile))
+    }
+
+    @MainActor
+    func testChildTerminalEventsDoNotTerminateTheRootRecord() throws {
+        let model = AppModel(workingDirectoryURL: try temporaryDirectoryURL())
+        let recordID = UUID()
+        model.runs = [AppModel.RunRecord(id: recordID, kind: .run, title: "Delegating")]
+        model.acceptResult(.object(["runId": .string("root-run")]), for: recordID)
+        model.runs[0].status = .running
+        model.runs[0].isRequestInFlight = true
+        model.runs[0].output = .string("Root output")
+        model.runs[0].interaction = AppModel.Interaction(
+            runId: "root-run",
+            message: "Root question",
+            kind: .clarification(suggestedQuestions: [])
+        )
+
+        model.receive(method: "agent/event", params: .object([
+            "type": .string("delegate.spawned"),
+            "runId": .string("root-run"),
+            "payload": .object([
+                "childRunId": .string("child-run"),
+                "rootRunId": .string("root-run")
+            ])
+        ]))
+        for (type, payload) in [
+            ("run.completed", JSONValue.object(["rootRunId": .string("root-run"), "output": .string("Child output")])),
+            ("run.failed", JSONValue.object(["rootRunId": .string("root-run"), "error": .string("Child failed")])),
+            ("run.status_changed", JSONValue.object(["rootRunId": .string("root-run"), "toStatus": .string("failed")]))
+        ] {
+            model.receive(method: "agent/event", params: .object([
+                "type": .string(type),
+                "runId": .string("child-run"),
+                "payload": payload
+            ]))
+        }
+
+        XCTAssertEqual(model.runs[0].status, .running)
+        XCTAssertTrue(model.runs[0].isRequestInFlight)
+        XCTAssertEqual(model.runs[0].output, .string("Root output"))
+        XCTAssertEqual(model.runs[0].interaction?.message, "Root question")
+    }
+
+    @MainActor
+    func testApprovalRejectionAppliesNestedFailedRun() throws {
+        let model = AppModel(workingDirectoryURL: try temporaryDirectoryURL())
+        let recordID = UUID()
+        var interaction = AppModel.Interaction(
+            runId: "root-run",
+            message: "Approve tool?",
+            kind: .approval(toolName: "shell_exec", input: nil, assistantContent: nil)
+        )
+        interaction.isResolving = true
+        model.runs = [AppModel.RunRecord(
+            id: recordID,
+            kind: .run,
+            title: "Rejected run",
+            runIds: ["root-run"],
+            status: .waitingForApproval,
+            interaction: interaction,
+            isRequestInFlight: true
+        )]
+
+        model.acceptApprovalResolution(.object([
+            "run": .object([
+                "id": .string("root-run"),
+                "status": .string("failed"),
+                "errorMessage": .string("Approval rejected for shell_exec")
+            ]),
+            "events": .array([])
+        ]), approved: false, for: recordID)
+
+        XCTAssertEqual(model.runs[0].status, .failed)
+        XCTAssertFalse(model.runs[0].isRequestInFlight)
+        XCTAssertNil(model.runs[0].interaction)
+        XCTAssertEqual(model.runs[0].errorMessage, "Approval rejected for shell_exec")
+    }
+
+    @MainActor
+    func testRecoveryAndAuxiliaryCommandsPreserveIndependentLifecycleState() throws {
+        let model = AppModel(workingDirectoryURL: try temporaryDirectoryURL())
+        let recordID = UUID()
+        model.runs = [AppModel.RunRecord(
+            id: recordID,
+            kind: .run,
+            title: "Recovering run",
+            runIds: ["root-run"],
+            status: .running,
+            isRequestInFlight: true,
+            auxiliaryOperations: [.inspect, .steer]
+        )]
+
+        try model.acceptRunCommandResult(.object([
+            "run": .object(["id": .string("root-run"), "status": .string("running")]),
+            "events": .array([])
+        ]), method: "run/inspect", for: recordID)
+        model.acceptSteeringResult(.object([
+            "runId": .string("root-run"),
+            "accepted": .bool(true)
+        ]), for: recordID)
+        XCTAssertTrue(model.runs[0].isRequestInFlight)
+        XCTAssertEqual(model.runs[0].status, .running)
+        XCTAssertTrue(model.runs[0].auxiliaryOperations.isEmpty)
+
+        model.runs[0].auxiliaryOperations.insert(.steer)
+        model.auxiliaryRequestFailed(
+            RuntimeClientError.remote(code: -32602, protocolCode: "INVALID_PARAMS", message: "Cannot steer"),
+            operation: .steer,
+            for: recordID
+        )
+        XCTAssertEqual(model.runs[0].status, .running)
+        XCTAssertTrue(model.runs[0].isRequestInFlight)
+        XCTAssertEqual(model.runs[0].auxiliaryErrorMessage, "INVALID_PARAMS: Cannot steer")
+
+        try model.acceptRunCommandResult(.object([
+            "runId": .string("root-run"),
+            "action": .string("retry_same_run"),
+            "plan": .object([:]),
+            "result": .object([
+                "status": .string("success"),
+                "runId": .string("recovered-run"),
+                "output": .string("Recovered")
+            ])
+        ]), method: "run/recover", for: recordID)
+        XCTAssertEqual(model.runs[0].status, .succeeded)
+        XCTAssertEqual(model.runs[0].latestRunId, "recovered-run")
+        XCTAssertEqual(model.runs[0].output, .string("Recovered"))
+        XCTAssertFalse(model.runs[0].isRequestInFlight)
+
+        model.runs[0].auxiliaryOperations.insert(.interrupt)
+        try model.acceptRunCommandResult(.object([
+            "runId": .string("recovered-run"),
+            "interrupted": .bool(true)
+        ]), method: "run/interrupt", for: recordID)
+        XCTAssertEqual(model.runs[0].status, .succeeded, "A no-op interrupt must preserve terminal status")
     }
 
     func testRuntimeProcessUsesSuppliedWorkingDirectory() async throws {
@@ -460,6 +822,34 @@ printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"
         let (firstResult, secondResult) = try await (first, second)
         XCTAssertEqual(firstResult.objectValue?["label"], .string("first"))
         XCTAssertEqual(secondResult.objectValue?["label"], .string("second"))
+        await client.shutdown()
+    }
+
+    func testSlowNotificationHandlerDoesNotDelayFollowingResponse() async throws {
+        let executable = try makeRuntimeScript(#"""
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.10","bridgeVersion":"0.1.0","pid":123}}'
+while IFS= read -r line; do
+  id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
+  method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
+  case "$method" in
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.10"}}' ;;
+    runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id" ;;
+    runtime/info)
+      printf '%s\n' '{"jsonrpc":"2.0","method":"agent/event","params":{"schemaVersion":1,"type":"run.started","runId":"run-1"}}'
+      printf '{"jsonrpc":"2.0","id":"%s","result":{"ready":true}}\n' "$id"
+      ;;
+    runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
+    *) exit 91 ;;
+  esac
+done
+"""#)
+        let client = RuntimeClient(executableURL: executable, responseTimeout: .milliseconds(50))
+        try await client.start(notificationHandler: { _, _ in
+            try? await Task.sleep(for: .milliseconds(200))
+        }, errorHandler: { _ in })
+        _ = try await client.initializeRuntime()
+        let result = try await client.send(method: "runtime/info")
+        XCTAssertEqual(result.objectValue?["ready"], .bool(true))
         await client.shutdown()
     }
 
