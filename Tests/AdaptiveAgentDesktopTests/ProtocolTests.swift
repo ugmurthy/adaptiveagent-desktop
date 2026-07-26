@@ -383,7 +383,13 @@ done
                 .object([
                     "seq": .number(1),
                     "type": .string("tool.completed"),
-                    "payload": .object(["output": .string(largePayload)])
+                    "runId": .string("root-run"),
+                    "toolCallId": .string("search-call"),
+                    "payload": .object([
+                        "toolName": .string("web_search"),
+                        "input": .object(["query": .string("compact progress UI")]),
+                        "output": .string(largePayload)
+                    ])
                 ])
             ])
         ])
@@ -397,6 +403,102 @@ done
         XCTAssertTrue(diagnostic.contains("version: 42"))
         XCTAssertTrue(diagnostic.contains("events: 1"))
         XCTAssertFalse(diagnostic.contains(largePayload))
+        XCTAssertEqual(model.runs[0].activities.first?.toolName, "web_search")
+        XCTAssertEqual(model.runs[0].activities.first?.detail, "compact progress UI")
+        XCTAssertEqual(model.runs[0].activities.first?.toolState, .succeeded)
+    }
+
+    @MainActor
+    func testAgentEventsBuildCompactActivityFeedAndUpdateToolsInPlace() throws {
+        let model = AppModel(workingDirectoryURL: try temporaryDirectoryURL())
+        let recordID = UUID()
+        model.runs = [AppModel.RunRecord(id: recordID, kind: .run, title: "Research")]
+        model.acceptResult(.object(["runId": .string("root-run")]), for: recordID)
+        model.receive(method: "agent/event", params: .object([
+            "type": .string("run.started"),
+            "runId": .string("root-run"),
+            "payload": .object(["rootRunId": .string("root-run")])
+        ]))
+
+        let assistantContent = "I’ll check the documentation and then inspect the local file."
+        model.receive(method: "agent/event", params: .object([
+            "id": .string("event-1"),
+            "type": .string("tool.started"),
+            "runId": .string("root-run"),
+            "stepId": .string("step-1"),
+            "toolCallId": .string("search-call"),
+            "payload": .object([
+                "toolName": .string("web_search"),
+                "assistantContent": .string(assistantContent),
+                "input": .object(["query": .string("SwiftUI TimelineView macOS")])
+            ])
+        ]))
+
+        XCTAssertEqual(model.runs[0].activities.count, 2)
+        XCTAssertEqual(model.runs[0].activities[0].content, assistantContent)
+        XCTAssertEqual(model.runs[0].activities[1].toolName, "web_search")
+        XCTAssertEqual(model.runs[0].activities[1].detail, "SwiftUI TimelineView macOS")
+        XCTAssertEqual(model.runs[0].activities[1].toolState, .running)
+
+        model.receive(method: "agent/event", params: .object([
+            "id": .string("event-2"),
+            "type": .string("tool.completed"),
+            "runId": .string("root-run"),
+            "stepId": .string("step-1"),
+            "toolCallId": .string("search-call"),
+            "payload": .object([
+                "toolName": .string("web_search"),
+                "assistantContent": .string(assistantContent),
+                "output": .object(["resultCount": .number(4)])
+            ])
+        ]))
+        model.receive(method: "agent/event", params: .object([
+            "id": .string("event-3"),
+            "type": .string("tool.completed"),
+            "runId": .string("root-run"),
+            "stepId": .string("step-1"),
+            "toolCallId": .string("page-call"),
+            "payload": .object([
+                "toolName": .string("read_web_page"),
+                "assistantContent": .string(assistantContent),
+                "input": .object(["url": .string("https://www.example.com/reference/page")]),
+                "output": .object(["title": .string("Reference")])
+            ])
+        ]))
+        model.receive(method: "agent/event", params: .object([
+            "id": .string("event-4"),
+            "type": .string("tool.failed"),
+            "runId": .string("root-run"),
+            "stepId": .string("step-2"),
+            "toolCallId": .string("file-call"),
+            "payload": .object([
+                "toolName": .string("read_file"),
+                "input": .object(["path": .string("/workspace/Sources/AppModel.swift")]),
+                "error": .string("Not found")
+            ])
+        ]))
+
+        XCTAssertEqual(model.runs[0].activities.filter { $0.kind == .assistant }.count, 1)
+        XCTAssertEqual(model.runs[0].activities.first { $0.id == "tool:search-call" }?.toolState, .succeeded)
+        XCTAssertEqual(model.runs[0].activities.first { $0.id == "tool:search-call" }?.detail, "SwiftUI TimelineView macOS")
+        XCTAssertEqual(model.runs[0].activities.first { $0.id == "tool:page-call" }?.detail, "example.com")
+        XCTAssertEqual(model.runs[0].activities.first { $0.id == "tool:file-call" }?.detail, "AppModel.swift")
+        XCTAssertEqual(model.runs[0].activities.first { $0.id == "tool:file-call" }?.toolState, .failed)
+
+        model.receive(method: "agent/event", params: .object([
+            "type": .string("run.completed"),
+            "runId": .string("root-run"),
+            "payload": .object([
+                "rootRunId": .string("root-run"),
+                "output": .string("Finished the research.")
+            ])
+        ]))
+
+        XCTAssertEqual(model.runs[0].status, .succeeded)
+        XCTAssertNotNil(model.runs[0].activityStartedAt)
+        XCTAssertNotNil(model.runs[0].activityFinishedAt)
+        XCTAssertEqual(model.runs[0].activities.last?.content, "Finished the research.")
+        XCTAssertEqual(model.runs[0].activities.last?.isFinalAssistantMessage, true)
     }
 
     @MainActor
@@ -526,6 +628,10 @@ done
         XCTAssertTrue(model.runs[0].isRequestInFlight)
         XCTAssertEqual(model.runs[0].output, .string("Root output"))
         XCTAssertEqual(model.runs[0].interaction?.message, "Root question")
+        XCTAssertFalse(
+            model.runs[0].activities.contains(where: { $0.isFinalAssistantMessage }),
+            "A child result must not be presented as the root assistant's final answer"
+        )
     }
 
     @MainActor

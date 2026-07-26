@@ -84,6 +84,20 @@ final class AppModel: ObservableObject {
         let content: String
     }
 
+    struct RunActivity: Identifiable, Equatable {
+        enum Kind: Equatable { case assistant, tool }
+        enum ToolState: Equatable { case awaitingApproval, running, succeeded, failed, skipped }
+
+        let id: String
+        let kind: Kind
+        let sourceRunId: String
+        var content: String?
+        var toolName: String?
+        var detail: String?
+        var toolState: ToolState?
+        var isFinalAssistantMessage = false
+    }
+
     struct Interaction: Equatable {
         enum Kind: Equatable {
             case approval(toolName: String?, input: JSONValue?, assistantContent: String?)
@@ -121,6 +135,9 @@ final class AppModel: ObservableObject {
         var interaction: Interaction?
         var files: [RunFile] = []
         var chatMessages: [ChatMessage] = []
+        var activities: [RunActivity] = []
+        var activityStartedAt: Date?
+        var activityFinishedAt: Date?
         var isRequestInFlight = false
         var auxiliaryOperations: Set<AuxiliaryOperation> = []
         var auxiliaryErrorMessage: String?
@@ -638,6 +655,7 @@ final class AppModel: ObservableObject {
             runs[index].errorMessage = nil
             if longRunning {
                 runs[index].status = .running
+                beginActivityTimer(at: index)
             }
             if mayCreateRun {
                 pendingRootAssignments.append(recordID)
@@ -748,6 +766,7 @@ final class AppModel: ObservableObject {
         case "success":
             resolvedInteractions.remove(recordID)
             runs[index].status = .succeeded
+            finishActivityTimer(at: index)
             runs[index].interaction = nil
             runs[index].errorMessage = nil
             if let output = object["output"] {
@@ -756,6 +775,7 @@ final class AppModel: ObservableObject {
         case "failure":
             resolvedInteractions.remove(recordID)
             runs[index].status = object["code"]?.stringValue == "INTERRUPTED" ? .interrupted : .failed
+            finishActivityTimer(at: index)
             runs[index].interaction = nil
             runs[index].errorMessage = object["error"]?.stringValue ?? "The run failed."
         case "approval_requested":
@@ -818,6 +838,7 @@ final class AppModel: ObservableObject {
         }
         runs[index].status = status
         if status == .failed {
+            finishActivityTimer(at: index)
             runs[index].errorMessage = run["errorMessage"]?.stringValue
                 ?? run["error"]?.stringValue
                 ?? "Approval was rejected."
@@ -849,6 +870,7 @@ final class AppModel: ObservableObject {
             finishAuxiliaryOperation(.interrupt, for: recordID)
             if let index = runs.firstIndex(where: { $0.id == recordID }), runs[index].status.isActive {
                 runs[index].status = .interrupted
+                finishActivityTimer(at: index)
             }
         case "run/recover":
             guard let recoveredResult = result.objectValue?["result"] else {
@@ -879,6 +901,16 @@ final class AppModel: ObservableObject {
         if type == "delegate.spawned",
            let childRunId = payload["childRunId"]?.stringValue,
            let rootRunId = payload["rootRunId"]?.stringValue {
+            if let index = recordIndex(forRunId: runId) {
+                captureProgressActivity(
+                    event: event,
+                    type: type,
+                    payload: payload,
+                    sourceRunId: runId,
+                    isRootEvent: false,
+                    at: index
+                )
+            }
             runToRoot[childRunId] = rootRunId
             return
         }
@@ -892,25 +924,39 @@ final class AppModel: ObservableObject {
                     removePendingAssignment(pendingID)
                 }
                 updateStatus(.running, forRunId: runId)
+                if let index = recordIndex(forRunId: runId) { beginActivityTimer(at: index) }
             }
             return
         }
 
         let rootRunId = payload["rootRunId"]?.stringValue ?? runToRoot[runId] ?? runId
         let isRootEvent = rootRunId == runId
+        if let index = recordIndex(forRunId: runId) {
+            captureProgressActivity(
+                event: event,
+                type: type,
+                payload: payload,
+                sourceRunId: runId,
+                isRootEvent: isRootEvent,
+                at: index
+            )
+        }
         switch type {
         case "run.started":
             guard isRootEvent else { return }
             updateStatus(.running, forRunId: runId)
+            if let index = recordIndex(forRunId: runId) { beginActivityTimer(at: index) }
         case "run.completed":
             guard isRootEvent, let index = recordIndex(forRunId: runId) else { return }
             runs[index].status = .succeeded
+            finishActivityTimer(at: index)
             runs[index].isRequestInFlight = false
             runs[index].interaction = nil
             if let output = payload["output"] { applyOutput(output, to: index) }
         case "run.failed", "replan.required":
             guard isRootEvent, let index = recordIndex(forRunId: runId) else { return }
             runs[index].status = payload["code"]?.stringValue == "INTERRUPTED" ? .interrupted : .failed
+            finishActivityTimer(at: index)
             runs[index].isRequestInFlight = false
             runs[index].interaction = nil
             runs[index].errorMessage = payload["error"]?.stringValue ?? "The run failed."
@@ -1007,7 +1053,10 @@ final class AppModel: ObservableObject {
 
     private func beginAgentRequest(method: String, fields: [String: JSONValue], recordID: UUID) {
         pendingRootAssignments.append(recordID)
-        if let index = runs.firstIndex(where: { $0.id == recordID }) { runs[index].status = .running }
+        if let index = runs.firstIndex(where: { $0.id == recordID }) {
+            runs[index].status = .running
+            beginActivityTimer(at: index)
+        }
         Task {
             do {
                 let result = try await client.send(method: method, params: fields, timeoutPolicy: .none)
@@ -1037,8 +1086,13 @@ final class AppModel: ObservableObject {
     }
 
     private func handleStatusChange(_ status: String?, runId: String) {
-        guard let status = runtimeStatus(status) else { return }
-        updateStatus(status, forRunId: runId)
+        guard let status = runtimeStatus(status), let index = recordIndex(forRunId: runId) else { return }
+        runs[index].status = status
+        if status == .running {
+            beginActivityTimer(at: index)
+        } else if !status.isActive {
+            finishActivityTimer(at: index)
+        }
     }
 
     private func runtimeStatus(_ status: String?) -> RunStatus? {
@@ -1060,9 +1114,24 @@ final class AppModel: ObservableObject {
     ) {
         guard let index = runs.firstIndex(where: { $0.id == recordID }) else { return }
         runs[index].inspection = result
-
         let inspectedRun = result.objectValue?["run"]?.objectValue
         let runId = inspectedRun?["id"]?.stringValue ?? requestedRunId ?? runs[index].latestRunId
+
+        if case .array(let events)? = result.objectValue?["events"] {
+            for case .object(let event) in events {
+                guard let type = event["type"]?.stringValue,
+                      let sourceRunId = event["runId"]?.stringValue else { continue }
+                captureProgressActivity(
+                    event: event,
+                    type: type,
+                    payload: event["payload"]?.objectValue ?? [:],
+                    sourceRunId: sourceRunId,
+                    isRootEvent: sourceRunId == runId,
+                    at: index
+                )
+            }
+        }
+
         if let runId {
             inspectionCacheMetadata[recordID] = InspectionCacheMetadata(
                 runId: runId,
@@ -1075,11 +1144,173 @@ final class AppModel: ObservableObject {
 
     private func applyOutput(_ output: JSONValue, to index: Int) {
         runs[index].output = output
+        if runs[index].kind == .run, let content = output.stringValue {
+            appendAssistantActivity(
+                content: content,
+                id: "assistant:\(runs[index].latestRunId ?? runs[index].id.uuidString):final",
+                sourceRunId: runs[index].latestRunId ?? "",
+                isFinal: true,
+                at: index
+            )
+            return
+        }
         guard runs[index].kind == .chat else { return }
         let content = output.stringValue ?? output.prettyPrinted
         if runs[index].chatMessages.last?.role != .assistant || runs[index].chatMessages.last?.content != content {
             runs[index].chatMessages.append(ChatMessage(role: .assistant, content: content))
         }
+    }
+
+    private func captureProgressActivity(
+        event: [String: JSONValue],
+        type: String,
+        payload: [String: JSONValue],
+        sourceRunId: String,
+        isRootEvent: Bool,
+        at index: Int
+    ) {
+        if let content = payload["assistantContent"]?.stringValue {
+            let stepKey = event["stepId"]?.stringValue
+                ?? event["id"]?.stringValue
+                ?? content
+            appendAssistantActivity(
+                content: content,
+                id: "assistant:\(sourceRunId):\(stepKey)",
+                sourceRunId: sourceRunId,
+                isFinal: false,
+                at: index
+            )
+        }
+
+        if type == "run.completed",
+           isRootEvent,
+           runs[index].kind == .run,
+           let content = payload["output"]?.stringValue {
+            appendAssistantActivity(
+                content: content,
+                id: "assistant:\(sourceRunId):final",
+                sourceRunId: sourceRunId,
+                isFinal: true,
+                at: index
+            )
+        }
+
+        guard ["approval.requested", "tool.started", "tool.completed", "tool.failed"].contains(type),
+              let toolName = payload["toolName"]?.stringValue else { return }
+        let correlationID = event["toolCallId"]?.stringValue
+            ?? [sourceRunId, event["stepId"]?.stringValue ?? "step", toolName].joined(separator: ":")
+        let id = "tool:\(correlationID)"
+        let state: RunActivity.ToolState = switch type {
+        case "approval.requested": .awaitingApproval
+        case "tool.started": .running
+        case "tool.completed": payload["skipped"] == .bool(true) ? .skipped : .succeeded
+        default: .failed
+        }
+        let detail = Self.compactToolDetail(toolName: toolName, input: payload["input"]?.objectValue)
+
+        if let activityIndex = runs[index].activities.firstIndex(where: { $0.id == id }) {
+            runs[index].activities[activityIndex].toolName = toolName
+            runs[index].activities[activityIndex].toolState = state
+            if let detail { runs[index].activities[activityIndex].detail = detail }
+        } else {
+            appendActivity(RunActivity(
+                id: id,
+                kind: .tool,
+                sourceRunId: sourceRunId,
+                toolName: toolName,
+                detail: detail,
+                toolState: state
+            ), at: index)
+        }
+    }
+
+    private func appendAssistantActivity(
+        content: String,
+        id: String,
+        sourceRunId: String,
+        isFinal: Bool,
+        at index: Int
+    ) {
+        let content = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty else { return }
+        if let activityIndex = runs[index].activities.firstIndex(where: { $0.id == id }) {
+            runs[index].activities[activityIndex].content = content
+            runs[index].activities[activityIndex].isFinalAssistantMessage = isFinal
+            return
+        }
+        if let activityIndex = runs[index].activities.firstIndex(where: {
+            $0.kind == .assistant && $0.sourceRunId == sourceRunId && $0.content == content
+        }) {
+            if isFinal { runs[index].activities[activityIndex].isFinalAssistantMessage = true }
+            return
+        }
+        appendActivity(RunActivity(
+            id: id,
+            kind: .assistant,
+            sourceRunId: sourceRunId,
+            content: content,
+            isFinalAssistantMessage: isFinal
+        ), at: index)
+    }
+
+    private func appendActivity(_ activity: RunActivity, at index: Int) {
+        runs[index].activities.append(activity)
+        if runs[index].activities.count > 250 {
+            runs[index].activities.removeFirst(runs[index].activities.count - 250)
+        }
+    }
+
+    private nonisolated static func compactToolDetail(
+        toolName: String,
+        input: [String: JSONValue]?
+    ) -> String? {
+        guard let input else { return nil }
+        let rawDetail: String?
+        switch toolName {
+        case "web_search":
+            rawDetail = input["query"]?.stringValue
+        case "read_web_page", "fetch_page":
+            if let urlText = input["url"]?.stringValue,
+               let host = URL(string: urlText)?.host {
+                rawDetail = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+            } else {
+                rawDetail = input["url"]?.stringValue
+            }
+        case "read_file", "write_file", "edit_file":
+            rawDetail = input["path"]?.stringValue.map { URL(fileURLWithPath: $0).lastPathComponent }
+        case "shell_exec":
+            rawDetail = input["command"]?.stringValue
+        default:
+            if toolName.localizedCaseInsensitiveContains("file"),
+               let path = input["path"]?.stringValue {
+                rawDetail = URL(fileURLWithPath: path).lastPathComponent
+            } else {
+                rawDetail = ["query", "url", "path", "command", "name"]
+                    .compactMap { input[$0]?.stringValue }
+                    .first
+            }
+        }
+        guard let rawDetail else { return nil }
+        let detail = rawDetail
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+        guard !detail.isEmpty else { return nil }
+        return detail.count > 96 ? String(detail.prefix(93)) + "…" : detail
+    }
+
+    private func beginActivityTimer(at index: Int) {
+        guard runs.indices.contains(index) else { return }
+        if runs[index].activityStartedAt == nil || runs[index].activityFinishedAt != nil {
+            runs[index].activityStartedAt = Date()
+            runs[index].activityFinishedAt = nil
+        }
+    }
+
+    private func finishActivityTimer(at index: Int) {
+        guard runs.indices.contains(index),
+              runs[index].activityStartedAt != nil,
+              runs[index].activityFinishedAt == nil else { return }
+        runs[index].activityFinishedAt = Date()
     }
 
     private func captureFiles(from payload: [String: JSONValue], sourceRunId: String) {
@@ -1154,6 +1385,7 @@ final class AppModel: ObservableObject {
         guard let index = runs.firstIndex(where: { $0.id == recordID }) else { return }
         runs[index].isRequestInFlight = false
         runs[index].status = .failed
+        finishActivityTimer(at: index)
         runs[index].errorMessage = error.localizedDescription
         appendEvent("Error: \(error.localizedDescription)")
     }
@@ -1238,6 +1470,7 @@ final class AppModel: ObservableObject {
         for index in runs.indices {
             if runs[index].status.isActive || runs[index].isRequestInFlight {
                 runs[index].status = .interrupted
+                finishActivityTimer(at: index)
             }
             runs[index].isRequestInFlight = false
             runs[index].auxiliaryOperations.removeAll()

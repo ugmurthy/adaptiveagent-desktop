@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tech Daily - AI & Technology News</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        @font-face {
+            font-family: 'Noto Serif';
+            src: url('https://fonts.googleapis.com/css2?family=Noto+Serif:wght@400;700&display=swap');
+        }
+
+        @font-face {
+            font-family: 'Noto Sans';
+            src: url('https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;600;700&display=swap');
+        }
+
+        body {
+            font-family: 'Noto Serif', Georgia, serif;
+            background-color: #fff;
+            color: #333;
+            line-height: 1.6;
+            max-width: 980px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        /* Header */
+        header {
+            border-top: 3px solid #000;
+            border-bottom: 1px solid #ccc;
+            padding: 30px 0;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+
+        .masthead {
+            font-family: 'Noto Serif', Georgia, serif;
+            font-size: 48px;
+            font-weight: 700;
+            letter-spacing: 2px;
+            margin-bottom: 5px;
+            text-transform: uppercase;
+            color: #000;
+        }
+
+        .tagline {
+            font-family: 'Noto Sans', Helvetica, sans-serif;
+            font-size: 14px;
+            letter-spacing: 1px;
+            color: #666;
+            text-transform: uppercase;
+        }
+
+        .date-line {
+            font-size: 12px;
+            color: #999;
+            margin-top: 10px;
+            font-family: 'Noto Sans', Helvetica, sans-serif;
+            font-style: italic;
+        }
+
+        /* Navigation */
+        nav {
+            border-top: 1px solid #ccc;
+            border-bottom: 1px solid #ccc;
+            padding: 10px 0;
+            margin-bottom: 30px;
+            font-family: 'Noto Sans', Helvetica, sans-serif;
+            font-size: 13px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        nav a {
+            margin-right: 30px;
+            color: #000;
+            text-decoration: none;
+            display: inline-block;
+        }
+
+        nav a:hover {
+            text-decoration: underline;
+        }
+
+        /* Main Content */
+        main {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 30px;
+            margin-bottom: 40px;
+        }
+
+        .primary-story {
+            border-bottom: 2px solid #ccc;
+            padding-bottom: 30px;
+        }
+
+        .primary-headline {
+            font-size: 36px;
+            font-weight: 700;
+            line-height: 1.2;
+            margin-bottom: 15px;
+            color: #000;
+        }
+
+        .primary-subheadline {
+            font-size: 20px;
+            font-weight: 400;
+            color: #666;
+            margin-bottom: 15px;
+            line-height: 1.4;
+        }
+
+        .byline {
+            font-size: 13px;
+            color: #666;
+            margin-bottom: 15px;
+            font-family: 'Noto Sans', Helvetica, sans-serif;
+            font-weight: 600;
+        }
+
+        .article-text {
+            font-size: 16px;
+            line-height: 1.8;
+            margin-bottom: 20px;
+            color: #333;
+        }
+
+        /* Articles Grid */
+        .articles-section {
+            margin-bottom: 40px;
+        }
+
+        .section-title {
+            font-family: 'Noto Sans', Helvetica, sans-serif;
+            font-size: 18px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            border-bottom: 2px solid #000;
+            padding-bottom: 10px;
+            margin-bottom: 20px;
+            color: #000;
+        }
+
+        .article-card {
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 20px;
+            margin-bottom: 20px;
+        }
+
+        .article-card:last-child {
+            border-bottom: none;
+        }
+
+        .article-headline {
+            font-size: 22px;
+            font-weight: 700;
+            margin-bottom: 8px;
+            line-height: 1.3;
+            color: #000;
+        }
+
+        .article-headline a {
+            color: #000;
+            text-decoration: none;
+        }
+
+        .article-headline a:hover {
+            text-decoration: underline;
+        }
+
+        .article-summary {
+            font-size: 15px;
+            line-height: 1.6;
+            color: #666;
+            margin-bottom: 10px;
+        }
+
+        .article-meta {
+            font-family: 'Noto Sans', Helvetica, sans-serif;
+            font-size: 12px;
+            color: #999;
+        }
+
+        .article-source {
+            font-weight: 600;
+            color: #333;
+        }
+
+        /* Sidebar */
+        aside {
+            border-left: 1px solid #ccc;
+            padding-left: 20px;
+        }
+
+        .sidebar-box {
+            margin-bottom: 30px;
+        }
+
+        .sidebar-title {
+            font-family: 'Noto Sans', Helvetica, sans-serif;
+            font-size: 14px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 15px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #ccc;
+        }
+
+        .stat-box {
+            background-color: #f5f5f5;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-left: 3px solid #000;
+        }
+
+        .stat-number {
+            font-size: 24px;
+            font-weight: 700;
+            color: #000;
+            margin-bottom: 5px;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #666;
+            font-family: 'Noto Sans', Helvetica, sans-serif;
+            line-height: 1.4;
+        }
+
+        /* Quick Links */
+        .quick-link {
+            display: block;
+            margin-bottom: 12px;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        .quick-link a {
+            color: #0051ba;
+            text-decoration: none;
+        }
+
+        .quick-link a:hover {
+            text-decoration: underline;
+        }
+
+        /* Footer */
+        footer {
+            border-top: 1px solid #ccc;
+            padding-top: 20px;
+            margin-top: 40px;
+            font-size: 12px;
+            color: #999;
+            font-family: 'Noto Sans', Helvetica, sans-serif;
+            text-align: center;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            main {
+                grid-template-columns: 1fr;
+            }
+
+            aside {
+                border-left: none;
+                border-top: 1px solid #ccc;
+                padding-left: 0;
+                padding-top: 20px;
+            }
+
+            .masthead {
+                font-size: 36px;
+            }
+
+            .primary-headline {
+                font-size: 28px;
+            }
+        }
+
+        /* Print friendly */
+        @media print {
+            body {
+                padding: 0;
+            }
+            
+            nav {
+                display: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <header>
+        <div class="masthead">Tech Daily</div>
+        <div class="tagline">AI & Technology Intelligence</div>
+        <div class="date-line">Friday, July 25, 2026</div>
+    </header>
+
+    <!-- Navigation -->
+    <nav>
+        <a href="#ai">AI & Innovation</a>
+        <a href="#enterprise">Enterprise</a>
+        <a href="#hardware">Hardware</a>
+        <a href="#market">Markets</a>
+    </nav>
+
+    <!-- Main Content -->
+    <main>
+        <!-- Primary Story -->
+        <article class="primary-story">
+            <h1 class="primary-headline">Silicon Valley Splits Over Chinese AI: OpenAI and Anthropic Challenge Industry Consensus</h1>
+            <p class="primary-subheadline">Tech giants clash over whether open-source AI models from China should face restrictions in major policy debate</p>
+            <p class="byline">By Tech Daily Staff | New York Times Technology Desk</p>
+            <p class="article-text">
+                A significant rift has emerged in Silicon Valley as OpenAI and Anthropic challenge the broader technology industry's stance on restricting Chinese artificial intelligence models. The debate centers on whether "open-source" AI models developed in China should be freely available to global developers or face controlled distribution.
+            </p>
+            <p class="article-text">
+                This unprecedented split highlights growing tensions between AI safety advocates who support restrictions and those advocating for open innovation principles. The disagreement could reshape policy discussions around international AI governance and set precedents for how nations approach technology transfer in the generative AI era.
+            </p>
+            <p class="article-text">
+                Sources close to the matter indicate discussions are ongoing with federal agencies regarding potential regulations. The outcome could have far-reaching implications for startups, research institutions, and multinational corporations operating across borders.
+            </p>
+            <p class="article-meta">
+                <span class="article-source">Source:</span> The New York Times | Updated: 2 hours ago
+            </p>
+        </article>
+
+        <!-- Secondary Articles -->
+        <article class="articles-section">
+            <h2 class="section-title">Latest Headlines</h2>
+
+            <div class="article-card">
+                <h3 class="article-headline">
+                    <a href="#story1">Generative AI Market Projected to Reach $2.3 Trillion by 2032</a>
+                </h3>
+                <p class="article-summary">
+                    Bloomberg Intelligence raises market forecast by $500 billion in new report, citing accelerating token consumption and rapid expansion of coding and customer service agents entering scaled enterprise deployments.
+                </p>
+                <p class="article-meta">
+                    <span class="article-source">CRN</span> • July 24, 2026 | <a href="#">More Details</a>
+                </p>
+            </div>
+
+            <div class="article-card">
+                <h3 class="article-headline">
+                    <a href="#story2">Bond Market Anxiety Growing Over AI Capital Expenditure Budgets</a>
+                </h3>
+                <p class="article-summary">
+                    Financial markets express concern about sustainability of massive AI infrastructure investments as companies race to build data centers and secure computing resources for model training and deployment.
+                </p>
+                <p class="article-meta">
+                    <span class="article-source">CNBC</span> • July 24, 2026 | <a href="#">More Details</a>
+                </p>
+            </div>
+
+            <div class="article-card">
+                <h3 class="article-headline">
+                    <a href="#story3">Anthropic Unveils Cost-Effective AI Model Rivaling Competitors</a>
+                </h3>
+                <p class="article-summary">
+                    Anthropic releases new Claude Opus model offering competitive performance at lower cost as enterprises grapple with ballooning AI expenditures and search for efficiency gains in artificial intelligence operations.
+                </p>
+                <p class="article-meta">
+                    <span class="article-source">CNBC</span> • July 24, 2026 | <a href="#">More Details</a>
+                </p>
+            </div>
+
+            <div class="article-card">
+                <h3 class="article-headline">
+                    <a href="#story4">OpenAI Hugging Face Hack Exposes Real Autonomous Threats</a>
+                </h3>
+                <p class="article-summary">
+                    Security incident demonstrates that autonomous AI threats once considered theoretical are now operational realities, prompting urgent industry discussions on AI agent governance and observability mechanisms.
+                </p>
+                <p class="article-meta">
+                    <span class="article-source">Accenture Research</span> • July 23, 2026 | <a href="#">More Details</a>
+                </p>
+            </div>
+
+            <div class="article-card">
+                <h3 class="article-headline">
+                    <a href="#story5">Chipmaker Revenue Surges 25% as AI Demand Accelerates</a>
+                </h3>
+                <p class="article-summary">
+                    Silicon Valley chipmaker reports fastest quarterly growth in 15 years, driven by surging demand from AI firms purchasing high-performance processors known as central processing units for model training and inference operations.
+                </p>
+                <p class="article-meta">
+                    <span class="article-source">The New York Times</span> • July 24, 2026 | <a href="#">More Details</a>
+                </p>
+            </div>
+
+            <div class="article-card">
+                <h3 class="article-headline">
+                    <a href="#story6">AI Coding Transforms MSP Software Model</a>
+                </h3>
+                <p class="article-summary">
+                    Managed service providers take control of technology stacks using AI-powered code generation tools, fundamentally reshaping traditional software licensing and support business models in the channel economy.
+                </p>
+                <p class="article-meta">
+                    <span class="article-source">CRN Magazine</span> • July 2026 | <a href="#">More Details</a>
+                </p>
+            </div>
+
+            <div class="article-card">
+                <h3 class="article-headline">
+                    <a href="#story7">NetApp Acquires DataPelago to Address AI Storage Bottleneck</a>
+                </h3>
+                <p class="article-summary">
+                    Enterprise storage provider makes strategic acquisition targeting next generation of AI data management challenges as organizations struggle with massive dataset requirements for model training and inference.
+                </p>
+                <p class="article-meta">
+                    <span class="article-source">Tech Industry News</span> • July 2026 | <a href="#">More Details</a>
+                </p>
+            </div>
+        </article>
+    </main>
+
+    <!-- Sidebar -->
+    <aside>
+        <!-- Key Statistics -->
+        <div class="sidebar-box">
+            <h3 class="sidebar-title">By the Numbers</h3>
+            
+            <div class="stat-box">
+                <div class="stat-number">$2.3T</div>
+                <div class="stat-label">Projected generative AI market size by 2032, up from $1.8T forecast</div>
+            </div>
+
+            <div class="stat-box">
+                <div class="stat-number">22%</div>
+                <div class="stat-label">Share of total tech spending that generative AI will represent by 2032</div>
+            </div>
+
+            <div class="stat-box">
+                <div class="stat-number">25%</div>
+                <div class="stat-label">Fastest quarterly revenue growth in 15 years for leading chipmaker</div>
+            </div>
+
+            <div class="stat-box">
+                <div class="stat-number">$500B</div>
+                <div class="stat-label">Increase in Bloomberg Intelligence's AI market forecast since March 2025</div>
+            </div>
+        </div>
+
+        <!-- Key Trends -->
+        <div class="sidebar-box">
+            <h3 class="sidebar-title">2026 Trends to Watch</h3>
+            <div class="quick-link">
+                <a href="#">• AI Agents Shift to Enterprise Mainstream</a>
+            </div>
+            <div class="quick-link">
+                <a href="#">• Agentic Systems Scale Deployments</a>
+            </div>
+            <div class="quick-link">
+                <a href="#">• AI PC Market Expansion</a>
+            </div>
+            <div class="quick-link">
+                <a href="#">• Token Consumption Acceleration</a>
+            </div>
+            <div class="quick-link">
+                <a href="#">• Training to Inference Workload Shift</a>
+            </div>
+        </div>
+
+        <!-- Industry Outlook -->
+        <div class="sidebar-box">
+            <h3 class="sidebar-title">Industry Outlook</h3>
+            <p style="font-size: 13px; line-height: 1.6; color: #666;">
+                The AI market continues its explosive growth trajectory with enterprises rapidly deploying agentic systems and organizations restructuring around AI-native architectures. Market analysts expect continued pressure on capital expenditures as infrastructure demands accelerate.
+            </p>
+        </div>
+    </aside>
+
+    <!-- Footer -->
+    <footer>
+        <p>&copy; 2026 Tech Daily. All rights reserved. | Published July 25, 2026</p>
+        <p>Sources: The New York Times, CNBC, CRN, Reuters, Bloomberg Intelligence, Accenture | <a href="#" style="color: #0051ba;">Privacy Policy</a> | <a href="#" style="color: #0051ba;">Terms of Service</a></p>
+    </footer>
+
+</body>
+</html>

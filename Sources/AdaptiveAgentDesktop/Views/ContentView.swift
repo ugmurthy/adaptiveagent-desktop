@@ -537,7 +537,11 @@ private struct RunDetailView: View {
                             .id("run-inspection")
                     } else if record.kind == .chat {
                         chatTranscript
+                        RunActivityFeed(record: record, agentName: model.agentName)
+                            .id("run-activity")
                     } else {
+                        RunActivityFeed(record: record, agentName: model.agentName)
+                            .id("run-activity")
                         runOutput
                             .id("run-output")
                     }
@@ -619,7 +623,8 @@ private struct RunDetailView: View {
         if let inspection = record.inspection {
             VStack(alignment: .leading, spacing: 12) {
                 Text("INSPECTION").sectionLabel()
-                InspectionOutputView(inspection: inspection)
+                RunActivityFeed(record: record, agentName: model.agentName)
+                InspectionOutputView(inspection: inspection, hasRelevantActivity: !record.activities.isEmpty)
             }
         } else if record.auxiliaryOperations.contains(.inspect) {
             HStack(spacing: 10) {
@@ -635,18 +640,17 @@ private struct RunDetailView: View {
     }
 
     @ViewBuilder private var runOutput: some View {
-        if let output = record.output {
+        if let output = record.output,
+           !record.activities.contains(where: { $0.isFinalAssistantMessage }) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("RESULT").sectionLabel()
                 OutputView(output: output)
             }
         } else if record.isRequestInFlight || record.status == .running || record.status == .queued {
-            HStack(spacing: 10) {
-                ProgressView().controlSize(.small)
-                Text("The agent is working…").foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, minHeight: 180)
-        } else if record.interaction == nil && record.errorMessage == nil {
+            EmptyView()
+        } else if record.interaction == nil
+                    && record.errorMessage == nil
+                    && !record.activities.contains(where: { $0.isFinalAssistantMessage }) {
             Text("No result was returned.")
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, minHeight: 180)
@@ -674,12 +678,6 @@ private struct RunDetailView: View {
                 }
             }
             .id("message-\(message.id.uuidString)")
-        }
-        if record.isRequestInFlight {
-            HStack(spacing: 9) {
-                ProgressView().controlSize(.small)
-                Text("Thinking…").foregroundStyle(.secondary)
-            }
         }
     }
 
@@ -809,26 +807,243 @@ private struct RunActionsMenu: View {
     }
 }
 
+private struct RunActivityFeed: View {
+    let record: AppModel.RunRecord
+    let agentName: String
+
+    private var isThinking: Bool {
+        record.interaction == nil
+            && (record.status == .queued || record.status == .running || record.isRequestInFlight)
+    }
+
+    private var showsDuration: Bool {
+        !record.status.isActive && record.activityStartedAt != nil && record.activityFinishedAt != nil
+    }
+
+    var body: some View {
+        if !record.activities.isEmpty || isThinking || showsDuration {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("ACTIVITY").sectionLabel()
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    ForEach(record.activities) { activity in
+                        RunActivityRow(activity: activity, agentName: agentName)
+                    }
+                    if isThinking {
+                        ThinkingActivityRow(startedAt: record.activityStartedAt)
+                            .id("thinking")
+                    } else if showsDuration,
+                              let startedAt = record.activityStartedAt,
+                              let finishedAt = record.activityFinishedAt {
+                        FinishedActivityRow(
+                            status: record.status,
+                            duration: max(0, finishedAt.timeIntervalSince(startedAt))
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct RunActivityRow: View {
+    let activity: AppModel.RunActivity
+    let agentName: String
+
+    var body: some View {
+        switch activity.kind {
+        case .assistant:
+            if let content = activity.content {
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(spacing: 7) {
+                        Image(systemName: "sparkles")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.tint)
+                        Text(agentName.isEmpty ? "AGENT" : agentName.uppercased())
+                            .sectionLabel()
+                        if activity.isFinalAssistantMessage {
+                            Text("FINAL")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(.quaternary.opacity(0.65), in: Capsule())
+                        }
+                    }
+                    MarkdownText(content: content)
+                }
+            }
+        case .tool:
+            ToolActivityRow(activity: activity)
+        }
+    }
+}
+
+private struct ToolActivityRow: View {
+    let activity: AppModel.RunActivity
+
+    var body: some View {
+        HStack(spacing: 11) {
+            Image(systemName: toolSymbol)
+                .font(.callout.weight(.medium))
+                .foregroundStyle(stateColor)
+                .frame(width: 28, height: 28)
+                .background(stateColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 7))
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(activity.toolName ?? "tool")
+                    .font(.callout.monospaced().weight(.medium))
+                    .lineLimit(1)
+                if let detail = activity.detail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+
+            Spacer(minLength: 12)
+            if activity.toolState == .running {
+                ProgressView().controlSize(.mini)
+            }
+            Text(stateLabel)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(stateColor)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 9)
+        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .combine)
+    }
+
+    private var toolSymbol: String {
+        switch activity.toolName {
+        case "web_search": return "magnifyingglass"
+        case "read_web_page", "fetch_page": return "globe"
+        case "read_file": return "doc.text.magnifyingglass"
+        case "write_file": return "square.and.pencil"
+        case "edit_file": return "pencil.line"
+        case "shell_exec": return "terminal"
+        default:
+            return activity.toolName?.localizedCaseInsensitiveContains("file") == true
+                ? "doc"
+                : "wrench.and.screwdriver"
+        }
+    }
+
+    private var stateLabel: String {
+        switch activity.toolState {
+        case .awaitingApproval: return "Approval"
+        case .running: return "Running"
+        case .succeeded: return "Done"
+        case .failed: return "Failed"
+        case .skipped: return "Skipped"
+        case nil: return ""
+        }
+    }
+
+    private var stateColor: Color {
+        switch activity.toolState {
+        case .awaitingApproval: return .orange
+        case .running: return .accentColor
+        case .succeeded: return .green
+        case .failed: return .red
+        case .skipped, nil: return .secondary
+        }
+    }
+}
+
+private struct ThinkingActivityRow: View {
+    let startedAt: Date?
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            HStack(spacing: 9) {
+                ProgressView().controlSize(.small)
+                Text("Thinking…")
+                    .foregroundStyle(.secondary)
+                if let startedAt {
+                    Text(Self.durationText(max(0, context.date.timeIntervalSince(startedAt))))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    fileprivate static func durationText(_ duration: TimeInterval) -> String {
+        let seconds = Int(duration.rounded(.down))
+        if seconds < 60 { return "\(seconds)s" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes)m \(seconds % 60)s" }
+        return "\(minutes / 60)h \(minutes % 60)m"
+    }
+}
+
+private struct FinishedActivityRow: View {
+    let status: AppModel.RunStatus
+    let duration: TimeInterval
+
+    var body: some View {
+        Label {
+            Text("\(label) \(ThinkingActivityRow.durationText(duration))")
+                .font(.caption.monospacedDigit())
+        } icon: {
+            Image(systemName: symbol)
+        }
+        .foregroundStyle(color)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var label: String {
+        status == .succeeded ? "Completed in" : "Stopped after"
+    }
+
+    private var symbol: String {
+        switch status {
+        case .succeeded: return "checkmark.circle.fill"
+        case .failed: return "xmark.circle.fill"
+        default: return "stop.circle.fill"
+        }
+    }
+
+    private var color: Color {
+        switch status {
+        case .succeeded: return .green
+        case .failed: return .red
+        default: return .secondary
+        }
+    }
+}
+
 private struct InspectionOutputView: View {
     let inspection: JSONValue
+    let hasRelevantActivity: Bool
 
     var body: some View {
         if let object = inspection.objectValue,
            case .array(let events)? = object["events"] {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 12) {
+                if !hasRelevantActivity {
+                    Text("No assistant or tool activity was recorded for this run.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
                 if let run = object["run"], run != .null {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("RUN").sectionLabel()
+                    DisclosureGroup("Run metadata") {
                         OutputView(output: run)
                             .equatable()
+                            .padding(.top, 8)
                     }
                 }
 
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("EVENTS (\(events.count))").sectionLabel()
+                DisclosureGroup("Raw events · \(events.count)") {
                     if events.isEmpty {
                         Text("No events recorded.")
                             .foregroundStyle(.secondary)
+                            .padding(.top, 8)
                     } else {
                         LazyVStack(alignment: .leading, spacing: 10) {
                             ForEach(events.indices, id: \.self) { index in
@@ -836,6 +1051,7 @@ private struct InspectionOutputView: View {
                                     .equatable()
                             }
                         }
+                        .padding(.top, 8)
                     }
                 }
             }
@@ -1287,10 +1503,7 @@ private struct InteractionCard: View {
 
     @ViewBuilder private var interactionDetails: some View {
         switch interaction.kind {
-        case .approval(let toolName, let input, let assistantContent):
-            if let assistantContent, !assistantContent.isEmpty {
-                MarkdownText(content: assistantContent)
-            }
+        case .approval(let toolName, let input, _):
             if let toolName {
                 LabeledContent("Tool") {
                     Text(toolName).font(.body.monospaced())
