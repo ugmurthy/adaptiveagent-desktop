@@ -8,6 +8,8 @@ final class AppModel: ObservableObject {
     static let supportedProviders = ["openrouter", "ollama", "mistral", "mesh"]
     static let supportedApprovalModes = ["auto", "manual", "reject"]
     static let supportedClarificationModes = ["interactive", "fail"]
+    static let supportedInferenceModes = ["gateway", "local", "byok"]
+    static let supportedInferenceTiers = ["low", "medium", "high", "xtra-high"]
 
     enum RunKind: String, CaseIterable, Identifiable {
         case run = "Run"
@@ -170,13 +172,24 @@ final class AppModel: ObservableObject {
     @Published var effectiveWorkspaceRoot = ""
     @Published var shellCwd = ""
     @Published var registeredToolNames: [String] = []
+    @Published private(set) var runtimeInfoSnapshot: RuntimeInfo?
+    @Published private(set) var runtimeInfoError: String?
+    @Published private(set) var isRefreshingRuntimeInfo = false
 
     @Published var configuredRuntimeMode = ""
     @Published var configuredProvider = ""
     @Published var configuredModel = ""
+    @Published var configuredInferenceMode = ""
+    @Published var configuredInferenceTier = ""
+    @Published var configuredGatewayURL = ""
+    @Published var configuredRequireRunPermit = false
     @Published var configuredApprovalMode = "manual"
     @Published var configuredClarificationMode = "interactive"
     @Published private(set) var settingsConfigurationError: String?
+    @Published var accessTokenDraft = ""
+    @Published private(set) var accessTokenMessage: String?
+    @Published private(set) var accessTokenUpdateFailed = false
+    @Published private(set) var isUpdatingAccessToken = false
 
     @Published var runs: [RunRecord] = []
     @Published private(set) var tabs: [RunTab] = []
@@ -255,7 +268,6 @@ final class AppModel: ObservableObject {
             showConfiguration = true
             return
         }
-        showConfiguration = false
         guard !isBusy else { return }
         isBusy = true
         Task {
@@ -303,6 +315,10 @@ final class AppModel: ObservableObject {
         configuredRuntimeMode = ""
         configuredProvider = ""
         configuredModel = ""
+        configuredInferenceMode = ""
+        configuredInferenceTier = ""
+        configuredGatewayURL = ""
+        configuredRequireRunPermit = false
         configuredApprovalMode = "manual"
         configuredClarificationMode = "interactive"
         settingsConfigurationError = nil
@@ -332,6 +348,23 @@ final class AppModel: ObservableObject {
                 }
             }
             configuredModel = settings.model?.overrideModel ?? ""
+
+            if let inferenceMode = settings.inference?.mode {
+                if Self.supportedInferenceModes.contains(inferenceMode) {
+                    configuredInferenceMode = inferenceMode
+                } else {
+                    unsupportedValues.append("inference.mode \(inferenceMode)")
+                }
+            }
+            if let inferenceTier = settings.inference?.tier {
+                if Self.supportedInferenceTiers.contains(inferenceTier) {
+                    configuredInferenceTier = inferenceTier
+                } else {
+                    unsupportedValues.append("inference.tier \(inferenceTier)")
+                }
+            }
+            configuredGatewayURL = settings.gateway?.url ?? ""
+            configuredRequireRunPermit = settings.gateway?.requireRunPermit ?? false
 
             if let approvalMode = settings.interaction?.approvalMode {
                 if Self.supportedApprovalModes.contains(approvalMode) {
@@ -745,6 +778,51 @@ final class AppModel: ObservableObject {
         status = "Shutting down…"
         await client.shutdown()
         isConnected = false
+        runtimeInfoSnapshot = nil
+    }
+
+    func updateAccessToken() {
+        guard !accessTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            accessTokenUpdateFailed = true
+            accessTokenMessage = "Enter a non-empty access token."
+            return
+        }
+        guard isConnected else {
+            accessTokenUpdateFailed = false
+            accessTokenMessage = "The token will be applied when the runtime initializes."
+            return
+        }
+        guard !isUpdatingAccessToken else { return }
+        let accessToken = accessTokenDraft
+        isUpdatingAccessToken = true
+        accessTokenUpdateFailed = false
+        Task {
+            do {
+                _ = try await client.updateAccessToken(accessToken)
+                accessTokenMessage = "Access token updated for the current runtime process."
+            } catch {
+                accessTokenUpdateFailed = true
+                accessTokenMessage = "Token update failed: \(redactedErrorDescription(error))"
+            }
+            isUpdatingAccessToken = false
+        }
+    }
+
+    func clearAccessToken() {
+        accessTokenDraft = ""
+        accessTokenUpdateFailed = false
+        accessTokenMessage = isConnected
+            ? "Local entry cleared. Restart the runtime to remove a token already sent to the process."
+            : "Local access token entry cleared."
+    }
+
+    func refreshRuntimeInfo() {
+        guard isConnected, !isRefreshingRuntimeInfo else { return }
+        isRefreshingRuntimeInfo = true
+        Task {
+            await loadRuntimeInfo()
+            isRefreshingRuntimeInfo = false
+        }
     }
 
     // Internal for focused event/result tests.
@@ -997,6 +1075,10 @@ final class AppModel: ObservableObject {
     private func connectRuntime() async {
         do {
             let workingDirectory = URL(fileURLWithPath: workspacePath, isDirectory: true).standardizedFileURL
+            let gatewayURL = configuredGatewayURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            if (configuredInferenceMode == "gateway" || configuredRequireRunPermit) && gatewayURL.isEmpty {
+                throw RuntimeClientError.protocolViolation("Gateway URL is required for gateway inference or required run permits.")
+            }
             status = "Starting agent runtime…"
             try await client.start(
                 workingDirectoryURL: workingDirectory,
@@ -1011,44 +1093,75 @@ final class AppModel: ObservableObject {
                     await self?.runtimeTerminated(status: status)
                 }
             )
+            let accessToken = accessTokenDraft
+            if !accessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                status = "Updating runtime access token…"
+                do {
+                    _ = try await client.updateAccessToken(accessToken)
+                    accessTokenUpdateFailed = false
+                    accessTokenMessage = "Access token applied for the current runtime process."
+                } catch {
+                    accessTokenUpdateFailed = true
+                    accessTokenMessage = "Token update failed: \(redactedErrorDescription(error))"
+                    throw error
+                }
+            }
             status = "Loading workspace configuration…"
-            var fields: [String: JSONValue] = [
-                "cwd": .string(workingDirectory.path),
-                "approvalMode": .string(configuredApprovalMode),
-                "clarificationMode": .string(configuredClarificationMode)
-            ]
-            if !agentConfigPath.isEmpty { fields["agentConfigPath"] = .string(agentConfigPath) }
-            if !settingsConfigPath.isEmpty { fields["settingsConfigPath"] = .string(settingsConfigPath) }
-            if !configuredRuntimeMode.isEmpty { fields["runtimeMode"] = .string(configuredRuntimeMode) }
-            if !configuredProvider.isEmpty { fields["provider"] = .string(configuredProvider) }
-            if !configuredModel.isEmpty { fields["model"] = .string(configuredModel) }
-            let result = try await client.initializeRuntime(params: fields)
+            let parameters = RuntimeInitializationParameters(
+                cwd: workingDirectory.path,
+                agentConfigPath: agentConfigPath.isEmpty ? nil : agentConfigPath,
+                settingsConfigPath: settingsConfigPath.isEmpty ? nil : settingsConfigPath,
+                runtimeMode: configuredRuntimeMode.isEmpty ? nil : configuredRuntimeMode,
+                provider: configuredProvider.isEmpty ? nil : configuredProvider,
+                model: configuredModel.isEmpty ? nil : configuredModel,
+                approvalMode: configuredApprovalMode,
+                clarificationMode: configuredClarificationMode,
+                inferenceMode: configuredInferenceMode.isEmpty ? nil : configuredInferenceMode,
+                inferenceTier: configuredInferenceMode == "gateway" && !configuredInferenceTier.isEmpty
+                    ? configuredInferenceTier
+                    : nil,
+                gatewayURL: gatewayURL.isEmpty ? nil : gatewayURL,
+                requireRunPermit: configuredRequireRunPermit ? true : nil
+            )
+            let result = try await client.initializeRuntime(parameters: parameters)
             applyRuntimeInformation(result, fallbackWorkspace: workingDirectory.path)
             isConnected = true
             status = "Ready"
-            appendEvent("Initialized\n\(result.prettyPrinted)")
+            showConfiguration = false
+            appendEvent("Initialized\n\(String(describing: result))")
+            await loadRuntimeInfo()
         } catch {
             await client.shutdown()
             client = RuntimeClient()
             isConnected = false
-            status = error.localizedDescription
+            status = redactedErrorDescription(error)
             appendEvent("Initialization error: \(error.localizedDescription)")
             showConfiguration = true
         }
     }
 
-    private func applyRuntimeInformation(_ result: JSONValue, fallbackWorkspace: String) {
-        guard let object = result.objectValue else {
-            effectiveWorkspaceRoot = fallbackWorkspace
-            return
+    private func applyRuntimeInformation(_ result: RuntimeInitializationResult, fallbackWorkspace: String) {
+        agentName = result.agent.name.isEmpty ? result.agent.id : result.agent.name
+        agentId = result.agent.id
+        runtimeMode = result.runtimeMode
+        effectiveWorkspaceRoot = result.workspaceRoot.isEmpty ? fallbackWorkspace : result.workspaceRoot
+        shellCwd = result.shellCwd.isEmpty ? effectiveWorkspaceRoot : result.shellCwd
+        registeredToolNames = result.registeredToolNames
+    }
+
+    private func loadRuntimeInfo() async {
+        do {
+            runtimeInfoSnapshot = try await client.runtimeInfo()
+            runtimeInfoError = nil
+        } catch {
+            runtimeInfoError = redactedErrorDescription(error)
         }
-        let agent = object["agent"]?.objectValue
-        agentName = agent?["name"]?.stringValue ?? agent?["id"]?.stringValue ?? "Agent"
-        agentId = agent?["id"]?.stringValue ?? ""
-        runtimeMode = object["runtimeMode"]?.stringValue ?? ""
-        effectiveWorkspaceRoot = object["workspaceRoot"]?.stringValue ?? fallbackWorkspace
-        shellCwd = object["shellCwd"]?.stringValue ?? effectiveWorkspaceRoot
-        registeredToolNames = object["registeredToolNames"]?.stringArray ?? []
+    }
+
+    private func redactedErrorDescription(_ error: Error) -> String {
+        let description = ProtocolRedactor.redact(error.localizedDescription)
+        guard !accessTokenDraft.isEmpty else { return description }
+        return description.replacingOccurrences(of: accessTokenDraft, with: "<redacted>")
     }
 
     private func beginAgentRequest(method: String, fields: [String: JSONValue], recordID: UUID) {
@@ -1265,28 +1378,34 @@ final class AppModel: ObservableObject {
         input: [String: JSONValue]?
     ) -> String? {
         guard let input else { return nil }
+        let capturedInput = input["type"]?.stringValue == "object"
+            ? input["preview"]?.objectValue ?? input
+            : input
+        func capturedString(_ key: String) -> String? {
+            capturedInput[key]?.stringValue ?? capturedInput[key]?.objectValue?["preview"]?.stringValue
+        }
         let rawDetail: String?
         switch toolName {
         case "web_search":
-            rawDetail = input["query"]?.stringValue
+            rawDetail = capturedString("query")
         case "read_web_page", "fetch_page":
-            if let urlText = input["url"]?.stringValue,
+            if let urlText = capturedString("url"),
                let host = URL(string: urlText)?.host {
                 rawDetail = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
             } else {
-                rawDetail = input["url"]?.stringValue
+                rawDetail = capturedString("url")
             }
         case "read_file", "write_file", "edit_file":
-            rawDetail = input["path"]?.stringValue.map { URL(fileURLWithPath: $0).lastPathComponent }
+            rawDetail = capturedString("path").map { URL(fileURLWithPath: $0).lastPathComponent }
         case "shell_exec":
-            rawDetail = input["command"]?.stringValue
+            rawDetail = capturedString("command")
         default:
             if toolName.localizedCaseInsensitiveContains("file"),
-               let path = input["path"]?.stringValue {
+               let path = capturedString("path") {
                 rawDetail = URL(fileURLWithPath: path).lastPathComponent
             } else {
                 rawDetail = ["query", "url", "path", "command", "name"]
-                    .compactMap { input[$0]?.stringValue }
+                    .compactMap(capturedString)
                     .first
             }
         }
@@ -1426,13 +1545,18 @@ final class AppModel: ObservableObject {
     }
 
     private func appendEvent(_ event: String) {
-        events.append(event)
+        var redacted = ProtocolRedactor.redact(event)
+        if !accessTokenDraft.isEmpty {
+            redacted = redacted.replacingOccurrences(of: accessTokenDraft, with: "<redacted>")
+        }
+        events.append(redacted)
         if events.count > 500 { events.removeFirst(events.count - 500) }
     }
 
     private nonisolated static func protocolDiagnostic(_ value: JSONValue) -> String {
         let maximumBytes = 64 * 1024
-        guard let data = try? JSONEncoder().encode(value) else { return String(describing: value) }
+        let redacted = ProtocolRedactor.redact(value)
+        guard let data = try? JSONEncoder().encode(redacted) else { return String(describing: redacted) }
         guard data.count > maximumBytes else { return String(decoding: data, as: UTF8.self) }
         return String(decoding: data.prefix(maximumBytes), as: UTF8.self) + "\n… diagnostic truncated"
     }
@@ -1490,6 +1614,8 @@ final class AppModel: ObservableObject {
         effectiveWorkspaceRoot = ""
         shellCwd = ""
         registeredToolNames = []
+        runtimeInfoSnapshot = nil
+        runtimeInfoError = nil
     }
 
     private func quitAfterShutdown() {
@@ -1519,9 +1645,21 @@ private struct DesktopSettingsSeed: Decodable {
         let clarificationMode: String?
     }
 
+    struct Inference: Decodable {
+        let mode: String?
+        let tier: String?
+    }
+
+    struct Gateway: Decodable {
+        let url: String?
+        let requireRunPermit: Bool?
+    }
+
     let runtime: Runtime?
     let model: Model?
     let interaction: Interaction?
+    let inference: Inference?
+    let gateway: Gateway?
 }
 
 private extension JSONValue {

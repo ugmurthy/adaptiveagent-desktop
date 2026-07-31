@@ -47,4 +47,12 @@ enum JSONValue: Codable, Equatable, Sendable {
               let text = String(data: pretty, encoding: .utf8) else { return String(describing: self) }
         return text
     }
+
+    static func encode<T: Encodable>(_ value: T) throws -> JSONValue {
+        try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(value))
+    }
+
+    func decode<T: Decodable>(_ type: T.Type) throws -> T {
+        try JSONDecoder().decode(type, from: JSONEncoder().encode(self))
+    }
 }

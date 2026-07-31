@@ -24,12 +24,28 @@ final class ProtocolTests: XCTestCase {
         XCTAssertNil(object["type"])
     }
 
-    func testReadyNotificationRequiresNoIDAndExactStringVersion() throws {
-        let message = try ProtocolCodec.decodeMessage(Data(#"{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.10","bridgeVersion":"0.1.0","pid":12}}"#.utf8))
-        XCTAssertEqual(message, .ready(RuntimeReady(protocolVersion: "1.10", bridgeVersion: "0.1.0", pid: 12)))
+    func testRuntimeInitializationEncodesGatewayURLWithProtocolKey() throws {
+        let parameters = RuntimeInitializationParameters(
+            inferenceMode: "local",
+            gatewayURL: "ws://127.0.0.1:3006/rpc",
+            requireRunPermit: true
+        )
+        let encoded = try JSONValue.encode(parameters)
+        let fields = try XCTUnwrap(encoded.objectValue)
 
-        XCTAssertThrowsError(try ProtocolCodec.decodeMessage(Data(#"{"jsonrpc":"2.0","id":"ready","method":"runtime/ready","params":{"protocolVersion":"1.10","bridgeVersion":"0.1.0","pid":12}}"#.utf8)))
-        XCTAssertThrowsError(try ProtocolCodec.decodeMessage(Data(#"{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":1.10,"bridgeVersion":"0.1.0","pid":12}}"#.utf8)))
+        XCTAssertEqual(fields["inferenceMode"], .string("local"))
+        XCTAssertEqual(fields["gatewayUrl"], .string("ws://127.0.0.1:3006/rpc"))
+        XCTAssertEqual(fields["requireRunPermit"], .bool(true))
+        XCTAssertNil(fields["gatewayURL"])
+        XCTAssertNil(fields["inferenceTier"])
+    }
+
+    func testReadyNotificationRequiresNoIDAndExactStringVersion() throws {
+        let message = try ProtocolCodec.decodeMessage(Data(#"{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":12}}"#.utf8))
+        XCTAssertEqual(message, .ready(RuntimeReady(protocolVersion: "1.11", bridgeVersion: "0.1.0", pid: 12)))
+
+        XCTAssertThrowsError(try ProtocolCodec.decodeMessage(Data(#"{"jsonrpc":"2.0","id":"ready","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":12}}"#.utf8)))
+        XCTAssertThrowsError(try ProtocolCodec.decodeMessage(Data(#"{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":1.11,"bridgeVersion":"0.1.0","pid":12}}"#.utf8)))
     }
 
     func testResponsesPreserveIDTypesAndDecodeProtocolErrorCode() throws {
@@ -95,21 +111,28 @@ final class ProtocolTests: XCTestCase {
             "approvalMode": "auto",
             "interactive": true,
             "clarificationMode": "fail"
+          },
+          "inference": { "mode": "local", "tier": "high" },
+          "gateway": {
+            "url": "ws://127.0.0.1:3006/rpc",
+            "accessTokenEnv": "ADAPTIVE_AGENT_ACCESS_TOKEN",
+            "requireRunPermit": true
           }
         }
         """#.write(to: settings, atomically: true, encoding: .utf8)
         let requestLog = temporaryFileURL(named: "app-model-requests.log")
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.10","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.10"}}' ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11"}}' ;;
     runtime/initialize)
       printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":["write_file"]}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path))
       ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s","connections":{"sqlite":{"configured":true,"state":"connected"},"gateway":{"configured":false,"state":"not_configured"}}}}\n' "$id" \#(shellQuote(workspace.path)) ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
     *) exit 91 ;;
   esac
@@ -125,6 +148,10 @@ done
         XCTAssertEqual(model.configuredModel, "qwen/qwen3.5-27b")
         XCTAssertEqual(model.configuredApprovalMode, "auto", "approvalMode should take precedence over legacy autoApprove")
         XCTAssertEqual(model.configuredClarificationMode, "fail")
+        XCTAssertEqual(model.configuredInferenceMode, "local")
+        XCTAssertEqual(model.configuredInferenceTier, "high")
+        XCTAssertEqual(model.configuredGatewayURL, "ws://127.0.0.1:3006/rpc")
+        XCTAssertTrue(model.configuredRequireRunPermit)
         XCTAssertNil(model.settingsConfigurationError)
         model.bootstrap()
         for _ in 0..<100 where !model.isConnected {
@@ -151,6 +178,82 @@ done
         XCTAssertNil(params["overrideApiKeyEnv"])
         XCTAssertNil(params["apiKey"])
         XCTAssertNil(params["agentConfigPath"])
+        XCTAssertEqual(params["inferenceMode"], .string("local"))
+        XCTAssertNil(params["inferenceTier"])
+        XCTAssertEqual(params["gatewayUrl"], .string("ws://127.0.0.1:3006/rpc"))
+        XCTAssertEqual(params["requireRunPermit"], .bool(true))
+        XCTAssertNil(params["gatewayURL"])
+        XCTAssertNil(params["accessTokenEnv"])
+        await model.shutdown()
+    }
+
+    @MainActor
+    func testAppModelAppliesTokenBeforeTypedInitializationAndLoadsRuntimeInfo() async throws {
+        let workspace = try temporaryDirectoryURL()
+        let requestLog = temporaryFileURL(named: "app-model-auth-requests.log")
+        let executable = try makeRuntimeScript(#"""
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
+  id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
+  method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
+  case "$method" in
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11"}}' ;;
+    auth/updateAccessToken) printf '{"jsonrpc":"2.0","id":"%s","result":{"updated":true}}\n' "$id" ;;
+    runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[],"inferenceMode":"gateway","inferenceTier":"high"}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop","version":"1.0.2"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s","inferenceMode":"gateway","inferenceTier":"high","connections":{"sqlite":{"configured":true,"state":"connected"},"gateway":{"configured":true,"state":"connected"}}}}\n' "$id" \#(shellQuote(workspace.path)) ;;
+    runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
+    *) exit 91 ;;
+  esac
+done
+"""#)
+        let model = AppModel(
+            client: RuntimeClient(executableURL: executable, responseTimeout: .seconds(2)),
+            workingDirectoryURL: workspace
+        )
+        let accessToken = "secret-ui-access-token"
+        model.accessTokenDraft = accessToken
+        model.configuredInferenceMode = "gateway"
+        model.configuredInferenceTier = "high"
+        model.configuredGatewayURL = "wss://gateway.example.com/rpc"
+        model.bootstrap()
+        for _ in 0..<100 where model.runtimeInfoSnapshot == nil {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+
+        XCTAssertTrue(model.isConnected, model.status)
+        XCTAssertEqual(model.runtimeInfoSnapshot?.initialized, true)
+        XCTAssertEqual(model.runtimeInfoSnapshot?.inferenceMode, "gateway")
+        XCTAssertEqual(model.runtimeInfoSnapshot?.inferenceTier, "high")
+        XCTAssertEqual(model.runtimeInfoSnapshot?.connections?.gateway?.state, "connected")
+        XCTAssertEqual(model.runtimeInfoSnapshot?.connections?.sqlite?.state, "connected")
+        XCTAssertFalse(model.status.contains(accessToken))
+        XCTAssertFalse(model.events.joined().contains(accessToken))
+
+        let requests = try String(contentsOf: requestLog, encoding: .utf8)
+            .split(separator: "\n")
+            .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+        XCTAssertEqual(requests.prefix(4).compactMap { $0.objectValue?["method"]?.stringValue }, [
+            "initialize", "auth/updateAccessToken", "runtime/initialize", "runtime/info"
+        ])
+        let auth = try XCTUnwrap(requests.first { $0.objectValue?["method"] == .string("auth/updateAccessToken") })
+        XCTAssertEqual(auth.objectValue?["params"]?.objectValue?["accessToken"], .string(accessToken))
+        let runtimeInitialize = try XCTUnwrap(requests.first { $0.objectValue?["method"] == .string("runtime/initialize") })
+        XCTAssertEqual(runtimeInitialize.objectValue?["params"]?.objectValue?["inferenceMode"], .string("gateway"))
+        XCTAssertEqual(runtimeInitialize.objectValue?["params"]?.objectValue?["inferenceTier"], .string("high"))
+        XCTAssertEqual(runtimeInitialize.objectValue?["params"]?.objectValue?["gatewayUrl"], .string("wss://gateway.example.com/rpc"))
+        XCTAssertNil(runtimeInitialize.objectValue?["params"]?.objectValue?["accessToken"])
+
+        model.clearAccessToken()
+        XCTAssertTrue(model.accessTokenDraft.isEmpty)
+        XCTAssertFalse(model.accessTokenMessage?.contains(accessToken) ?? false)
+        try? await Task.sleep(for: .milliseconds(50))
+        let authRequestCount = try String(contentsOf: requestLog, encoding: .utf8)
+            .split(separator: "\n")
+            .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+            .filter { $0.objectValue?["method"] == .string("auth/updateAccessToken") }
+            .count
+        XCTAssertEqual(authRequestCount, 1, "Clearing the local field must not send an empty token")
         await model.shutdown()
     }
 
@@ -178,6 +281,10 @@ done
         XCTAssertEqual(model.configuredRuntimeMode, "")
         XCTAssertEqual(model.configuredProvider, "")
         XCTAssertEqual(model.configuredModel, "")
+        XCTAssertEqual(model.configuredInferenceMode, "")
+        XCTAssertEqual(model.configuredInferenceTier, "")
+        XCTAssertEqual(model.configuredGatewayURL, "")
+        XCTAssertFalse(model.configuredRequireRunPermit)
     }
 
     @MainActor
@@ -191,14 +298,15 @@ done
             .write(to: replacementSettings, atomically: true, encoding: .utf8)
         let requestLog = temporaryFileURL(named: "typed-settings-requests.log")
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.10","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.10"}}' ;;
-    runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"runtimeMode":"memory"}}\n' "$id" ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11"}}' ;;
+    runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[]}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
     *) exit 91 ;;
   esac
@@ -210,11 +318,13 @@ done
         )
         XCTAssertEqual(model.configuredApprovalMode, "auto")
         model.settingsConfigPath = replacementSettings.path
+        model.showConfiguration = true
         model.applyConfiguration()
         for _ in 0..<100 where !model.isConnected {
             try? await Task.sleep(for: .milliseconds(20))
         }
         XCTAssertTrue(model.isConnected, model.status)
+        XCTAssertFalse(model.showConfiguration)
 
         let requests = try String(contentsOf: requestLog, encoding: .utf8)
             .split(separator: "\n")
@@ -295,14 +405,15 @@ done
         let workspace = try temporaryDirectoryURL()
         let requestLog = temporaryFileURL(named: "entered-run-action-requests.log")
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.10","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.10"}}' ;;
-    runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"runtimeMode":"memory"}}\n' "$id" ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11"}}' ;;
+    runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[]}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
     run/inspect) printf '{"jsonrpc":"2.0","id":"%s","result":{"run":{"id":"persisted-run","status":"running"},"events":[]}}\n' "$id" ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
     *) exit 91 ;;
@@ -461,7 +572,11 @@ done
             "payload": .object([
                 "toolName": .string("read_web_page"),
                 "assistantContent": .string(assistantContent),
-                "input": .object(["url": .string("https://www.example.com/reference/page")]),
+                "input": .object([
+                    "type": .string("object"),
+                    "keyCount": .number(1),
+                    "preview": .object(["url": .string("https://www.example.com/reference/page")])
+                ]),
                 "output": .object(["title": .string("Reference")])
             ])
         ]))
@@ -477,6 +592,29 @@ done
                 "error": .string("Not found")
             ])
         ]))
+        model.receive(method: "agent/event", params: .object([
+            "id": .string("event-5"),
+            "type": .string("tool.completed"),
+            "runId": .string("root-run"),
+            "stepId": .string("step-3"),
+            "toolCallId": .string("write-call"),
+            "payload": .object([
+                "toolName": .string("write_file"),
+                "input": .object([
+                    "type": .string("object"),
+                    "keyCount": .number(2),
+                    "preview": .object([
+                        "path": .string("/workspace/docs/agent-runtime-jsonrpc.md"),
+                        "content": .object([
+                            "type": .string("string"),
+                            "length": .number(1_024),
+                            "preview": .string("# Runtime protocol")
+                        ])
+                    ])
+                ]),
+                "output": .string("Written")
+            ])
+        ]))
 
         XCTAssertEqual(model.runs[0].activities.filter { $0.kind == .assistant }.count, 1)
         XCTAssertEqual(model.runs[0].activities.first { $0.id == "tool:search-call" }?.toolState, .succeeded)
@@ -484,6 +622,7 @@ done
         XCTAssertEqual(model.runs[0].activities.first { $0.id == "tool:page-call" }?.detail, "example.com")
         XCTAssertEqual(model.runs[0].activities.first { $0.id == "tool:file-call" }?.detail, "AppModel.swift")
         XCTAssertEqual(model.runs[0].activities.first { $0.id == "tool:file-call" }?.toolState, .failed)
+        XCTAssertEqual(model.runs[0].activities.first { $0.id == "tool:write-call" }?.detail, "agent-runtime-jsonrpc.md")
 
         model.receive(method: "agent/event", params: .object([
             "type": .string("run.completed"),
@@ -733,12 +872,12 @@ done
         let pwdLog = temporaryFileURL(named: "pwd.txt")
         let executable = try makeRuntimeScript(#"""
 pwd > \#(shellQuote(pwdLog.path))
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.10","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.10"}}' ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11"}}' ;;
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id" ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
     *) exit 91 ;;
@@ -759,12 +898,12 @@ done
 
     func testLongRunningAgentRequestCanDisableTheStandardResponseTimeout() async throws {
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.10","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.10"}}' ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11"}}' ;;
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id" ;;
     agent/run) sleep 0.15; printf '{"jsonrpc":"2.0","id":"%s","result":{"status":"success","runId":"slow-run","output":"Done"}}\n' "$id" ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
@@ -784,20 +923,84 @@ done
         await client.shutdown()
     }
 
+    func testProtocol111AuthUpdateAndRuntimeInfoUseTypedTransport() async throws {
+        let requestLog = temporaryFileURL(named: "auth-info-requests.log")
+        let executable = try makeRuntimeScript(#"""
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
+  id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
+  method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
+  case "$method" in
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11"}}' ;;
+    auth/updateAccessToken) printf '{"jsonrpc":"2.0","id":"%s","result":{"updated":true}}\n' "$id" ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop","version":"1.0.2"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"/workspace","inferenceMode":"gateway","inferenceTier":"medium","connections":{"sqlite":{"configured":false,"state":"not_configured"},"gateway":{"configured":true,"state":"connected"}}}}\n' "$id" ;;
+    runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
+    *) exit 91 ;;
+  esac
+done
+"""#)
+        let client = RuntimeClient(executableURL: executable, responseTimeout: .seconds(2))
+        try await client.start(notificationHandler: { _, _ in }, errorHandler: { _ in })
+
+        let tokenUpdate = try await client.updateAccessToken("secret-access-token")
+        XCTAssertEqual(tokenUpdate, .init(updated: true))
+        let info = try await client.runtimeInfo()
+        XCTAssertEqual(info.protocolVersion, "1.11")
+        XCTAssertTrue(info.initialized)
+        XCTAssertEqual(info.inferenceMode, "gateway")
+        XCTAssertEqual(info.inferenceTier, "medium")
+        XCTAssertEqual(info.connections?.gateway?.state, "connected")
+
+        let requests = try String(contentsOf: requestLog, encoding: .utf8)
+            .split(separator: "\n")
+            .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+        let authRequest = try XCTUnwrap(requests.first {
+            $0.objectValue?["method"] == .string("auth/updateAccessToken")
+        })
+        XCTAssertEqual(authRequest.objectValue?["jsonrpc"], .string("2.0"))
+        XCTAssertNotNil(authRequest.objectValue?["id"])
+        XCTAssertEqual(
+            authRequest.objectValue?["params"]?.objectValue?["accessToken"],
+            .string("secret-access-token")
+        )
+        await client.shutdown()
+    }
+
+    func testProtocolDiagnosticsRedactTokensRecursively() {
+        let value: JSONValue = .object([
+            "accessToken": .string("top-secret"),
+            "nested": .object([
+                "authorization": .string("Bearer nested-secret"),
+                "api_key": .string("provider-secret"),
+                "safe": .string("visible")
+            ])
+        ])
+        let redacted = ProtocolRedactor.redact(value)
+        XCTAssertEqual(redacted.objectValue?["accessToken"], .string("<redacted>"))
+        XCTAssertEqual(redacted.objectValue?["nested"]?.objectValue?["authorization"], .string("<redacted>"))
+        XCTAssertEqual(redacted.objectValue?["nested"]?.objectValue?["api_key"], .string("<redacted>"))
+        XCTAssertEqual(redacted.objectValue?["nested"]?.objectValue?["safe"], .string("visible"))
+
+        let text = ProtocolRedactor.redact("Authorization: Bearer text-secret access_token=another-secret")
+        XCTAssertFalse(text.contains("text-secret"))
+        XCTAssertFalse(text.contains("another-secret"))
+    }
+
     func testHandshakeRuntimeGateNotificationsErrorsAndGracefulShutdown() async throws {
         let logURL = temporaryFileURL(named: "requests.log")
         let shutdownURL = temporaryFileURL(named: "shutdown.txt")
         let executable = try makeRuntimeScript(#"""
 printf '%s' '{"jsonrpc":"2.0","method":"runtime/'
 sleep 0.05
-printf '%s\n' 'ready","params":{"protocolVersion":"1.10","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' 'ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> \#(shellQuote(logURL.path))
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
     initialize)
-      printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.10","bridgeVersion":"0.1.0","capabilities":{}}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","capabilities":{}}}'
       ;;
     runtime/initialize)
       printf '{"jsonrpc":"2.0","id":"%s","result":{"runtimeMode":"postgres"}}\n' "$id"
@@ -843,7 +1046,7 @@ done
         XCTAssertEqual(initialize.objectValue?["jsonrpc"], .string("2.0"))
         XCTAssertEqual(initialize.objectValue?["id"], .string("initialize"))
         XCTAssertEqual(initialize.objectValue?["method"], .string("initialize"))
-        XCTAssertEqual(initialize.objectValue?["params"]?.objectValue?["protocolVersion"], .string("1.10"))
+        XCTAssertEqual(initialize.objectValue?["params"]?.objectValue?["protocolVersion"], .string("1.11"))
 
         do {
             _ = try await client.send(method: "agent/run", params: ["goal": .string("too early")])
@@ -901,9 +1104,9 @@ done
 
     func testOutOfOrderResponsesAreCorrelatedByID() async throws {
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.10","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
 IFS= read -r line
-printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.10"}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11"}}'
 IFS= read -r line
 id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
 printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"
@@ -933,12 +1136,12 @@ printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"
 
     func testSlowNotificationHandlerDoesNotDelayFollowingResponse() async throws {
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.10","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.10"}}' ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11"}}' ;;
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id" ;;
     runtime/info)
       printf '%s\n' '{"jsonrpc":"2.0","method":"agent/event","params":{"schemaVersion":1,"type":"run.started","runId":"run-1"}}'
@@ -989,9 +1192,9 @@ sleep 5
 
     func testLegacyOperationalMessageIsRejected() async throws {
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.10","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
 IFS= read -r line
-printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.10"}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11"}}'
 IFS= read -r line
 printf '%s\n' '{"version":1,"id":"old","type":"response","ok":true,"result":{}}'
 sleep 5
@@ -1022,9 +1225,9 @@ sleep 5
 
     func testUnexpectedRuntimeTerminationFailsPendingRequest() async throws {
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.10","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
 IFS= read -r line
-printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.10"}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11"}}'
 IFS= read -r line
 exit 7
 """#)

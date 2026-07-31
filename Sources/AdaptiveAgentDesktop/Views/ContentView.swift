@@ -364,6 +364,7 @@ private struct RunRow: View {
 private struct NewRequestView: View {
     @EnvironmentObject private var model: AppModel
     let tabID: UUID
+    @StateObject private var dictation = DictationController()
     @State private var existingRunID = ""
 
     var body: some View {
@@ -415,9 +416,8 @@ private struct NewRequestView: View {
                         Text("Creating run…").foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button(draftKind == .run ? "Start Run" : "Start Chat") {
-                        model.submitDraft(in: tabID)
-                    }
+                    DictationButton(text: draftTextBinding, controller: dictation)
+                    Button(draftKind == .run ? "Start Run" : "Start Chat", action: submitDraft)
                         .buttonStyle(.borderedProminent)
                         .keyboardShortcut(.return, modifiers: [.command])
                         .disabled(draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isWaitingForRunIdentity)
@@ -488,6 +488,11 @@ private struct NewRequestView: View {
             set: { model.setDraftText($0, forTab: tabID) }
         )
     }
+
+    private func submitDraft() {
+        dictation.cancel()
+        model.submitDraft(in: tabID)
+    }
 }
 
 private struct ConnectionStateView: View {
@@ -525,56 +530,65 @@ private struct RunDetailView: View {
     @EnvironmentObject private var model: AppModel
     let record: AppModel.RunRecord
     let tabID: UUID
+    @StateObject private var dictation = DictationController()
 
     var body: some View {
         VStack(spacing: 0) {
             runHeader
             Divider()
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 24) {
-                    if detailMode == .inspection {
-                        inspectionOutput
-                            .id("run-inspection")
-                    } else if record.kind == .chat {
-                        chatTranscript
-                        RunActivityFeed(record: record, agentName: model.agentName)
-                            .id("run-activity")
-                    } else {
-                        RunActivityFeed(record: record, agentName: model.agentName)
-                            .id("run-activity")
-                        runOutput
-                            .id("run-output")
-                    }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 18) {
+                        if detailMode == .inspection {
+                            inspectionOutput
+                                .id("run-inspection")
+                        } else if record.kind == .chat {
+                            chatTranscript
+                            RunActivityFeed(record: record, agentName: model.agentName)
+                                .id("run-activity")
+                        } else {
+                            RunActivityFeed(record: record, agentName: model.agentName)
+                                .id("run-activity")
+                            runOutput
+                                .id("run-output")
+                        }
 
-                    if let interaction = record.interaction {
-                        InteractionCard(recordID: record.id, interaction: interaction)
-                            .environmentObject(model)
-                            .id("interaction-\(record.id.uuidString)")
-                    }
+                        if let interaction = record.interaction {
+                            InteractionCard(recordID: record.id, interaction: interaction)
+                                .environmentObject(model)
+                                .id("interaction-\(record.id.uuidString)")
+                        }
 
-                    if let error = record.errorMessage {
-                        ErrorCard(message: error)
-                            .id("error")
-                    }
+                        if let error = record.errorMessage {
+                            ErrorCard(message: error)
+                                .id("error")
+                        }
 
-                    if let error = record.auxiliaryErrorMessage {
-                        ErrorCard(message: error)
-                            .id("auxiliary-error")
-                    }
+                        if let error = record.auxiliaryErrorMessage {
+                            ErrorCard(message: error)
+                                .id("auxiliary-error")
+                        }
 
-                    if !record.files.isEmpty {
-                        FilesChangedView(record: record)
-                            .environmentObject(model)
-                            .id("files")
+                        if !record.files.isEmpty {
+                            FilesChangedView(record: record)
+                                .environmentObject(model)
+                                .id("files")
+                        }
+                    }
+                    .scrollTargetLayout()
+                    .frame(maxWidth: 820, alignment: .leading)
+                    .padding(.horizontal, 34)
+                    .padding(.vertical, 20)
+                    .frame(maxWidth: .infinity, alignment: .top)
+                }
+                .scrollPosition(id: scrollPositionBinding, anchor: .center)
+                .onChange(of: record.activities) { _, activities in
+                    guard detailMode == .results, let latestActivity = activities.last else { return }
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo(latestActivity.id, anchor: .bottom)
                     }
                 }
-                .scrollTargetLayout()
-                .frame(maxWidth: 820, alignment: .leading)
-                .padding(.horizontal, 34)
-                .padding(.vertical, 28)
-                .frame(maxWidth: .infinity, alignment: .top)
             }
-            .scrollPosition(id: scrollPositionBinding, anchor: .center)
 
             if record.kind == .chat {
                 Divider()
@@ -584,6 +598,8 @@ private struct RunDetailView: View {
                 steerComposer
             }
         }
+        .onChange(of: tabID) { dictation.cancel() }
+        .onChange(of: record.id) { dictation.cancel() }
     }
 
     private var runHeader: some View {
@@ -686,8 +702,9 @@ private struct RunDetailView: View {
             TextField("Message \(model.agentName.isEmpty ? "agent" : model.agentName)…", text: chatMessageBinding, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(1...5)
-                .onSubmit { model.sendChatMessage(in: tabID) }
-            Button("Send") { model.sendChatMessage(in: tabID) }
+                .onSubmit(sendChatMessage)
+            DictationButton(text: chatMessageBinding, controller: dictation)
+            Button("Send", action: sendChatMessage)
                 .disabled(record.isRequestInFlight || chatMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .help("Send message")
         }
@@ -741,6 +758,68 @@ private struct RunDetailView: View {
             get: { model.tab(withID: tabID)?.scrollPosition },
             set: { model.setScrollPosition($0, forTab: tabID) }
         )
+    }
+
+    private func sendChatMessage() {
+        dictation.cancel()
+        model.sendChatMessage(in: tabID)
+    }
+}
+
+private struct DictationButton: View {
+    @Binding var text: String
+    @ObservedObject var controller: DictationController
+    @State private var textBeforeDictation = ""
+    @State private var showsError = false
+
+    var body: some View {
+        Button(action: toggleDictation) {
+            Group {
+                switch controller.phase {
+                case .starting, .stopping:
+                    ProgressView()
+                        .controlSize(.mini)
+                case .recording:
+                    Image(systemName: "stop.fill")
+                        .foregroundStyle(.red)
+                case .idle:
+                    Image(systemName: "mic.fill")
+                }
+            }
+            .frame(width: 14, height: 14)
+        }
+        .buttonStyle(.bordered)
+        .disabled(controller.phase == .starting || controller.phase == .stopping)
+        .help(controller.phase == .recording ? "Stop dictation" : "Start dictation")
+        .accessibilityLabel(controller.phase == .recording ? "Stop dictation" : "Start dictation")
+        .onChange(of: controller.transcript) { _, transcript in
+            guard !transcript.isEmpty else { return }
+            text = textBeforeDictation + transcript
+        }
+        .onChange(of: controller.errorMessage) { _, message in
+            showsError = message != nil
+        }
+        .onDisappear(perform: controller.cancel)
+        .alert("Dictation Unavailable", isPresented: $showsError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(controller.errorMessage ?? "Dictation could not start.")
+        }
+    }
+
+    private func toggleDictation() {
+        switch controller.phase {
+        case .idle:
+            textBeforeDictation = text
+            if let lastCharacter = textBeforeDictation.last, !lastCharacter.isWhitespace {
+                textBeforeDictation.append(" ")
+            }
+            Task { await controller.start() }
+        case .recording:
+            controller.stop()
+        case .starting, .stopping:
+            break
+        }
     }
 }
 
@@ -822,11 +901,12 @@ private struct RunActivityFeed: View {
 
     var body: some View {
         if !record.activities.isEmpty || isThinking || showsDuration {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 8) {
                 Text("ACTIVITY").sectionLabel()
-                LazyVStack(alignment: .leading, spacing: 12) {
+                LazyVStack(alignment: .leading, spacing: 8) {
                     ForEach(record.activities) { activity in
                         RunActivityRow(activity: activity, agentName: agentName)
+                            .id(activity.id)
                     }
                     if isThinking {
                         ThinkingActivityRow(startedAt: record.activityStartedAt)
@@ -853,8 +933,8 @@ private struct RunActivityRow: View {
         switch activity.kind {
         case .assistant:
             if let content = activity.content {
-                VStack(alignment: .leading, spacing: 7) {
-                    HStack(spacing: 7) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
                         Image(systemName: "sparkles")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.tint)
@@ -882,27 +962,27 @@ private struct ToolActivityRow: View {
     let activity: AppModel.RunActivity
 
     var body: some View {
-        HStack(spacing: 11) {
+        HStack(spacing: 9) {
             Image(systemName: toolSymbol)
-                .font(.callout.weight(.medium))
+                .font(.caption.weight(.semibold))
                 .foregroundStyle(stateColor)
-                .frame(width: 28, height: 28)
-                .background(stateColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 7))
+                .frame(width: 24, height: 24)
+                .background(stateColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(activity.toolName ?? "tool")
-                    .font(.callout.monospaced().weight(.medium))
+            Text(activity.toolName ?? "tool")
+                .font(.callout.monospaced().weight(.medium))
+                .lineLimit(1)
+            if let detail = activity.detail {
+                Text("·")
+                    .foregroundStyle(.tertiary)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
-                if let detail = activity.detail {
-                    Text(detail)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
+                    .truncationMode(.middle)
             }
 
-            Spacer(minLength: 12)
+            Spacer(minLength: 8)
             if activity.toolState == .running {
                 ProgressView().controlSize(.mini)
             }
@@ -911,9 +991,9 @@ private struct ToolActivityRow: View {
                 .foregroundStyle(stateColor)
                 .lineLimit(1)
         }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 9)
-        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10))
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
         .accessibilityElement(children: .combine)
     }
 
@@ -1124,7 +1204,7 @@ private struct MarkdownText: View {
             .markdownInlineImageProvider(NonLoadingMarkdownImageProvider())
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .lineSpacing(3)
+            .lineSpacing(1)
             .padding(CGFloat(preferences.pageMargin))
             .background(preferences.pageBackgroundColor)
     }
@@ -1185,6 +1265,12 @@ private struct MarkdownText: View {
                     font: preferences.headingFont.markdownFamily,
                     size: preferences.heading6Size
                 )
+            }
+            .paragraph { configuration in
+                configuration.label
+                    .fixedSize(horizontal: false, vertical: true)
+                    .relativeLineSpacing(.em(0.15))
+                    .markdownMargin(top: 0, bottom: 10)
             }
             .codeBlock { configuration in
                 ScrollView(.horizontal) {
@@ -1685,6 +1771,29 @@ private struct RuntimeInspectorView: View {
                 if !model.agentName.isEmpty { LabeledContent("Agent", value: model.agentName) }
                 if !model.agentId.isEmpty { LabeledContent("Agent ID", value: model.agentId) }
                 if !model.runtimeMode.isEmpty { LabeledContent("Mode", value: model.runtimeMode) }
+                if let info = model.runtimeInfoSnapshot {
+                    LabeledContent("Initialized", value: info.initialized ? "Yes" : "No")
+                    LabeledContent("Inference mode", value: info.inferenceMode ?? "Runtime default")
+                    LabeledContent("Inference tier", value: info.inferenceTier ?? "Runtime default")
+                    LabeledContent("Gateway", value: connectionDescription(info.connections?.gateway))
+                    LabeledContent("SQLite", value: connectionDescription(info.connections?.sqlite))
+                }
+                if let error = model.runtimeInfoError {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .textSelection(.enabled)
+                }
+                Button {
+                    model.refreshRuntimeInfo()
+                } label: {
+                    if model.isRefreshingRuntimeInfo {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Label("Refresh Runtime Info", systemImage: "arrow.clockwise")
+                    }
+                }
+                .disabled(!model.isConnected || model.isRefreshingRuntimeInfo)
             }
 
             Section("Workspace") {
@@ -1726,6 +1835,11 @@ private struct RuntimeInspectorView: View {
         }
         .formStyle(.grouped)
     }
+
+    private func connectionDescription(_ connection: RuntimeInfo.Connection?) -> String {
+        guard let connection else { return "Unknown" }
+        return connection.configured ? connection.state : "Not configured"
+    }
 }
 
 private struct ConfigurationView: View {
@@ -1747,6 +1861,13 @@ private struct ConfigurationView: View {
             Divider()
 
             Form {
+                if !model.isConnected && !model.isBusy {
+                    Section("Initialization Error") {
+                        Label(model.status, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                            .textSelection(.enabled)
+                    }
+                }
                 Section("Workspace") {
                     pathRow("Working directory", text: $model.workspacePath, action: model.chooseWorkspace)
                     Text("This path is sent as runtime/initialize cwd and used as the agent runtime process directory.")
@@ -1786,6 +1907,49 @@ private struct ConfigurationView: View {
                     }
                     TextField("Model", text: $model.configuredModel, prompt: Text("Settings or agent default"))
                         .font(.body.monospaced())
+                    Picker("Inference mode", selection: $model.configuredInferenceMode) {
+                        Text("Runtime default").tag("")
+                        Text("Gateway").tag("gateway")
+                        Text("Local").tag("local")
+                        Text("Bring your own key").tag("byok")
+                    }
+                    Picker("Inference tier", selection: $model.configuredInferenceTier) {
+                        Text("Runtime default").tag("")
+                        Text("Low").tag("low")
+                        Text("Medium").tag("medium")
+                        Text("High").tag("high")
+                        Text("Extra high").tag("xtra-high")
+                    }
+                    .disabled(model.configuredInferenceMode != "gateway")
+                    TextField("Gateway URL", text: $model.configuredGatewayURL, prompt: Text("wss://gateway.example.com/rpc"))
+                        .font(.body.monospaced())
+                    Toggle("Require run permit", isOn: $model.configuredRequireRunPermit)
+                    Text("A gateway URL is required for gateway inference or required run permits. Inference tier is sent only in gateway mode.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Section("Gateway Access Token") {
+                    SecureField("Access token", text: $model.accessTokenDraft)
+                        .textContentType(.password)
+                    HStack {
+                        Button(model.accessTokenUpdateFailed ? "Retry" : "Apply Token") {
+                            model.updateAccessToken()
+                        }
+                        .disabled(model.accessTokenDraft.isEmpty || model.isUpdatingAccessToken)
+                        Button("Clear Entry", action: model.clearAccessToken)
+                            .disabled(model.accessTokenDraft.isEmpty || model.isUpdatingAccessToken)
+                        if model.isUpdatingAccessToken {
+                            ProgressView().controlSize(.small)
+                        }
+                    }
+                    if let message = model.accessTokenMessage {
+                        Text(message)
+                            .font(.caption)
+                            .foregroundStyle(model.accessTokenUpdateFailed ? .red : .secondary)
+                    }
+                    Text("The token is kept only in app memory and sent with auth/updateAccessToken after negotiation. Clearing this field does not revoke a token already sent; restart the runtime to clear it. You can instead launch the app with ADAPTIVE_AGENT_ACCESS_TOKEN set in its environment.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 Section("Interaction") {
                     Picker("Approval", selection: $model.configuredApprovalMode) {

@@ -1,13 +1,13 @@
 # AdaptiveAgent Desktop
 
-A restrained macOS 14+ SwiftUI vertical slice for the local AdaptiveAgent runtime. The app supervises a bundled `agent-runtime` process and communicates exclusively over protocol `1.10` using JSON-RPC 2.0 NDJSON on stdin/stdout. Filesystem access, agent loading, tools, providers, and Postgres runtime semantics remain in the runtime process.
+A restrained macOS 14+ SwiftUI vertical slice for the local AdaptiveAgent runtime. The app supervises a bundled `agent-runtime` process and communicates exclusively over protocol `1.11` using JSON-RPC 2.0 NDJSON on stdin/stdout. Filesystem access, agent loading, tools, providers, and Postgres runtime semantics remain in the runtime process.
 
 ## Requirements
 
 - macOS 14 or newer and Xcode 16+
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`)
 - A local Postgres instance and valid `DATABASE_URL` when settings explicitly select the Postgres runtime
-- A protocol `1.10` standalone `agent-runtime` executable
+- A protocol `1.11` standalone `agent-runtime` executable
 
 ## Install the runtime bridge
 
@@ -37,9 +37,9 @@ Open `AdaptiveAgentDesktop.xcodeproj` in Xcode to run. Signing defaults to local
 
 During development, you can skip copying the executable into resources by setting `ADAPTIVE_AGENT_RUNTIME_PATH` in the Xcode scheme to an absolute locally compiled `agent-runtime` path.
 
-In **Product > Scheme > Edit Scheme > Run > Arguments > Environment Variables**, set `DATABASE_URL` when using Postgres. Provider API keys required by the selected profile must be set there as environment variables as well. The app inherits these values into the child process. It never writes them to `UserDefaults`, files, command payloads, stdout, or the UI. Do not place secrets in the agent/settings JSON.
+In **Product > Scheme > Edit Scheme > Run > Arguments > Environment Variables**, set `DATABASE_URL` when using Postgres. Provider API keys required by the selected profile must be set there as environment variables as well. A gateway token can be entered in the app's **Workspace Configuration > Gateway Access Token** secure field, or supplied as `ADAPTIVE_AGENT_ACCESS_TOKEN` in the same environment-variable list. Tokens entered in the app are kept only in memory and sent to the runtime with `auth/updateAccessToken`; they are never written to `UserDefaults` or configuration files. Do not place secrets in the agent/settings JSON.
 
-The settings override field may be left blank. During initialization the runtime discovers settings in this order: `ADAPTIVE_AGENT_SETTINGS`, `<workspace>/agent.settings.json`, then `~/.adaptiveAgent/agent.settings.json`. Entering a path in the field takes precedence over those locations. When the app discovers `<workspace>/agent.settings.json` or you select a settings file, its configuration panel seeds editable runtime mode, provider, model, approval, and clarification values from that file. These non-secret values are sent explicitly to `runtime/initialize`; other settings remain runtime-managed. The settings file can select initialization behavior such as the runtime mode:
+The settings override field may be left blank. During initialization the runtime discovers settings in this order: `ADAPTIVE_AGENT_SETTINGS`, `<workspace>/agent.settings.json`, then `~/.adaptiveAgent/agent.settings.json`. Entering a path in the field takes precedence over those locations. When the app discovers `<workspace>/agent.settings.json` or you select a settings file, its configuration panel seeds editable runtime mode, provider, model, approval, and clarification values from that file. These non-secret values are sent explicitly to `runtime/initialize`; optional inference mode/tier controls remain unset unless you select an override, so runtime defaults stay in effect. Other settings remain runtime-managed. The settings file can select initialization behavior such as the runtime mode:
 
 ```json
 {
@@ -61,7 +61,7 @@ The standard **About AdaptiveAgent Desktop** panel displays the marketing versio
 ## Architecture and security boundary
 
 - `RuntimeClient` owns `Process`, separate stdin/stdout/stderr pipes, partial/multiple-line stdout buffering, JSON-RPC request correlation, and clean shutdown.
-- Startup requires a JSON-RPC `runtime/ready` notification, protocol `1.10` negotiation with `initialize`, and then a separate `runtime/initialize` before agent operations.
+- Startup requires a JSON-RPC `runtime/ready` notification, protocol `1.11` negotiation with `initialize`, and then a separate `runtime/initialize` before agent operations.
 - `AppModel` is main-actor isolated and translates UI actions into typed JSON-RPC methods. It reads only the non-secret runtime, model-selection, and interaction fields needed to seed editable `runtime/initialize` overrides.
 - The Swift renderer does not read agent profiles or other workspace contents and has no cloud behavior. It ignores secret-related settings fields; native file panels otherwise select paths only, and the runtime process performs runtime and filesystem behavior.
 - Runtime stderr is captured separately and displayed as diagnostic event entries; it is never parsed as protocol traffic.

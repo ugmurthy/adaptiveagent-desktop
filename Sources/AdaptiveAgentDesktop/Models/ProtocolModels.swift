@@ -43,6 +43,129 @@ struct RuntimeReady: Equatable, Sendable {
     let pid: Int
 }
 
+struct RuntimeInitializationParameters: Codable, Equatable, Sendable {
+    var cwd: String? = nil
+    var agentConfigPath: String? = nil
+    var settingsConfigPath: String? = nil
+    var runtimeMode: String? = nil
+    var provider: String? = nil
+    var model: String? = nil
+    var approvalMode: String? = nil
+    var clarificationMode: String? = nil
+    var inferenceMode: String? = nil
+    var inferenceTier: String? = nil
+    var gatewayURL: String? = nil
+    var requireRunPermit: Bool? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case cwd
+        case agentConfigPath
+        case settingsConfigPath
+        case runtimeMode
+        case provider
+        case model
+        case approvalMode
+        case clarificationMode
+        case inferenceMode
+        case inferenceTier
+        case gatewayURL = "gatewayUrl"
+        case requireRunPermit
+    }
+}
+
+struct RuntimeInitializationResult: Codable, Equatable, Sendable {
+    struct Agent: Codable, Equatable, Sendable {
+        let id: String
+        let name: String
+    }
+
+    let agent: Agent
+    let runtimeMode: String
+    let workspaceRoot: String
+    let shellCwd: String
+    let registeredToolNames: [String]
+    let inferenceMode: String?
+    let inferenceTier: String?
+}
+
+struct RuntimeInfo: Codable, Equatable, Sendable {
+    struct ClientInfo: Codable, Equatable, Sendable {
+        let name: String
+        let version: String?
+    }
+
+    struct Connection: Codable, Equatable, Sendable {
+        let configured: Bool
+        let state: String
+    }
+
+    struct Connections: Codable, Equatable, Sendable {
+        let sqlite: Connection?
+        let gateway: Connection?
+    }
+
+    let protocolVersion: String
+    let bridgeVersion: String
+    let initialized: Bool
+    let clientInfo: ClientInfo
+    let runtimeMode: String?
+    let agentId: String?
+    let workspaceRoot: String?
+    let inferenceMode: String?
+    let inferenceTier: String?
+    let connections: Connections?
+}
+
+struct AccessTokenUpdateResult: Codable, Equatable, Sendable {
+    let updated: Bool
+}
+
+enum ProtocolRedactor {
+    private static let sensitiveKeys = ["accesstoken", "authorization", "apikey", "token"]
+
+    static func redact(_ value: JSONValue) -> JSONValue {
+        switch value {
+        case .array(let values):
+            return .array(values.map(redact))
+        case .object(let fields):
+            return .object(fields.mapValues { redact($0) }.mapValuesWithKeys { key, value in
+                isSensitive(key) ? .string("<redacted>") : value
+            })
+        default:
+            return value
+        }
+    }
+
+    static func redact(_ text: String) -> String {
+        var result = text
+        let patterns = [
+            #"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"#,
+            #"(?i)(\"?(?:access[_-]?token|api[_-]?key|authorization)\"?\s*[:=]\s*\"?)[^\"\s,}]+"#
+        ]
+        for pattern in patterns {
+            result = result.replacingOccurrences(
+                of: pattern,
+                with: "$1<redacted>",
+                options: .regularExpression
+            )
+        }
+        return result
+    }
+
+    private static func isSensitive(_ key: String) -> Bool {
+        let normalized = key.lowercased().filter(\.isLetter)
+        return sensitiveKeys.contains { normalized == $0 || normalized.hasSuffix($0) }
+    }
+}
+
+private extension Dictionary where Key == String, Value == JSONValue {
+    func mapValuesWithKeys(_ transform: (String, JSONValue) -> JSONValue) -> Self {
+        reduce(into: [:]) { result, entry in
+            result[entry.key] = transform(entry.key, entry.value)
+        }
+    }
+}
+
 struct JSONRPCErrorObject: Equatable, Sendable {
     let code: Int
     let message: String
@@ -61,7 +184,7 @@ enum RuntimeProtocolMessage: Equatable, Sendable {
 }
 
 enum ProtocolCodec {
-    static let version = "1.10"
+    static let version = "1.11"
 
     static func encodeRequest(id: JSONRPCID, method: String, params: [String: JSONValue] = [:]) throws -> Data {
         let request = JSONValue.object([

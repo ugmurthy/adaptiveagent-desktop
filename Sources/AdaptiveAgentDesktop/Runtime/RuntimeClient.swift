@@ -198,6 +198,48 @@ actor RuntimeClient {
         return result
     }
 
+    func initializeRuntime(
+        parameters: RuntimeInitializationParameters
+    ) async throws -> RuntimeInitializationResult {
+        guard protocolInitialized else { throw RuntimeClientError.notInitialized("Bridge protocol") }
+        guard !isShuttingDown else { throw RuntimeClientError.protocolViolation("runtime is shutting down") }
+        guard !runtimeInitialized, !runtimeInitializationInProgress else {
+            throw RuntimeClientError.protocolViolation("agent runtime is already initialized or initializing")
+        }
+        let value = try JSONValue.encode(parameters)
+        guard let fields = value.objectValue else {
+            throw RuntimeClientError.protocolViolation("runtime/initialize parameters are invalid")
+        }
+        runtimeInitializationInProgress = true
+        defer { runtimeInitializationInProgress = false }
+        let valueResult = try await request(method: "runtime/initialize", params: fields)
+        let result = try decodeResult(
+            valueResult,
+            as: RuntimeInitializationResult.self,
+            method: "runtime/initialize"
+        )
+        runtimeInitialized = true
+        return result
+    }
+
+    func runtimeInfo() async throws -> RuntimeInfo {
+        guard protocolInitialized else { throw RuntimeClientError.notInitialized("Bridge protocol") }
+        let result = try await request(method: "runtime/info")
+        return try decodeResult(result, as: RuntimeInfo.self, method: "runtime/info")
+    }
+
+    func updateAccessToken(_ accessToken: String) async throws -> AccessTokenUpdateResult {
+        guard protocolInitialized else { throw RuntimeClientError.notInitialized("Bridge protocol") }
+        guard !accessToken.isEmpty else {
+            throw RuntimeClientError.protocolViolation("access token must not be empty")
+        }
+        let result = try await request(
+            method: "auth/updateAccessToken",
+            params: ["accessToken": .string(accessToken)]
+        )
+        return try decodeResult(result, as: AccessTokenUpdateResult.self, method: "auth/updateAccessToken")
+    }
+
     func send(
         method: String,
         params: [String: JSONValue] = [:],
@@ -243,6 +285,18 @@ actor RuntimeClient {
                 responseTimeoutTasks.removeValue(forKey: id)?.cancel()
                 continuation.resume(throwing: error)
             }
+        }
+    }
+
+    private func decodeResult<T: Decodable>(
+        _ value: JSONValue,
+        as type: T.Type,
+        method: String
+    ) throws -> T {
+        do {
+            return try value.decode(type)
+        } catch {
+            throw RuntimeClientError.protocolViolation("invalid \(method) result")
         }
     }
 

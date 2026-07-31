@@ -12,12 +12,16 @@
       "PARALLEL_EXTRACT_COST_USD_PER_REQUEST": "0.01"
 },
 
-"runtime":{
-   "mode":"postgres",
-   "autoMigrate": true
+"inference": {
+    "mode": "gateway"
 },
-  "logging": {
-    "enabled": false,
+"gateway": {
+    "url": "ws://127.0.0.1:3006/rpc",
+    "accessTokenEnv": "ADAPTIVE_AGENT_ACCESS_TOKEN",
+    "requireRunPermit": true
+},
+"logging": {
+    "enabled": true,
     "level": "debug",
     "destination": "file",
     "filePath": "./logs/adaptiveagent-desktop.log",

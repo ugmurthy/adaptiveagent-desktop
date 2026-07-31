@@ -33,7 +33,13 @@ targets:
         INFOPLIST_KEY_CFBundleShortVersionString: "$(MARKETING_VERSION)"
         INFOPLIST_KEY_CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: AdaptiveAgent Desktop uses your microphone while you dictate run and chat text.
+        INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: AdaptiveAgent Desktop uses speech recognition to turn your dictation into run and chat text.
         CODE_SIGN_IDENTITY: "-"
+    entitlements:
+      path: AdaptiveAgentDesktop.entitlements
+      properties:
+        com.apple.security.device.audio-input: true
     dependencies:
       - package: MarkdownUI
     scheme:
