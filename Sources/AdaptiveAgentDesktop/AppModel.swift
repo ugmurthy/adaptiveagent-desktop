@@ -284,6 +284,13 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func selectInferenceMode(_ mode: String) {
+        configuredInferenceMode = mode
+        if mode == "local" || mode == "byok" {
+            configuredRequireRunPermit = false
+        }
+    }
+
     func chooseWorkspace() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -1121,7 +1128,7 @@ final class AppModel: ObservableObject {
                     ? configuredInferenceTier
                     : nil,
                 gatewayURL: gatewayURL.isEmpty ? nil : gatewayURL,
-                requireRunPermit: configuredRequireRunPermit ? true : nil
+                requireRunPermit: configuredRequireRunPermit
             )
             let result = try await client.initializeRuntime(parameters: parameters)
             applyRuntimeInformation(result, fallbackWorkspace: workingDirectory.path)

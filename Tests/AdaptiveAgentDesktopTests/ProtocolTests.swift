@@ -95,7 +95,7 @@ final class ProtocolTests: XCTestCase {
     }
 
     @MainActor
-    func testAppModelUsesLaunchDirectoryAndLocalSettingsForInitialization() async throws {
+    func testAppModelUsesLaunchDirectoryAndAllowsLocalInferenceOverride() async throws {
         let workspace = try temporaryDirectoryURL()
         let settings = workspace.appendingPathComponent("agent.settings.json")
         try #"""
@@ -112,7 +112,7 @@ final class ProtocolTests: XCTestCase {
             "interactive": true,
             "clarificationMode": "fail"
           },
-          "inference": { "mode": "local", "tier": "high" },
+          "inference": { "mode": "gateway", "tier": "high" },
           "gateway": {
             "url": "ws://127.0.0.1:3006/rpc",
             "accessTokenEnv": "ADAPTIVE_AGENT_ACCESS_TOKEN",
@@ -148,11 +148,16 @@ done
         XCTAssertEqual(model.configuredModel, "qwen/qwen3.5-27b")
         XCTAssertEqual(model.configuredApprovalMode, "auto", "approvalMode should take precedence over legacy autoApprove")
         XCTAssertEqual(model.configuredClarificationMode, "fail")
-        XCTAssertEqual(model.configuredInferenceMode, "local")
+        XCTAssertEqual(model.configuredInferenceMode, "gateway")
         XCTAssertEqual(model.configuredInferenceTier, "high")
         XCTAssertEqual(model.configuredGatewayURL, "ws://127.0.0.1:3006/rpc")
         XCTAssertTrue(model.configuredRequireRunPermit)
         XCTAssertNil(model.settingsConfigurationError)
+
+        model.selectInferenceMode("local")
+        XCTAssertEqual(model.configuredInferenceMode, "local")
+        XCTAssertFalse(model.configuredRequireRunPermit)
+
         model.bootstrap()
         for _ in 0..<100 where !model.isConnected {
             try? await Task.sleep(for: .milliseconds(20))
@@ -181,7 +186,7 @@ done
         XCTAssertEqual(params["inferenceMode"], .string("local"))
         XCTAssertNil(params["inferenceTier"])
         XCTAssertEqual(params["gatewayUrl"], .string("ws://127.0.0.1:3006/rpc"))
-        XCTAssertEqual(params["requireRunPermit"], .bool(true))
+        XCTAssertEqual(params["requireRunPermit"], .bool(false))
         XCTAssertNil(params["gatewayURL"])
         XCTAssertNil(params["accessTokenEnv"])
         await model.shutdown()

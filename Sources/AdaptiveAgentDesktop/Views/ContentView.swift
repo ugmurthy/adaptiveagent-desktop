@@ -1907,7 +1907,10 @@ private struct ConfigurationView: View {
                     }
                     TextField("Model", text: $model.configuredModel, prompt: Text("Settings or agent default"))
                         .font(.body.monospaced())
-                    Picker("Inference mode", selection: $model.configuredInferenceMode) {
+                    Picker("Inference mode", selection: Binding(
+                        get: { model.configuredInferenceMode },
+                        set: { mode in model.selectInferenceMode(mode) }
+                    )) {
                         Text("Runtime default").tag("")
                         Text("Gateway").tag("gateway")
                         Text("Local").tag("local")
