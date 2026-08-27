@@ -263,6 +263,89 @@ done
     }
 
     @MainActor
+    func testAppModelSendsProtocol116RunIdentityAndChatTranscript() async throws {
+        let workspace = try temporaryDirectoryURL()
+        let requestLog = temporaryFileURL(named: "protocol-116-agent-requests.log")
+        let executable = try makeRuntimeScript(#"""
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
+  id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
+  method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
+  run_id="$(printf '%s' "$line" | sed -E 's/.*"runId":"([^"]+)".*/\1/')"
+  case "$method" in
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}' ;;
+    runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[]}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
+    agent/run) printf '{"jsonrpc":"2.0","id":"%s","result":{"status":"success","runId":"%s","output":"Done"}}\n' "$id" "$run_id" ;;
+    agent/chat) printf '{"jsonrpc":"2.0","id":"%s","result":{"status":"success","runId":"%s","output":"Reply"}}\n' "$id" "$run_id" ;;
+    runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
+    *) exit 91 ;;
+  esac
+done
+"""#)
+        let model = AppModel(
+            client: RuntimeClient(executableURL: executable, responseTimeout: .seconds(2)),
+            workingDirectoryURL: workspace
+        )
+        model.bootstrap()
+        for _ in 0..<100 where !model.isConnected {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(model.isConnected, model.status)
+
+        let runTabID = try XCTUnwrap(model.selectedTabID)
+        model.setDraftText("Run this task", forTab: runTabID)
+        model.submitDraft(in: runTabID)
+        for _ in 0..<100 where model.runs.first?.status != .succeeded {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+
+        model.newChat()
+        let chatTabID = try XCTUnwrap(model.selectedTabID)
+        model.setDraftText("First question", forTab: chatTabID)
+        model.submitDraft(in: chatTabID)
+        for _ in 0..<100 where model.runs.first?.status != .succeeded {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        model.setChatMessage("Follow up", forTab: chatTabID)
+        model.sendChatMessage(in: chatTabID)
+        for _ in 0..<100 where model.runs.first?.isRequestInFlight == true {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+
+        let requests = try String(contentsOf: requestLog, encoding: .utf8)
+            .split(separator: "\n")
+            .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+        let runRequest = try XCTUnwrap(requests.first { $0.objectValue?["method"] == .string("agent/run") })
+        let runParams = try XCTUnwrap(runRequest.objectValue?["params"]?.objectValue)
+        XCTAssertFalse(try XCTUnwrap(runParams["runId"]?.stringValue).isEmpty)
+        XCTAssertEqual(runParams["goal"], .string("Run this task"))
+
+        let chatRequests = requests.filter { $0.objectValue?["method"] == .string("agent/chat") }
+        XCTAssertEqual(chatRequests.count, 2)
+        let firstChatParams = try XCTUnwrap(chatRequests.first?.objectValue?["params"]?.objectValue)
+        XCTAssertFalse(try XCTUnwrap(firstChatParams["runId"]?.stringValue).isEmpty)
+        XCTAssertNil(firstChatParams["message"])
+        guard case .array(let firstTranscript) = firstChatParams["transcript"] else {
+            return XCTFail("Initial chat must send a transcript")
+        }
+        XCTAssertEqual(firstTranscript, [.object(["role": .string("user"), "content": .string("First question")])])
+
+        let followUpParams = try XCTUnwrap(chatRequests.last?.objectValue?["params"]?.objectValue)
+        XCTAssertNotEqual(followUpParams["runId"], firstChatParams["runId"])
+        guard case .array(let followUpTranscript) = followUpParams["transcript"] else {
+            return XCTFail("Follow-up chat must send the complete transcript")
+        }
+        XCTAssertEqual(followUpTranscript, [
+            .object(["role": .string("user"), "content": .string("First question")]),
+            .object(["role": .string("assistant"), "content": .string("Reply")]),
+            .object(["role": .string("user"), "content": .string("Follow up")])
+        ])
+        await model.shutdown()
+    }
+
+    @MainActor
     func testAppModelLoadsLegacyInteractionSettingsAndSafeFallbacks() throws {
         let workspace = try temporaryDirectoryURL()
         let settings = workspace.appendingPathComponent("agent.settings.json")
@@ -679,6 +762,7 @@ done
             "type": .string("approval.requested"),
             "runId": .string("child-run"),
             "payload": .object([
+                "approvalId": .string("approval-child-run"),
                 "toolName": .string("shell_exec"),
                 "input": .object(["command": .string("git status")])
             ])
@@ -690,6 +774,7 @@ done
         XCTAssertEqual(toolName, "shell_exec")
         XCTAssertEqual(input?.objectValue?["command"], .string("git status"))
         XCTAssertEqual(model.runs[0].interaction?.runId, "child-run")
+        XCTAssertEqual(model.runs[0].interaction?.approvalId, "approval-child-run")
 
         model.acceptResult(.object([
             "status": .string("approval_requested"),
@@ -1054,7 +1139,7 @@ done
         XCTAssertEqual(initialize.objectValue?["params"]?.objectValue?["protocolVersion"], .string("1.16"))
 
         do {
-            _ = try await client.send(method: "agent/run", params: ["goal": .string("too early")])
+            _ = try await client.send(method: "agent/run", params: ["runId": .string("early-run"), "goal": .string("too early")])
             XCTFail("agent/run must be gated until runtime/initialize succeeds")
         } catch {
             XCTAssertEqual(error as? RuntimeClientError, .notInitialized("Agent runtime"))
@@ -1074,7 +1159,7 @@ done
 
         let run: JSONValue
         do {
-            run = try await client.send(method: "agent/run", params: ["goal": .string("Ship it")])
+            run = try await client.send(method: "agent/run", params: ["runId": .string("run-1"), "goal": .string("Ship it")])
         } catch {
             await client.shutdown()
             return XCTFail("agent/run failed: \(error)")
@@ -1089,7 +1174,11 @@ done
 
         let approval = try await client.send(
             method: "interaction/resolveApproval",
-            params: ["runId": .string("run-1"), "approved": .bool(true)]
+            params: [
+                "runId": .string("run-1"),
+                "approvalId": .string("approval-1"),
+                "approved": .bool(true)
+            ]
         )
         XCTAssertEqual(approval.objectValue?["approved"], .bool(true))
         let approvalRequest = try XCTUnwrap(
@@ -1101,6 +1190,7 @@ done
         XCTAssertEqual(approvalRequest.objectValue?["jsonrpc"], .string("2.0"))
         XCTAssertNotNil(approvalRequest.objectValue?["id"])
         XCTAssertEqual(approvalRequest.objectValue?["params"]?.objectValue?["runId"], .string("run-1"))
+        XCTAssertEqual(approvalRequest.objectValue?["params"]?.objectValue?["approvalId"], .string("approval-1"))
         XCTAssertEqual(approvalRequest.objectValue?["params"]?.objectValue?["approved"], .bool(true))
 
         await client.shutdown()

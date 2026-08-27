@@ -80,10 +80,17 @@ final class AppModel: ObservableObject {
     }
 
     struct ChatMessage: Identifiable, Equatable {
-        enum Role { case user, assistant }
+        enum Role: String { case user, assistant }
         let id = UUID()
         let role: Role
         let content: String
+
+        var protocolValue: JSONValue {
+            .object([
+                "role": .string(role.rawValue),
+                "content": .string(content)
+            ])
+        }
     }
 
     struct RunActivity: Identifiable, Equatable {
@@ -107,6 +114,7 @@ final class AppModel: ObservableObject {
         }
 
         let runId: String
+        var approvalId: String? = nil
         var message: String
         var kind: Kind
         var isResolving = false
@@ -508,6 +516,7 @@ final class AppModel: ObservableObject {
         guard isConnected, !text.isEmpty, !isWaitingForRunIdentity else { return }
 
         let recordID = UUID()
+        let runId = recordID.uuidString
         let sessionId = kind == .chat ? UUID().uuidString : nil
         var record = RunRecord(
             id: recordID,
@@ -521,12 +530,18 @@ final class AppModel: ObservableObject {
             record.chatMessages.append(ChatMessage(role: .user, content: text))
         }
         runs.insert(record, at: 0)
+        bind(rootRunId: runId, to: recordID)
         tabs[tabIndex].selectedRunID = recordID
         tabs[tabIndex].draftText = ""
         tabs[tabIndex].scrollPosition = nil
 
         let method = kind == .run ? "agent/run" : "agent/chat"
-        var fields: [String: JSONValue] = [kind == .run ? "goal" : "message": .string(text)]
+        var fields: [String: JSONValue] = ["runId": .string(runId)]
+        if kind == .run {
+            fields["goal"] = .string(text)
+        } else {
+            fields["transcript"] = .array(record.chatMessages.map(\.protocolValue))
+        }
         if let sessionId { fields["sessionId"] = .string(sessionId) }
         beginAgentRequest(method: method, fields: fields, recordID: recordID)
     }
@@ -546,8 +561,13 @@ final class AppModel: ObservableObject {
         runs[index].status = .queued
         runs[index].errorMessage = nil
         runs[index].interaction = nil
-        var fields: [String: JSONValue] = ["message": .string(text)]
+        let runId = UUID().uuidString
+        var fields: [String: JSONValue] = [
+            "runId": .string(runId),
+            "transcript": .array(runs[index].chatMessages.map(\.protocolValue))
+        ]
         if let sessionId = runs[index].sessionId { fields["sessionId"] = .string(sessionId) }
+        bind(rootRunId: runId, to: recordID)
         tabs[tabIndex].chatMessage = ""
         beginAgentRequest(method: "agent/chat", fields: fields, recordID: recordID)
     }
@@ -557,6 +577,11 @@ final class AppModel: ObservableObject {
               var interaction = runs[index].interaction,
               case .approval = interaction.kind,
               !interaction.isResolving else { return }
+        guard let approvalId = interaction.approvalId else {
+            interaction.errorMessage = "The runtime did not provide an approval ID."
+            runs[index].interaction = interaction
+            return
+        }
         interaction.isResolving = true
         interaction.errorMessage = nil
         resolvedInteractions.remove(recordID)
@@ -567,7 +592,11 @@ final class AppModel: ObservableObject {
             do {
                 let result = try await client.send(
                     method: "interaction/resolveApproval",
-                    params: ["runId": .string(interaction.runId), "approved": .bool(approved)],
+                    params: [
+                        "runId": .string(interaction.runId),
+                        "approvalId": .string(approvalId),
+                        "approved": .bool(approved)
+                    ],
                     timeoutPolicy: .none
                 )
                 acceptApprovalResolution(result, approved: approved, for: recordID)
@@ -873,6 +902,7 @@ final class AppModel: ObservableObject {
             } else {
                 runs[index].interaction = Interaction(
                     runId: effectiveRunId,
+                    approvalId: object["approvalId"]?.stringValue,
                     message: message,
                     kind: .approval(toolName: object["toolName"]?.stringValue, input: nil, assistantContent: nil)
                 )
@@ -1056,6 +1086,7 @@ final class AppModel: ObservableObject {
             runs[index].status = .waitingForApproval
             runs[index].interaction = Interaction(
                 runId: runId,
+                approvalId: payload["approvalId"]?.stringValue,
                 message: message,
                 kind: .approval(
                     toolName: toolName,
@@ -1172,7 +1203,6 @@ final class AppModel: ObservableObject {
     }
 
     private func beginAgentRequest(method: String, fields: [String: JSONValue], recordID: UUID) {
-        pendingRootAssignments.append(recordID)
         if let index = runs.firstIndex(where: { $0.id == recordID }) {
             runs[index].status = .running
             beginActivityTimer(at: index)

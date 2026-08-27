@@ -127,8 +127,8 @@ steering, and in-memory run state.
 | `runtime/info`                     | -                                    | -                                                                                                                       |
 | `runtime/shutdown`                 | -                                    | -                                                                                                                       |
 | `auth/updateAccessToken`           | `accessToken`                        | -                                                                                                                       |
-| `agent/run`                        | `goal`                               | `sessionId`, `input`                                                                                                    |
-| `agent/chat`                       | `message`                            | `sessionId`                                                                                                             |
+| `agent/run`                        | `runId`, `goal`                      | `sessionId`, `input`                                                                                                    |
+| `agent/chat`                       | `runId`, `transcript`                | `sessionId`                                                                                                             |
 | `run/resume`                       | `runId`                              | -                                                                                                                       |
 | `run/retry`                        | `runId`                              | -                                                                                                                       |
 | `run/recover`                      | `runId`                              | `strategy` (`auto`, `resume`, `retry`, `continue`), `dryRun`                                                            |
@@ -137,7 +137,7 @@ steering, and in-memory run state.
 | `run/inspect`                      | `runId`                              | -                                                                                                                       |
 | `run/replay`                       | `runId`                              | -                                                                                                                       |
 | `run/steer`                        | `runId`, `message`                   | `role`, `metadata`                                                                                                      |
-| `interaction/resolveApproval`      | `runId`, `approved`                  | -                                                                                                                       |
+| `interaction/resolveApproval`      | `runId`, `approvalId`, `approved`    | -                                                                                                                       |
 | `interaction/resolveClarification` | `runId`, `answer`                    | -                                                                                                                       |
 | `cli/commands`                     | -                                    | -                                                                                                                       |
 | `cli/execute`                      | `argv`                               | `stdin`, `timeoutMs` (maximum 24 hours)                                                                                 |
@@ -150,6 +150,7 @@ Example run request:
   "id": 10,
   "method": "agent/run",
   "params": {
+    "runId": "018f2b8e-7b9a-7bb0-9a2d-0f47fddbd304",
     "goal": "Summarize this repository",
     "sessionId": "desktop-session"
   }

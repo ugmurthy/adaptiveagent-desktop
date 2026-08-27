@@ -155,6 +155,7 @@ Request:
 "id": "request-1",
 "method": "agent/run",
 "params": {
+"runId": "018f2b8e-7b9a-7bb0-9a2d-0f47fddbd304",
 "goal": "Summarize this repository"
 }
 }
@@ -214,6 +215,11 @@ Prefer typed JSON-RPC methods for persistent desktop operations:
 - run/steer
 - interaction/resolveApproval
 - interaction/resolveClarification
+
+Protocol 1.16 requires the Swift client to assign a non-empty runId for every
+agent/run and agent/chat request. agent/chat sends the complete non-empty
+transcript rather than a singular message. interaction/resolveApproval sends
+the approvalId received in the approval result or event payload.
 
 Use cli/execute only for non-interactive CLI functionality that has no typed
 JSON-RPC method. Do not use cli/execute as the normal implementation of run,
