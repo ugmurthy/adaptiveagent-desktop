@@ -1,13 +1,13 @@
 # AdaptiveAgent Desktop
 
-A restrained macOS 14+ SwiftUI vertical slice for the local AdaptiveAgent runtime. The app supervises a bundled `agent-runtime` process and communicates exclusively over protocol `1.11` using JSON-RPC 2.0 NDJSON on stdin/stdout. Filesystem access, agent loading, tools, providers, and Postgres runtime semantics remain in the runtime process.
+A restrained macOS 14+ SwiftUI vertical slice for the local AdaptiveAgent runtime. The app supervises a bundled `agent-runtime` process and communicates exclusively over protocol `1.16` using JSON-RPC 2.0 NDJSON on stdin/stdout. Filesystem access, agent loading, tools, providers, and Postgres runtime semantics remain in the runtime process.
 
 ## Requirements
 
 - macOS 14 or newer and Xcode 16+
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`)
 - A local Postgres instance and valid `DATABASE_URL` when settings explicitly select the Postgres runtime
-- A protocol `1.11` standalone `agent-runtime` executable
+- A protocol `1.16` standalone `agent-runtime` executable
 
 ## Install the runtime bridge
 
@@ -61,7 +61,7 @@ The standard **About AdaptiveAgent Desktop** panel displays the marketing versio
 ## Architecture and security boundary
 
 - `RuntimeClient` owns `Process`, separate stdin/stdout/stderr pipes, partial/multiple-line stdout buffering, JSON-RPC request correlation, and clean shutdown.
-- Startup requires a JSON-RPC `runtime/ready` notification, protocol `1.11` negotiation with `initialize`, and then a separate `runtime/initialize` before agent operations.
+- Startup requires a JSON-RPC `runtime/ready` notification, protocol `1.16` negotiation with `initialize`, and then a separate `runtime/initialize` before agent operations.
 - `AppModel` is main-actor isolated and translates UI actions into typed JSON-RPC methods. It reads only the non-secret runtime, model-selection, and interaction fields needed to seed editable `runtime/initialize` overrides.
 - The Swift renderer does not read agent profiles or other workspace contents and has no cloud behavior. It ignores secret-related settings fields; native file panels otherwise select paths only, and the runtime process performs runtime and filesystem behavior.
 - Runtime stderr is captured separately and displayed as diagnostic event entries; it is never parsed as protocol traffic.

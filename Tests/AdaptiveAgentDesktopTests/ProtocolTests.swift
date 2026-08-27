@@ -41,11 +41,11 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testReadyNotificationRequiresNoIDAndExactStringVersion() throws {
-        let message = try ProtocolCodec.decodeMessage(Data(#"{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":12}}"#.utf8))
-        XCTAssertEqual(message, .ready(RuntimeReady(protocolVersion: "1.11", bridgeVersion: "0.1.0", pid: 12)))
+        let message = try ProtocolCodec.decodeMessage(Data(#"{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":12}}"#.utf8))
+        XCTAssertEqual(message, .ready(RuntimeReady(protocolVersion: "1.16", bridgeVersion: "0.1.0", pid: 12)))
 
-        XCTAssertThrowsError(try ProtocolCodec.decodeMessage(Data(#"{"jsonrpc":"2.0","id":"ready","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":12}}"#.utf8)))
-        XCTAssertThrowsError(try ProtocolCodec.decodeMessage(Data(#"{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":1.11,"bridgeVersion":"0.1.0","pid":12}}"#.utf8)))
+        XCTAssertThrowsError(try ProtocolCodec.decodeMessage(Data(#"{"jsonrpc":"2.0","id":"ready","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":12}}"#.utf8)))
+        XCTAssertThrowsError(try ProtocolCodec.decodeMessage(Data(#"{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":1.16,"bridgeVersion":"0.1.0","pid":12}}"#.utf8)))
     }
 
     func testResponsesPreserveIDTypesAndDecodeProtocolErrorCode() throws {
@@ -122,17 +122,17 @@ final class ProtocolTests: XCTestCase {
         """#.write(to: settings, atomically: true, encoding: .utf8)
         let requestLog = temporaryFileURL(named: "app-model-requests.log")
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11"}}' ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}' ;;
     runtime/initialize)
       printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":["write_file"]}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path))
       ;;
-    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s","connections":{"sqlite":{"configured":true,"state":"connected"},"gateway":{"configured":false,"state":"not_configured"}}}}\n' "$id" \#(shellQuote(workspace.path)) ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s","connections":{"sqlite":{"configured":true,"state":"connected"},"gateway":{"configured":false,"state":"not_configured"}}}}\n' "$id" \#(shellQuote(workspace.path)) ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
     *) exit 91 ;;
   esac
@@ -197,16 +197,16 @@ done
         let workspace = try temporaryDirectoryURL()
         let requestLog = temporaryFileURL(named: "app-model-auth-requests.log")
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11"}}' ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}' ;;
     auth/updateAccessToken) printf '{"jsonrpc":"2.0","id":"%s","result":{"updated":true}}\n' "$id" ;;
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[],"inferenceMode":"gateway","inferenceTier":"high"}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
-    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop","version":"1.0.2"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s","inferenceMode":"gateway","inferenceTier":"high","connections":{"sqlite":{"configured":true,"state":"connected"},"gateway":{"configured":true,"state":"connected"}}}}\n' "$id" \#(shellQuote(workspace.path)) ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop","version":"1.0.2"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s","inferenceMode":"gateway","inferenceTier":"high","connections":{"sqlite":{"configured":true,"state":"connected"},"gateway":{"configured":true,"state":"connected"}}}}\n' "$id" \#(shellQuote(workspace.path)) ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
     *) exit 91 ;;
   esac
@@ -303,15 +303,15 @@ done
             .write(to: replacementSettings, atomically: true, encoding: .utf8)
         let requestLog = temporaryFileURL(named: "typed-settings-requests.log")
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11"}}' ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}' ;;
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[]}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
-    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
     *) exit 91 ;;
   esac
@@ -410,15 +410,15 @@ done
         let workspace = try temporaryDirectoryURL()
         let requestLog = temporaryFileURL(named: "entered-run-action-requests.log")
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11"}}' ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}' ;;
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[]}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
-    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
     run/inspect) printf '{"jsonrpc":"2.0","id":"%s","result":{"run":{"id":"persisted-run","status":"running"},"events":[]}}\n' "$id" ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
     *) exit 91 ;;
@@ -877,12 +877,12 @@ done
         let pwdLog = temporaryFileURL(named: "pwd.txt")
         let executable = try makeRuntimeScript(#"""
 pwd > \#(shellQuote(pwdLog.path))
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11"}}' ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}' ;;
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id" ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
     *) exit 91 ;;
@@ -903,12 +903,12 @@ done
 
     func testLongRunningAgentRequestCanDisableTheStandardResponseTimeout() async throws {
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11"}}' ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}' ;;
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id" ;;
     agent/run) sleep 0.15; printf '{"jsonrpc":"2.0","id":"%s","result":{"status":"success","runId":"slow-run","output":"Done"}}\n' "$id" ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
@@ -928,18 +928,18 @@ done
         await client.shutdown()
     }
 
-    func testProtocol111AuthUpdateAndRuntimeInfoUseTypedTransport() async throws {
+    func testProtocol116AuthUpdateAndRuntimeInfoUseTypedTransport() async throws {
         let requestLog = temporaryFileURL(named: "auth-info-requests.log")
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11"}}' ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}' ;;
     auth/updateAccessToken) printf '{"jsonrpc":"2.0","id":"%s","result":{"updated":true}}\n' "$id" ;;
-    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop","version":"1.0.2"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"/workspace","inferenceMode":"gateway","inferenceTier":"medium","connections":{"sqlite":{"configured":false,"state":"not_configured"},"gateway":{"configured":true,"state":"connected"}}}}\n' "$id" ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop","version":"1.0.2"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"/workspace","inferenceMode":"gateway","inferenceTier":"medium","connections":{"sqlite":{"configured":false,"state":"not_configured"},"gateway":{"configured":true,"state":"connected"}}}}\n' "$id" ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
     *) exit 91 ;;
   esac
@@ -951,7 +951,7 @@ done
         let tokenUpdate = try await client.updateAccessToken("secret-access-token")
         XCTAssertEqual(tokenUpdate, .init(updated: true))
         let info = try await client.runtimeInfo()
-        XCTAssertEqual(info.protocolVersion, "1.11")
+        XCTAssertEqual(info.protocolVersion, "1.16")
         XCTAssertTrue(info.initialized)
         XCTAssertEqual(info.inferenceMode, "gateway")
         XCTAssertEqual(info.inferenceTier, "medium")
@@ -998,14 +998,14 @@ done
         let executable = try makeRuntimeScript(#"""
 printf '%s' '{"jsonrpc":"2.0","method":"runtime/'
 sleep 0.05
-printf '%s\n' 'ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' 'ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> \#(shellQuote(logURL.path))
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
     initialize)
-      printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","capabilities":{}}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","capabilities":{}}}'
       ;;
     runtime/initialize)
       printf '{"jsonrpc":"2.0","id":"%s","result":{"runtimeMode":"postgres"}}\n' "$id"
@@ -1051,7 +1051,7 @@ done
         XCTAssertEqual(initialize.objectValue?["jsonrpc"], .string("2.0"))
         XCTAssertEqual(initialize.objectValue?["id"], .string("initialize"))
         XCTAssertEqual(initialize.objectValue?["method"], .string("initialize"))
-        XCTAssertEqual(initialize.objectValue?["params"]?.objectValue?["protocolVersion"], .string("1.11"))
+        XCTAssertEqual(initialize.objectValue?["params"]?.objectValue?["protocolVersion"], .string("1.16"))
 
         do {
             _ = try await client.send(method: "agent/run", params: ["goal": .string("too early")])
@@ -1109,9 +1109,9 @@ done
 
     func testOutOfOrderResponsesAreCorrelatedByID() async throws {
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
 IFS= read -r line
-printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11"}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}'
 IFS= read -r line
 id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
 printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"
@@ -1141,12 +1141,12 @@ printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"
 
     func testSlowNotificationHandlerDoesNotDelayFollowingResponse() async throws {
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11"}}' ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}' ;;
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id" ;;
     runtime/info)
       printf '%s\n' '{"jsonrpc":"2.0","method":"agent/event","params":{"schemaVersion":1,"type":"run.started","runId":"run-1"}}'
@@ -1170,7 +1170,7 @@ done
     func testUnsupportedAndLegacyStartupNeverFallBack() async throws {
         let requestLog = temporaryFileURL(named: "unsupported-requests.log")
         let unsupported = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.9","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do printf '%s\n' "$line" >> \#(shellQuote(requestLog.path)); done
 """#)
         let unsupportedClient = RuntimeClient(executableURL: unsupported, readyTimeout: .seconds(1))
@@ -1178,7 +1178,7 @@ while IFS= read -r line; do printf '%s\n' "$line" >> \#(shellQuote(requestLog.pa
             try await unsupportedClient.start(notificationHandler: { _, _ in }, errorHandler: { _ in })
             XCTFail("unsupported protocol should fail startup")
         } catch {
-            XCTAssertEqual(error as? RuntimeClientError, .incompatibleRuntime("1.9"))
+            XCTAssertEqual(error as? RuntimeClientError, .incompatibleRuntime("1.11"))
         }
         XCTAssertFalse(FileManager.default.fileExists(atPath: requestLog.path))
 
@@ -1197,9 +1197,9 @@ sleep 5
 
     func testLegacyOperationalMessageIsRejected() async throws {
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
 IFS= read -r line
-printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11"}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}'
 IFS= read -r line
 printf '%s\n' '{"version":1,"id":"old","type":"response","ok":true,"result":{}}'
 sleep 5
@@ -1230,9 +1230,9 @@ sleep 5
 
     func testUnexpectedRuntimeTerminationFailsPendingRequest() async throws {
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.11","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
 IFS= read -r line
-printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.11"}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}'
 IFS= read -r line
 exit 7
 """#)

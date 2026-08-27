@@ -184,7 +184,7 @@ enum RuntimeProtocolMessage: Equatable, Sendable {
 }
 
 enum ProtocolCodec {
-    static let version = "1.11"
+    static let version = "1.16"
 
     static func encodeRequest(id: JSONRPCID, method: String, params: [String: JSONValue] = [:]) throws -> Data {
         let request = JSONValue.object([
