@@ -95,12 +95,12 @@ final class ProtocolTests: XCTestCase {
     }
 
     @MainActor
-    func testAppModelUsesLaunchDirectoryAndAllowsLocalInferenceOverride() async throws {
+    func testAppModelAcceptsSQLiteSettingsAndUsesLaunchDirectory() async throws {
         let workspace = try temporaryDirectoryURL()
         let settings = workspace.appendingPathComponent("agent.settings.json")
         try #"""
         {
-          "runtime": { "mode": "postgres" },
+          "runtime": { "mode": "sqlite" },
           "model": {
             "overrideProvider": "openrouter",
             "overrideModel": "qwen/qwen3.5-27b",
@@ -143,7 +143,7 @@ done
 
         XCTAssertEqual(model.workspacePath, workspace.standardizedFileURL.path)
         XCTAssertEqual(model.settingsConfigPath, settings.path)
-        XCTAssertEqual(model.configuredRuntimeMode, "postgres")
+        XCTAssertEqual(model.configuredRuntimeMode, "sqlite")
         XCTAssertEqual(model.configuredProvider, "openrouter")
         XCTAssertEqual(model.configuredModel, "qwen/qwen3.5-27b")
         XCTAssertEqual(model.configuredApprovalMode, "auto", "approvalMode should take precedence over legacy autoApprove")
@@ -175,7 +175,7 @@ done
         let params = try XCTUnwrap(runtimeInitialize.objectValue?["params"]?.objectValue)
         XCTAssertEqual(params["cwd"], .string(workspace.path))
         XCTAssertEqual(params["settingsConfigPath"], .string(settings.path))
-        XCTAssertEqual(params["runtimeMode"], .string("postgres"))
+        XCTAssertEqual(params["runtimeMode"], .string("sqlite"))
         XCTAssertEqual(params["provider"], .string("openrouter"))
         XCTAssertEqual(params["model"], .string("qwen/qwen3.5-27b"))
         XCTAssertEqual(params["approvalMode"], .string("auto"))

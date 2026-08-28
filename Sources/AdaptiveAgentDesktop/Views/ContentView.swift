@@ -1896,6 +1896,7 @@ private struct ConfigurationView: View {
                     Picker("Mode", selection: $model.configuredRuntimeMode) {
                         Text("Settings or runtime default").tag("")
                         Text("Memory").tag("memory")
+                        Text("SQLite").tag("sqlite")
                         Text("Postgres").tag("postgres")
                     }
                     Picker("Provider", selection: $model.configuredProvider) {

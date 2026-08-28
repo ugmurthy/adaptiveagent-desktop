@@ -4,7 +4,7 @@ import Foundation
 
 @MainActor
 final class AppModel: ObservableObject {
-    static let supportedRuntimeModes = ["memory", "postgres"]
+    static let supportedRuntimeModes = ["memory", "sqlite", "postgres"]
     static let supportedProviders = ["openrouter", "ollama", "mistral", "mesh"]
     static let supportedApprovalModes = ["auto", "manual", "reject"]
     static let supportedClarificationModes = ["interactive", "fail"]
