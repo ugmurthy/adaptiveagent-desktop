@@ -1,4 +1,4 @@
-# Run Progress, Steering, and History UX Specification
+# Run Progress, Input, and History UX Specification
 
 Status: implementation-ready proposal  
 Scope: AdaptiveAgent Desktop for macOS 14+  
@@ -10,8 +10,8 @@ This change must:
 
 1. Keep long-running tool activity compact while retaining access to every
    activity item.
-2. Make steering an obvious, comfortable action without reducing the space
-   available for the run result.
+2. Make chat input and steering obvious, comfortable actions without reducing
+   the space available for the conversation or run result.
 3. Populate the left sidebar with persisted historical runs from
    `@adaptive-agent/trace-session`, not only records observed by the current app
    process.
@@ -26,9 +26,9 @@ easy to follow, intervention is easy to find, and past work is easy to reopen.
 - `RunDetailView` asks `ScrollViewReader` to scroll to each new activity, while
   also persisting a `scrollPosition`. There is no explicit distinction between
   “the user is reading older content” and “follow the live run.”
-- Steering uses a single-line `TextField` in a 14-point footer. It has the same
-  visual weight as passive chrome, even though it is the primary way to
-  intervene in an active run.
+- Chat input and steering use low-profile fields in 14-point footers. They have
+  the same visual weight as passive chrome even though they are the primary ways
+  to continue a conversation or intervene in an active run.
 - The sidebar reads only `AppModel.runs`, an in-memory collection created by the
   current app process.
 - The trace-session executable already exposes a separate, read-only NDJSON
@@ -97,7 +97,13 @@ follow state:
 This policy fixes both failure modes: the main page remains bounded during
 tool-heavy runs, and auto-scroll no longer fights a user reading earlier output.
 
-### 3.2 Prominent steering composer
+### 3.2 Prominent chat and steering composers
+
+Chat and steering must use one shared visual component with mode-specific copy,
+action, and availability. This prevents the primary input from becoming subtle
+when the user moves between run and chat tabs.
+
+#### Steering
 
 Replace the single-line footer with a compact composer card pinned below the
 scrolling run content:
@@ -132,6 +138,36 @@ Requirements:
 The composer remains pinned and does not participate in the main run scroll.
 Its total default height should be approximately 96–116 points, large enough to
 be noticed without dominating the result.
+
+#### Chat
+
+Replace the current chat footer with the same composer card treatment:
+
+```text
+┌──────────────────────────────────────────────────────────────┐
+│ MESSAGE NEWS AGENT                                           │
+│ Continue the conversation…                                   │
+│                                          [Dictate]   [Send]  │
+└──────────────────────────────────────────────────────────────┘
+```
+
+- Use the same accent treatment, typography, spacing, 2-to-5-line editor, and
+  prominent action button as steering.
+- Use the embedded heading **Message <agent name>** and placeholder
+  **Continue the conversation…** so the purpose remains obvious even when the
+  transcript is long.
+- Preserve the existing per-tab `RunTab.chatMessage` draft and dictation action.
+- `⌘Return` sends; plain Return inserts a newline.
+- Disable send for trimmed empty text or while the chat request is pending.
+- Clear the visible editor when the message is submitted, but retain a pending
+  copy until the request succeeds. On failure, restore that copy if the user has
+  not entered a replacement draft, and show the redacted error in or immediately
+  above the card.
+- Keep the card pinned below the transcript. It must remain visually distinct
+  from assistant output in light mode, dark mode, active window, and inactive
+  window states.
+- Expose mode-specific accessibility labels: **Message <agent name>** for chat
+  and **Steer active run** for steering.
 
 ### 3.3 Persisted run history
 
@@ -171,9 +207,37 @@ Rules:
 - Memory runtime mode shows **History requires SQLite or Postgres** and does not
   launch the trace process.
 
-Server-side goal/status/type/time filters can be added later through the
-existing `trace/listSessions` filter object. Search and advanced filtering are
-not required for the first implementation.
+#### History search
+
+Place a search field directly above the History rows. It must communicate its
+purpose without depending on a separate “Search” or “History” label:
+
+```text
+┌─ 🔍  Search run history…                                  ⓧ ─┐
+```
+
+- Always show an embedded magnifying-glass icon and the placeholder **Search
+  run history…**. Do not use the generic placeholder **Search**.
+- Use the native search-field clear button. `⌘F` focuses the field when the
+  sidebar is visible; Escape clears a non-empty query, then releases focus.
+- Give the control the accessibility label **Search run history** even though no
+  external visible label is rendered.
+- Match goal/title, root run ID, session ID, status, and type case-insensitively
+  against already loaded history rows.
+- After a 250 ms debounce, query `trace/listSessions` with
+  `{ "goals": ["<query>"], "limit": 100 }`. The server applies goal filtering
+  before its session limit, so goal matches are not restricted to the currently
+  loaded page. Merge those results with local ID/status/type matches and
+  deduplicate by root run ID.
+- A query that exactly matches a known root or session ID must surface that row
+  even when its goal does not match.
+- While a remote search is pending, retain local matches and show a small
+  progress indicator inside the search field trailing edge.
+- Empty query restores the normal paginated History list and scroll position.
+- No matches shows **No historical runs match “<query>”** with a **Clear Search**
+  action. Trace failure retains local matches and presents a non-blocking retry.
+- Search never filters the Active section. Advanced status/type/date filter
+  controls are deferred.
 
 #### Historical selection and detail
 
@@ -338,6 +402,10 @@ Unexpected trace termination changes only history health and may offer Retry.
 ### Trace history
 
 - Represent loading as `idle`, `loading`, `loaded`, or `failed(message)`.
+- Store the history query and pre-search scroll position independently from live
+  run selection and tab drafts.
+- Cancel or supersede a debounced search request when its query changes; ignore
+  a response whose query no longer matches the current field value.
 - Key detail requests by root run ID and ignore a response if selection changed
   before it arrived.
 - Cache successful detail reports for the app session. Manual refresh invalidates
@@ -358,12 +426,15 @@ Unexpected trace termination changes only history health and may offer Retry.
 
 This phase is independent of trace-session and should ship first.
 
-### Phase 2 — Steering composer
+### Phase 2 — Chat and steering composers
 
-1. Replace `steerComposer` with the pinned multiline card.
-2. Change send semantics so text clears on success, not request start.
-3. Add pending and inline failure states plus `⌘Return`.
-4. Verify layout at the minimum supported window size and with long text.
+1. Extract the shared pinned multiline composer presentation.
+2. Replace both `chatComposer` and `steerComposer` with mode-specific instances.
+3. Make steering clear on success; make chat clear visibly on submission while
+   retaining a pending copy that can be restored after failure.
+4. Add pending and inline failure states plus `⌘Return`.
+5. Verify chat, steering, and dictation layouts at the minimum supported window
+   size and with long text.
 
 ### Phase 3 — Trace client substrate
 
@@ -377,10 +448,12 @@ This phase is independent of trace-session and should ship first.
 
 1. Add `TraceHistoryModel` and load/flatten `trace/listSessions`.
 2. Merge/deduplicate live and persisted rows in the two sidebar sections.
-3. Add lazy `trace/get`, read-only tabs, loading, retry, and stale-response
+3. Add the self-identifying history search field, local matching, debounced
+   server goal search, cancellation, and empty/error states.
+4. Add lazy `trace/get`, read-only tabs, loading, retry, and stale-response
    protection.
-4. Reuse compact timeline presentation.
-5. Add **Open in Runtime** for users who need runtime-owned inspection/actions.
+5. Reuse compact timeline presentation.
+6. Add **Open in Runtime** for users who need runtime-owned inspection/actions.
 
 ## 7. Tests and acceptance criteria
 
@@ -394,17 +467,22 @@ This phase is independent of trace-session and should ship first.
 - Tool updates do not move the main pane.
 - New narrative/final output follows only while Follow Live is enabled.
 - Scrolling upward prevents auto-scroll and shows **Jump to Latest**.
-- The result and pinned steering composer remain reachable at a 980×680 window.
+- The result and pinned chat/steering composer remain reachable at a 980×680
+  window.
 
-### Steering
+### Chat and steering
 
-- The editor grows from 2 through 5 lines and then scrolls internally.
+- Both modes use the same prominent card and an editor that grows from 2 through
+  5 lines before scrolling internally.
 - Return inserts a newline; `⌘Return` sends exactly once.
 - Empty/whitespace input cannot send.
 - Pending send disables duplicate submission.
-- Success clears the matching draft; failure retains it and shows a redacted
-  error.
-- Switching tabs preserves independent steer drafts.
+- Successful steering clears its draft; failed steering retains it. Failed chat
+  restores its pending message when no replacement draft was entered. Both show
+  a redacted error.
+- Switching tabs preserves independent chat and steer drafts.
+- Chat retains dictation and exposes **Message <agent name>**; steering exposes
+  **Steer active run**.
 
 ### Trace client
 
@@ -430,6 +508,14 @@ This phase is independent of trace-session and should ship first.
 - A live/persisted duplicate appears once and live active state wins.
 - Newest 100 sessions load initially; their roots are flattened and **Load
   Older** merges without duplicates.
+- The field visibly says **Search run history…** with an embedded search icon and
+  no external visible label.
+- `⌘F`, Escape, clear, no-results, loading, and trace-error states behave as
+  specified.
+- Search matches loaded goal/title, root ID, session ID, status, and type; remote
+  goal matches are returned beyond the loaded page.
+- A stale response from an earlier query never replaces current search results.
+- Clearing search restores the unfiltered list and prior scroll position.
 - Selection changes do not display a stale detail response.
 - Terminal live runs become visible in History after the debounced refresh.
 - Memory mode and trace failure leave execution and current-run UI functional.
@@ -443,5 +529,5 @@ This phase is independent of trace-session and should ship first.
 The work is complete when all acceptance criteria above pass, project generation
 and Swift tests succeed, the trace-session package typecheck/tests succeed for
 the bundled revision, and a manual macOS pass verifies the minimum window size,
-VoiceOver labels, keyboard steering, expansion, scroll-follow behavior, and
-history restoration after relaunch.
+VoiceOver labels, keyboard chat/steering, history search, expansion,
+scroll-follow behavior, and history restoration after relaunch.

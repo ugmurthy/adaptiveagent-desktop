@@ -25,6 +25,18 @@ Scripts/install-local-runtime.sh /absolute/path/to/agent-runtime
 
 Both install to `Resources/AgentRuntime/agent-runtime`, which is copied into the app bundle and intentionally gitignored.
 
+Persisted SQLite/Postgres run history also uses the read-only
+`trace-session-sidecar` helper. Compile it from the AdaptiveAgent monorepo and
+install it separately:
+
+```sh
+bun build packages/trace-session/src/trace-sidecar.ts --compile --target=bun-darwin-arm64 --outfile /tmp/trace-session-sidecar
+Scripts/install-local-trace-session.sh /tmp/trace-session-sidecar
+```
+
+Use `bun-darwin-x64` on Intel Macs. The helper is installed to
+`Resources/TraceSession/trace-session-sidecar` and is intentionally gitignored.
+
 ## Generate, build, and test
 
 ```sh
@@ -36,6 +48,8 @@ xcodebuild -project AdaptiveAgentDesktop.xcodeproj -scheme AdaptiveAgentDesktop 
 Open `AdaptiveAgentDesktop.xcodeproj` in Xcode to run. Signing defaults to local ad-hoc signing; no Developer ID or development team is configured.
 
 During development, you can skip copying the executable into resources by setting `ADAPTIVE_AGENT_RUNTIME_PATH` in the Xcode scheme to an absolute locally compiled `agent-runtime` path.
+Set `ADAPTIVE_AGENT_TRACE_SESSION_PATH` the same way to override the bundled
+trace-session helper.
 
 In **Product > Scheme > Edit Scheme > Run > Arguments > Environment Variables**, set `DATABASE_URL` when using Postgres. Provider API keys required by the selected profile must be set there as environment variables as well. A gateway token can be entered in the app's **Workspace Configuration > Gateway Access Token** secure field, or supplied as `ADAPTIVE_AGENT_ACCESS_TOKEN` in the same environment-variable list. Tokens entered in the app are kept only in memory and sent to the runtime with `auth/updateAccessToken`; they are never written to `UserDefaults` or configuration files. Do not place secrets in the agent/settings JSON.
 
@@ -61,6 +75,9 @@ The standard **About AdaptiveAgent Desktop** panel displays the marketing versio
 ## Architecture and security boundary
 
 - `RuntimeClient` owns `Process`, separate stdin/stdout/stderr pipes, partial/multiple-line stdout buffering, JSON-RPC request correlation, and clean shutdown.
+- `TraceSessionClient` independently supervises the optional read-only
+  `trace-session-sidecar` helper over its protocol `1.0`. Its failure disables
+  persisted history only and never changes agent execution.
 - Startup requires a JSON-RPC `runtime/ready` notification, protocol `1.16` negotiation with `initialize`, and then a separate `runtime/initialize` before agent operations.
 - `AppModel` is main-actor isolated and translates UI actions into typed JSON-RPC methods. It reads only the non-secret runtime, model-selection, and interaction fields needed to seed editable `runtime/initialize` overrides.
 - The Swift renderer does not read agent profiles or other workspace contents and has no cloud behavior. It ignores secret-related settings fields; native file panels otherwise select paths only, and the runtime process performs runtime and filesystem behavior.

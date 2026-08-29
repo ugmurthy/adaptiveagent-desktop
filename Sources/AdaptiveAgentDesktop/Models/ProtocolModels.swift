@@ -97,6 +97,7 @@ struct RuntimeInfo: Codable, Equatable, Sendable {
     struct Connection: Codable, Equatable, Sendable {
         let configured: Bool
         let state: String
+        let path: String?
     }
 
     struct Connections: Codable, Equatable, Sendable {

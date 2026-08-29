@@ -1337,12 +1337,145 @@ exit 7
         await client.shutdown()
     }
 
+    func testTraceSessionClientNegotiatesListsLoadsAndShutsDown() async throws {
+        let executable = try makeTraceScript(#"""
+IFS= read -r line
+printf '%s\n' "$line" | grep -q '"protocolVersion":"1.0"'
+printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.0","backend":{"kind":"sqlite","readOnly":true}}}'
+IFS= read -r line
+id="$(printf '%s\n' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+printf '{"jsonrpc":"2.0","id":"%s","result":[{"sessionId":"session-1","startedAt":"2026-08-28T10:00:00.000Z","status":"succeeded","goals":[{"rootRunId":"run-1","runId":"run-1","status":"succeeded","startedAt":"2026-08-28T10:00:00.000Z","completedAt":"2026-08-28T10:01:00.000Z","goal":"Research AI news","linkedAt":"2026-08-28T10:00:00.000Z","type":"run"}]}]}\n' "$id"
+IFS= read -r line
+id="$(printf '%s\n' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+printf '{"jsonrpc":"2.0","id":"%s","result":{"target":{"kind":"root-run","requestedId":"run-1","resolvedRootRunId":"run-1"},"session":null,"rootRuns":[{"rootRunId":"run-1","runId":"run-1","invocationKind":"run","linkedAt":"2026-08-28T10:00:00.000Z","startedAt":"2026-08-28T10:00:00.000Z","updatedAt":"2026-08-28T10:01:00.000Z","completedAt":"2026-08-28T10:01:00.000Z","status":"succeeded","goal":"Research AI news","modelProvider":"openrouter","modelName":"model"}],"usage":{"total":{"promptTokens":10,"completionTokens":20,"totalTokens":30,"estimatedCostUSD":0.01}},"timeline":[{"rootRunId":"run-1","runId":"run-1","depth":0,"stepId":"step-1","toolCallId":"tool-1","eventType":"tool.completed","toolName":"web_search","startedAt":"2026-08-28T10:00:01.000Z","completedAt":"2026-08-28T10:00:02.000Z","durationMs":1000,"outcome":"completed","childRunId":null,"eventSeq":2}],"runTree":[],"summary":{"status":"succeeded","reason":"Trace status is succeeded."},"warnings":[]}}\n' "$id"
+IFS= read -r line
+id="$(printf '%s\n' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+printf '{"jsonrpc":"2.0","id":"%s","result":{"shutdown":true}}\n' "$id"
+"""#)
+        let client = TraceSessionClient(executableURL: executable, responseTimeout: .seconds(2))
+        let initialized = try await client.start(backend: .sqlite(path: "/tmp/runtime.sqlite"))
+        XCTAssertEqual(initialized.protocolVersion, "1.0")
+        XCTAssertTrue(initialized.backend.readOnly)
+
+        let sessions = try await client.listSessions(.init(limit: 100))
+        XCTAssertEqual(sessions.first?.goals.first?.rootRunId, "run-1")
+        XCTAssertEqual(sessions.first?.goals.first?.goal, "Research AI news")
+
+        let report = try await client.getTrace(rootRunId: "run-1")
+        XCTAssertEqual(report.usage.total.totalTokens, 30)
+        XCTAssertEqual(report.timeline.first?.toolName, "web_search")
+        await client.shutdown()
+    }
+
+    func testTraceSessionClientRejectsWritableOrWrongBackend() async throws {
+        let executable = try makeTraceScript(#"""
+IFS= read -r line
+printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.0","backend":{"kind":"postgres","readOnly":false}}}'
+sleep 1
+"""#)
+        let client = TraceSessionClient(executableURL: executable, responseTimeout: .seconds(1))
+        do {
+            _ = try await client.start(backend: .sqlite(path: "/tmp/runtime.sqlite"))
+            XCTFail("writable trace backend must be rejected")
+        } catch {
+            guard case .protocolViolation = error as? TraceSessionClientError else {
+                return XCTFail("expected protocolViolation, got \(error)")
+            }
+        }
+        await client.shutdown()
+    }
+
+    func testTraceSessionClientDecodesRemoteProtocolCode() async throws {
+        let executable = try makeTraceScript(#"""
+IFS= read -r line
+printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.0","backend":{"kind":"sqlite","readOnly":true}}}'
+IFS= read -r line
+id="$(printf '%s\n' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+printf '{"jsonrpc":"2.0","id":"%s","error":{"code":-32020,"message":"Denied","data":{"protocolCode":"SENSITIVE_DATA_NOT_ALLOWED"}}}\n' "$id"
+sleep 1
+"""#)
+        let client = TraceSessionClient(executableURL: executable, responseTimeout: .seconds(1))
+        _ = try await client.start(backend: .sqlite(path: "/tmp/runtime.sqlite"))
+        do {
+            _ = try await client.listSessions()
+            XCTFail("remote error should be thrown")
+        } catch {
+            XCTAssertEqual(
+                error as? TraceSessionClientError,
+                .remote(code: -32020, protocolCode: "SENSITIVE_DATA_NOT_ALLOWED", message: "Denied")
+            )
+        }
+        await client.shutdown()
+    }
+
+    func testTraceSessionClientRedactsDiagnostics() async throws {
+        let executable = try makeTraceScript(#"""
+IFS= read -r line
+printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.0","backend":{"kind":"sqlite","readOnly":true}}}'
+printf '%s\n' '{"accessToken":"trace-secret"}' >&2
+IFS= read -r line
+id="$(printf '%s\n' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+printf '{"jsonrpc":"2.0","id":"%s","result":{"shutdown":true}}\n' "$id"
+"""#)
+        let diagnostics = StringRecorder()
+        let client = TraceSessionClient(executableURL: executable, responseTimeout: .seconds(1))
+        _ = try await client.start(
+            backend: .sqlite(path: "/tmp/runtime.sqlite"),
+            diagnosticsHandler: { await diagnostics.append($0) }
+        )
+        for _ in 0..<50 where (await diagnostics.values).isEmpty {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        let messages = await diagnostics.values
+        XCTAssertTrue(messages.contains { $0.contains("<redacted>") })
+        XCTAssertFalse(messages.contains { $0.contains("trace-secret") })
+        await client.shutdown()
+    }
+
+    func testUnexpectedTraceSessionTerminationFailsPendingRequest() async throws {
+        let executable = try makeTraceScript(#"""
+IFS= read -r line
+printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.0","backend":{"kind":"sqlite","readOnly":true}}}'
+IFS= read -r line
+exit 9
+"""#)
+        let terminations = TerminationRecorder()
+        let client = TraceSessionClient(executableURL: executable, responseTimeout: .seconds(2))
+        _ = try await client.start(
+            backend: .sqlite(path: "/tmp/runtime.sqlite"),
+            terminationHandler: { await terminations.append($0) }
+        )
+        do {
+            _ = try await client.listSessions()
+            XCTFail("request should fail when trace-session exits")
+        } catch {
+            XCTAssertEqual(error as? TraceSessionClientError, .terminated(9))
+        }
+        for _ in 0..<50 where (await terminations.values).isEmpty {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        let terminationValues = await terminations.values
+        XCTAssertEqual(terminationValues, [9])
+        await client.shutdown()
+    }
+
     private func makeRuntimeScript(_ body: String) throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AdaptiveAgentDesktopTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
         let executable = directory.appendingPathComponent("agent-runtime")
+        try "#!/bin/sh\nset -eu\n\(body)\n".write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        return executable
+    }
+
+    private func makeTraceScript(_ body: String) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AdaptiveAgentDesktopTraceTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let executable = directory.appendingPathComponent("trace-session-sidecar")
         try "#!/bin/sh\nset -eu\n\(body)\n".write(to: executable, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
         return executable
@@ -1403,5 +1536,13 @@ private actor TerminationRecorder {
 
     func append(_ status: Int32) {
         values.append(status)
+    }
+}
+
+private actor StringRecorder {
+    private(set) var values: [String] = []
+
+    func append(_ value: String) {
+        values.append(value)
     }
 }

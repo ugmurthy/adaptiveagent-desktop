@@ -2,6 +2,11 @@ import AppKit
 import MarkdownUI
 import SwiftUI
 
+private enum SidebarItemID: Hashable {
+    case live(UUID)
+    case history(String)
+}
+
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openSettings) private var openSettings
@@ -41,28 +46,40 @@ struct ContentView: View {
                 if !activeRuns.isEmpty {
                     Section("Active") {
                         ForEach(activeRuns) { record in
-                            RunRow(record: record).tag(record.id)
+                            RunRow(record: record).tag(SidebarItemID.live(record.id))
                         }
                     }
                 }
-                if !recentRuns.isEmpty {
-                    Section("Recent") {
-                        ForEach(recentRuns) { record in
-                            RunRow(record: record).tag(record.id)
-                        }
-                    }
-                }
-            }
-            .overlay {
-                if model.runs.isEmpty {
-                    ContentUnavailableView(
-                        "No Runs Yet",
-                        systemImage: "sparkles",
-                        description: Text("Start a run or chat in this workspace.")
-                    )
-                }
-            }
 
+                Section {
+                    HistorySearchField(
+                        text: historySearchBinding,
+                        isSearching: model.isSearchingHistory
+                    )
+                    .listRowSeparator(.hidden)
+
+                    ForEach(recentRuns) { record in
+                        RunRow(record: record).tag(SidebarItemID.live(record.id))
+                    }
+
+                    ForEach(visibleTraceHistory) { item in
+                        HistoryRunRow(item: item)
+                            .tag(SidebarItemID.history(item.rootRunId))
+                    }
+
+                    historyStatusRow
+                } header: {
+                    HStack {
+                        Text("History")
+                        Spacer()
+                        Button(action: model.refreshHistory) {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Refresh run history")
+                    }
+                }
+            }
             Divider()
             HStack {
                 Menu {
@@ -73,7 +90,7 @@ struct ContentView: View {
                 }
                 .menuStyle(.borderlessButton)
                 Spacer()
-                Text("\(model.runs.count)")
+                Text("\(activeRuns.count + recentRuns.count + visibleTraceHistory.count)")
                     .foregroundStyle(.tertiary)
                     .monospacedDigit()
             }
@@ -92,6 +109,11 @@ struct ContentView: View {
                    let recordID = tab.selectedRunID,
                    let record = model.runs.first(where: { $0.id == recordID }) {
                     RunDetailView(record: record, tabID: tab.id)
+                        .environmentObject(model)
+                } else if let tab = model.selectedTab,
+                          let rootRunId = tab.selectedHistoryRunID,
+                          let item = model.historyItem(rootRunId: rootRunId) {
+                    HistoricalRunDetailView(item: item, tabID: tab.id)
                         .environmentObject(model)
                 } else if let tab = model.selectedTab, model.isConnected {
                     NewRequestView(tabID: tab.id)
@@ -165,14 +187,90 @@ struct ContentView: View {
     }
 
     private var activeRuns: [AppModel.RunRecord] { model.runs.filter { $0.status.isActive } }
-    private var recentRuns: [AppModel.RunRecord] { model.runs.filter { !$0.status.isActive } }
+    private var recentRuns: [AppModel.RunRecord] {
+        let query = model.historySearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        return model.runs.filter { record in
+            guard !record.status.isActive else { return false }
+            guard !query.isEmpty else { return true }
+            return [record.title, record.latestRunId ?? "", record.status.rawValue, record.kind.rawValue]
+                .contains { $0.localizedCaseInsensitiveContains(query) }
+        }
+    }
 
-    private var sidebarSelection: Binding<UUID?> {
-        Binding(
-            get: { model.selectedRunItemID },
-            set: { recordID in
-                if let recordID { model.openRunTab(recordID) }
+    private var visibleTraceHistory: [AppModel.HistoryItem] {
+        let liveIDs = Set(model.runs.flatMap(\.runIds))
+        let source = historySearchIsEmpty ? model.historyItems : model.historySearchResults
+        return source.filter { !liveIDs.contains($0.rootRunId) }
+    }
+
+    private var historySearchIsEmpty: Bool {
+        model.historySearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    @ViewBuilder private var historyStatusRow: some View {
+        if !historySearchIsEmpty, let error = model.historySearchError {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("History search couldn’t refresh: \(error)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Button("Retry") { model.updateHistorySearch(model.historySearchQuery) }
+                    .buttonStyle(.borderless)
             }
+        } else if !historySearchIsEmpty, recentRuns.isEmpty, visibleTraceHistory.isEmpty, !model.isSearchingHistory {
+            VStack(spacing: 8) {
+                Text("No historical runs match “\(model.historySearchQuery)”")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Button("Clear Search") { model.updateHistorySearch("") }
+                    .buttonStyle(.borderless)
+            }
+            .frame(maxWidth: .infinity)
+        } else {
+            switch model.historyState {
+            case .loading:
+                HStack { ProgressView().controlSize(.small); Text("Loading history…") }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            case .failed(let message):
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(message).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    Button("Retry", action: model.refreshHistory).buttonStyle(.borderless)
+                }
+            case .unavailable(let message):
+                Text(message).font(.caption).foregroundStyle(.secondary)
+            case .loaded:
+                if historySearchIsEmpty, !model.historyItems.isEmpty {
+                    Button("Load Older", action: model.loadOlderHistory)
+                        .buttonStyle(.borderless)
+                        .frame(maxWidth: .infinity)
+                }
+            }
+        }
+    }
+
+    private var sidebarSelection: Binding<SidebarItemID?> {
+        Binding(
+            get: {
+                if let recordID = model.selectedRunItemID { return .live(recordID) }
+                if let rootRunId = model.selectedHistoryRunID { return .history(rootRunId) }
+                return nil
+            },
+            set: { selection in
+                switch selection {
+                case .live(let recordID): model.openRunTab(recordID)
+                case .history(let rootRunId): model.openHistoryTab(rootRunId)
+                case nil: break
+                }
+            }
+        )
+    }
+
+    private var historySearchBinding: Binding<String> {
+        Binding(
+            get: { model.historySearchQuery },
+            set: { query in model.updateHistorySearch(query) }
         )
     }
 }
@@ -189,6 +287,9 @@ private struct RunTabsBar: View {
                             tab: tab,
                             record: tab.selectedRunID.flatMap { recordID in
                                 model.runs.first { $0.id == recordID }
+                            },
+                            historyItem: tab.selectedHistoryRunID.flatMap { rootRunId in
+                                model.historyItem(rootRunId: rootRunId)
                             },
                             isSelected: model.selectedTabID == tab.id,
                             select: { model.selectTab(tab.id) },
@@ -222,6 +323,7 @@ private struct RunTabsBar: View {
 private struct RunTabCell: View {
     let tab: AppModel.RunTab
     let record: AppModel.RunRecord?
+    let historyItem: AppModel.HistoryItem?
     let isSelected: Bool
     let select: () -> Void
     let close: () -> Void
@@ -230,14 +332,18 @@ private struct RunTabCell: View {
         HStack(spacing: 4) {
             Button(action: select) {
                 HStack(spacing: 7) {
-                    Image(systemName: record?.kind.systemImage ?? tab.draftKind.systemImage)
+                    Image(systemName: record?.kind.systemImage ?? historyItem?.systemImage ?? tab.draftKind.systemImage)
                         .font(.caption)
                         .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
-                    Text(record?.title ?? "New \(tab.draftKind.rawValue)")
+                    Text(record?.title ?? historyItem?.title ?? "New \(tab.draftKind.rawValue)")
                         .font(.caption.weight(isSelected ? .semibold : .regular))
                         .lineLimit(1)
                     if let record {
                         RunTabStatusBadge(record: record)
+                    } else if let historyItem {
+                        Text(historyItem.status.capitalized)
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.secondary)
                     }
                 }
                 .contentShape(Rectangle())
@@ -253,7 +359,7 @@ private struct RunTabCell: View {
             }
             .buttonStyle(.plain)
             .help("Close tab")
-            .accessibilityLabel("Close \(record?.title ?? "New \(tab.draftKind.rawValue)") tab")
+            .accessibilityLabel("Close \(record?.title ?? historyItem?.title ?? "New \(tab.draftKind.rawValue)") tab")
         }
         .padding(.leading, 10)
         .padding(.trailing, 4)
@@ -358,6 +464,96 @@ private struct RunRow: View {
         case .failed: return .red
         case .unknown, .interrupted: return .secondary
         }
+    }
+}
+
+private struct HistorySearchField: View {
+    @Binding var text: String
+    let isSearching: Bool
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("Search run history…", text: $text)
+                .textFieldStyle(.plain)
+                .focused($isFocused)
+                .accessibilityLabel("Search run history")
+            if isSearching {
+                ProgressView().controlSize(.mini)
+            } else if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear history search")
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 28)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+        .overlay {
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(isFocused ? Color.accentColor : Color.primary.opacity(0.14), lineWidth: isFocused ? 2 : 1)
+        }
+        .onExitCommand {
+            if !text.isEmpty { text = "" } else { isFocused = false }
+        }
+        .background {
+            Button("") { isFocused = true }
+                .keyboardShortcut("f", modifiers: .command)
+                .hidden()
+        }
+    }
+}
+
+private struct HistoryRunRow: View {
+    let item: AppModel.HistoryItem
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: item.systemImage)
+                .foregroundStyle(statusColor)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.title).lineLimit(2)
+                HStack(spacing: 5) {
+                    Text(item.status.capitalized)
+                    Text("·")
+                    Text(Self.relativeDate(item.startedAt))
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 3)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(item.title), \(item.status), started \(item.startedAt)")
+    }
+
+    private var statusColor: Color {
+        switch item.status {
+        case "queued", "planning", "running", "awaiting_subagent": .accentColor
+        case "awaiting_approval", "clarification_requested": .orange
+        case "succeeded": .green
+        case "failed": .red
+        default: .secondary
+        }
+    }
+
+    private static func relativeDate(_ value: String) -> String {
+        guard let date = ISO8601DateFormatter().date(from: value) else { return value }
+        return RelativeDateTimeFormatter().localizedString(for: date, relativeTo: .now)
+    }
+}
+
+private extension AppModel.HistoryItem {
+    var systemImage: String {
+        type == "chat" ? "bubble.left.and.bubble.right.fill" : "play.fill"
     }
 }
 
@@ -526,11 +722,169 @@ private struct ConnectionStateView: View {
     }
 }
 
+private struct HistoricalRunDetailView: View {
+    @EnvironmentObject private var model: AppModel
+    let item: AppModel.HistoryItem
+    let tabID: UUID
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Image(systemName: item.systemImage)
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.title).font(.headline).lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text(item.status.capitalized)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(item.rootRunId)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.tertiary)
+                            .textSelection(.enabled)
+                    }
+                }
+                Spacer()
+                Button("Open in Runtime", systemImage: "arrow.up.forward.app") {
+                    model.openHistoryInRuntime(item.rootRunId)
+                }
+                .disabled(!model.isConnected)
+            }
+            .padding(.horizontal, 22)
+            .frame(height: 66)
+
+            Divider()
+
+            if let report = model.historyReports[item.rootRunId] {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        summary(report)
+                        if !toolActivities(report).isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("TIMELINE").sectionLabel()
+                                CompactToolActivityView(
+                                    activities: toolActivities(report),
+                                    isExpanded: activityExpandedBinding
+                                )
+                            }
+                        }
+                        if let runTree = report.runTree, !runTree.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("RUN TREE").sectionLabel()
+                                ForEach(runTree) { run in
+                                    HStack {
+                                        Text(String(repeating: "  ", count: run.depth) + (run.delegateName ?? "Root run"))
+                                        Spacer()
+                                        Text(run.status ?? "unknown").foregroundStyle(.secondary)
+                                    }
+                                    .font(.callout)
+                                }
+                            }
+                        }
+                        if !report.warnings.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("DATA WARNINGS").sectionLabel()
+                                ForEach(report.warnings, id: \.self) { warning in
+                                    Label(warning, systemImage: "exclamationmark.triangle")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: 820, alignment: .leading)
+                    .padding(34)
+                    .frame(maxWidth: .infinity, alignment: .top)
+                }
+            } else if let error = model.historyReportErrors[item.rootRunId] {
+                ContentUnavailableView {
+                    Label("Unable to Load History", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(error)
+                } actions: {
+                    Button("Retry") { model.retryHistoryReport(item.rootRunId) }
+                }
+            } else {
+                VStack(spacing: 10) {
+                    ProgressView()
+                    Text("Loading historical trace…").foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+    }
+
+    private func summary(_ report: TraceReport) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("SUMMARY").sectionLabel()
+            Text(report.summary.status.capitalized).font(.title3.weight(.semibold))
+            Text(report.summary.reason).foregroundStyle(.secondary)
+            Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 6) {
+                GridRow {
+                    Text("Started").foregroundStyle(.secondary)
+                    Text(item.startedAt).textSelection(.enabled)
+                }
+                GridRow {
+                    Text("Tokens").foregroundStyle(.secondary)
+                    Text("\(report.usage.total.totalTokens)").monospacedDigit()
+                }
+                GridRow {
+                    Text("Estimated cost").foregroundStyle(.secondary)
+                    Text(report.usage.total.estimatedCostUSD, format: .currency(code: "USD"))
+                }
+                if let performance = report.performance {
+                    GridRow {
+                        Text("Model / tools").foregroundStyle(.secondary)
+                        Text("\(Self.duration(performance.model.durationMs.total)) / \(Self.duration(performance.tools.durationMs.total))")
+                    }
+                }
+            }
+            .font(.callout)
+        }
+    }
+
+    private func toolActivities(_ report: TraceReport) -> [AppModel.RunActivity] {
+        report.timeline.compactMap { entry in
+            guard let toolName = entry.toolName else { return nil }
+            let state: AppModel.RunActivity.ToolState
+            if entry.outcome.hasPrefix("failed") {
+                state = .failed
+            } else if entry.outcome.hasPrefix("running") {
+                state = .running
+            } else {
+                state = .succeeded
+            }
+            return AppModel.RunActivity(
+                id: "history:\(entry.id)",
+                kind: .tool,
+                sourceRunId: entry.runId,
+                toolName: toolName,
+                detail: entry.durationMs.map(Self.duration),
+                toolState: state
+            )
+        }
+    }
+
+    private var activityExpandedBinding: Binding<Bool> {
+        Binding(
+            get: { model.tab(withID: tabID)?.activityExpanded ?? false },
+            set: { model.setActivityExpanded($0, forTab: tabID) }
+        )
+    }
+
+    private static func duration(_ milliseconds: Double) -> String {
+        if milliseconds < 1_000 { return "\(Int(milliseconds)) ms" }
+        return String(format: "%.1f s", milliseconds / 1_000)
+    }
+}
+
 private struct RunDetailView: View {
     @EnvironmentObject private var model: AppModel
     let record: AppModel.RunRecord
     let tabID: UUID
     @StateObject private var dictation = DictationController()
+    @State private var hasNewerContent = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -544,10 +898,18 @@ private struct RunDetailView: View {
                                 .id("run-inspection")
                         } else if record.kind == .chat {
                             chatTranscript
-                            RunActivityFeed(record: record, agentName: model.agentName)
+                            RunActivityFeed(
+                                record: record,
+                                agentName: model.agentName,
+                                isExpanded: activityExpandedBinding
+                            )
                                 .id("run-activity")
                         } else {
-                            RunActivityFeed(record: record, agentName: model.agentName)
+                            RunActivityFeed(
+                                record: record,
+                                agentName: model.agentName,
+                                isExpanded: activityExpandedBinding
+                            )
                                 .id("run-activity")
                             runOutput
                                 .id("run-output")
@@ -574,6 +936,10 @@ private struct RunDetailView: View {
                                 .environmentObject(model)
                                 .id("files")
                         }
+
+                        Color.clear
+                            .frame(height: 1)
+                            .id("run-bottom")
                     }
                     .scrollTargetLayout()
                     .frame(maxWidth: 820, alignment: .leading)
@@ -582,10 +948,63 @@ private struct RunDetailView: View {
                     .frame(maxWidth: .infinity, alignment: .top)
                 }
                 .scrollPosition(id: scrollPositionBinding, anchor: .center)
-                .onChange(of: record.activities) { _, activities in
-                    guard detailMode == .results, let latestActivity = activities.last else { return }
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        proxy.scrollTo(latestActivity.id, anchor: .bottom)
+                .simultaneousGesture(DragGesture().onChanged { _ in
+                    model.setFollowLive(false, forTab: tabID)
+                })
+                .onChange(of: record.activities) { oldActivities, activities in
+                    let oldNarrativeCount = oldActivities.filter { $0.kind == .assistant }.count
+                    let newNarrativeCount = activities.filter { $0.kind == .assistant }.count
+                    guard detailMode == .results, newNarrativeCount > oldNarrativeCount else { return }
+                    if followLive {
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            proxy.scrollTo("run-bottom", anchor: .bottom)
+                        }
+                    } else {
+                        hasNewerContent = true
+                    }
+                }
+                .onChange(of: record.output) { oldValue, newValue in
+                    guard oldValue != newValue, newValue != nil else { return }
+                    if followLive {
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            proxy.scrollTo("run-bottom", anchor: .bottom)
+                        }
+                    } else {
+                        hasNewerContent = true
+                    }
+                }
+                .onChange(of: record.interaction) { oldValue, newValue in
+                    guard oldValue != newValue, newValue != nil else { return }
+                    if followLive {
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            proxy.scrollTo("run-bottom", anchor: .bottom)
+                        }
+                    } else {
+                        hasNewerContent = true
+                    }
+                }
+                .onChange(of: record.errorMessage) { oldValue, newValue in
+                    guard oldValue != newValue, newValue != nil else { return }
+                    if followLive {
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            proxy.scrollTo("run-bottom", anchor: .bottom)
+                        }
+                    } else {
+                        hasNewerContent = true
+                    }
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if !followLive && hasNewerContent {
+                        Button("Jump to Latest", systemImage: "arrow.down") {
+                            model.setFollowLive(true, forTab: tabID)
+                            hasNewerContent = false
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                proxy.scrollTo("run-bottom", anchor: .bottom)
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .padding(14)
                     }
                 }
             }
@@ -639,7 +1058,11 @@ private struct RunDetailView: View {
         if let inspection = record.inspection {
             VStack(alignment: .leading, spacing: 12) {
                 Text("INSPECTION").sectionLabel()
-                RunActivityFeed(record: record, agentName: model.agentName)
+                RunActivityFeed(
+                    record: record,
+                    agentName: model.agentName,
+                    isExpanded: activityExpandedBinding
+                )
                 InspectionOutputView(inspection: inspection, hasRelevantActivity: !record.activities.isEmpty)
             }
         } else if record.auxiliaryOperations.contains(.inspect) {
@@ -698,33 +1121,32 @@ private struct RunDetailView: View {
     }
 
     private var chatComposer: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            TextField("Message \(model.agentName.isEmpty ? "agent" : model.agentName)…", text: chatMessageBinding, axis: .vertical)
-                .textFieldStyle(.roundedBorder)
-                .lineLimit(1...5)
-                .onSubmit(sendChatMessage)
-            DictationButton(text: chatMessageBinding, controller: dictation)
-            Button("Send", action: sendChatMessage)
-                .disabled(record.isRequestInFlight || chatMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .help("Send message")
-        }
-        .padding(14)
-        .background(.bar)
+        ProminentRunComposer(
+            title: "Message \(model.agentName.isEmpty ? "agent" : model.agentName)",
+            placeholder: "Continue the conversation…",
+            helper: "Send another message in this conversation.",
+            actionTitle: "Send",
+            systemImage: "bubble.left.fill",
+            text: chatMessageBinding,
+            isPending: record.isRequestInFlight,
+            errorMessage: record.errorMessage,
+            accessory: AnyView(DictationButton(text: chatMessageBinding, controller: dictation)),
+            action: sendChatMessage
+        )
     }
 
     private var steerComposer: some View {
-        HStack(spacing: 10) {
-            TextField("Steer this run…", text: steerMessageBinding)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit { model.steerRun(in: tabID) }
-            Button("Steer") { model.steerRun(in: tabID) }
-                .disabled(
-                    steerMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || record.auxiliaryOperations.contains(.steer)
-                )
-        }
-        .padding(14)
-        .background(.bar)
+        ProminentRunComposer(
+            title: "Steer active run",
+            placeholder: "Add a correction or new priority…",
+            helper: "The agent will apply this at the next safe point.",
+            actionTitle: "Steer",
+            systemImage: "arrow.triangle.turn.up.right.diamond.fill",
+            text: steerMessageBinding,
+            isPending: record.auxiliaryOperations.contains(.steer),
+            errorMessage: record.auxiliaryErrorMessage,
+            action: { model.steerRun(in: tabID) }
+        )
     }
 
     private var chatMessage: String {
@@ -737,6 +1159,10 @@ private struct RunDetailView: View {
 
     private var detailMode: AppModel.RunDetailMode {
         model.tab(withID: tabID)?.detailMode ?? .results
+    }
+
+    private var followLive: Bool {
+        model.tab(withID: tabID)?.followLive ?? true
     }
 
     private var chatMessageBinding: Binding<String> {
@@ -760,9 +1186,86 @@ private struct RunDetailView: View {
         )
     }
 
+    private var activityExpandedBinding: Binding<Bool> {
+        Binding(
+            get: { model.tab(withID: tabID)?.activityExpanded ?? false },
+            set: { model.setActivityExpanded($0, forTab: tabID) }
+        )
+    }
+
     private func sendChatMessage() {
         dictation.cancel()
         model.sendChatMessage(in: tabID)
+    }
+}
+
+private struct ProminentRunComposer: View {
+    let title: String
+    let placeholder: String
+    let helper: String
+    let actionTitle: String
+    let systemImage: String
+    @Binding var text: String
+    let isPending: Bool
+    let errorMessage: String?
+    var accessory: AnyView? = nil
+    let action: () -> Void
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                Image(systemName: systemImage)
+                    .foregroundStyle(.tint)
+                Text(title.uppercased())
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+            }
+
+            TextField(placeholder, text: $text, axis: .vertical)
+                .textFieldStyle(.plain)
+                .lineLimit(2...5)
+                .focused($isFocused)
+                .accessibilityLabel(title)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(isFocused ? Color.accentColor : Color.primary.opacity(0.16), lineWidth: isFocused ? 2 : 1)
+                }
+
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(helper)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let errorMessage, !errorMessage.isEmpty {
+                        Text(errorMessage)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .lineLimit(2)
+                    }
+                }
+                Spacer()
+                accessory
+                Button(action: action) {
+                    if isPending {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text(actionTitle)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(isPending || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .help("\(actionTitle) (⌘Return)")
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(.bar)
+        .overlay(alignment: .top) { Divider() }
     }
 }
 
@@ -889,6 +1392,7 @@ private struct RunActionsMenu: View {
 private struct RunActivityFeed: View {
     let record: AppModel.RunRecord
     let agentName: String
+    @Binding var isExpanded: Bool
 
     private var isThinking: Bool {
         record.interaction == nil
@@ -899,14 +1403,25 @@ private struct RunActivityFeed: View {
         !record.status.isActive && record.activityStartedAt != nil && record.activityFinishedAt != nil
     }
 
+    private var assistantActivities: [AppModel.RunActivity] {
+        record.activities.filter { $0.kind == .assistant }
+    }
+
+    private var toolActivities: [AppModel.RunActivity] {
+        record.activities.filter { $0.kind == .tool }
+    }
+
     var body: some View {
         if !record.activities.isEmpty || isThinking || showsDuration {
             VStack(alignment: .leading, spacing: 8) {
                 Text("ACTIVITY").sectionLabel()
                 LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(record.activities) { activity in
+                    ForEach(assistantActivities) { activity in
                         RunActivityRow(activity: activity, agentName: agentName)
                             .id(activity.id)
+                    }
+                    if !toolActivities.isEmpty {
+                        CompactToolActivityView(activities: toolActivities, isExpanded: $isExpanded)
                     }
                     if isThinking {
                         ThinkingActivityRow(startedAt: record.activityStartedAt)
@@ -921,6 +1436,93 @@ private struct RunActivityFeed: View {
                     }
                 }
             }
+        }
+    }
+}
+
+private struct CompactToolActivityView: View {
+    let activities: [AppModel.RunActivity]
+    @Binding var isExpanded: Bool
+
+    private var latest: AppModel.RunActivity { activities[activities.count - 1] }
+    private var completedCount: Int {
+        activities.filter { activity in
+            switch activity.toolState {
+            case .succeeded, .failed, .skipped: true
+            case .awaitingApproval, .running, nil: false
+            }
+        }.count
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) { isExpanded.toggle() }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text("Activity")
+                        .font(.callout.weight(.semibold))
+                    Text("\(completedCount) of \(activities.count) complete")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Divider().frame(height: 16)
+                    Text(latest.toolName ?? "tool")
+                        .font(.caption.monospaced().weight(.medium))
+                        .lineLimit(1)
+                    if let detail = latest.detail {
+                        Text("· \(detail)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Spacer(minLength: 8)
+                    if latest.toolState == .running { ProgressView().controlSize(.mini) }
+                    Text(stateLabel(latest.toolState))
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(stateColor(latest.toolState))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity, minHeight: 36)
+            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+            .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+            .keyboardShortcut("a", modifiers: [.option, .command])
+
+            if isExpanded {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(activities) { ToolActivityRow(activity: $0) }
+                    }
+                }
+                .frame(minHeight: 120, maxHeight: 260)
+            }
+        }
+    }
+
+    private func stateLabel(_ state: AppModel.RunActivity.ToolState?) -> String {
+        switch state {
+        case .awaitingApproval: "Approval"
+        case .running: "Running"
+        case .succeeded: "Done"
+        case .failed: "Failed"
+        case .skipped: "Skipped"
+        case nil: ""
+        }
+    }
+
+    private func stateColor(_ state: AppModel.RunActivity.ToolState?) -> Color {
+        switch state {
+        case .awaitingApproval: .orange
+        case .running: .accentColor
+        case .succeeded: .green
+        case .failed: .red
+        case .skipped, nil: .secondary
         }
     }
 }

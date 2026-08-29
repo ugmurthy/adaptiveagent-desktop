@@ -25,6 +25,9 @@ targets:
       - path: Resources/AgentRuntime
         type: folder
         buildPhase: resources
+      - path: Resources/TraceSession
+        type: folder
+        buildPhase: resources
     settings:
       base:
         PRODUCT_NAME: AdaptiveAgentDesktop

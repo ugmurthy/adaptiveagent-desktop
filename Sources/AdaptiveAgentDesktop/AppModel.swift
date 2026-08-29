@@ -27,31 +27,43 @@ final class AppModel: ObservableObject {
     struct RunTab: Identifiable, Equatable {
         let id: UUID
         var selectedRunID: UUID?
+        var selectedHistoryRunID: String?
         var draftKind: RunKind
         var draftText: String
         var chatMessage: String
+        var pendingChatMessage: String?
         var steerMessage: String
         var scrollPosition: String?
         var detailMode: RunDetailMode
+        var activityExpanded: Bool
+        var followLive: Bool
 
         init(
             id: UUID = UUID(),
             selectedRunID: UUID? = nil,
+            selectedHistoryRunID: String? = nil,
             draftKind: RunKind = .run,
             draftText: String = "",
             chatMessage: String = "",
+            pendingChatMessage: String? = nil,
             steerMessage: String = "",
             scrollPosition: String? = nil,
-            detailMode: RunDetailMode = .results
+            detailMode: RunDetailMode = .results,
+            activityExpanded: Bool = false,
+            followLive: Bool = true
         ) {
             self.id = id
             self.selectedRunID = selectedRunID
+            self.selectedHistoryRunID = selectedHistoryRunID
             self.draftKind = draftKind
             self.draftText = draftText
             self.chatMessage = chatMessage
+            self.pendingChatMessage = pendingChatMessage
             self.steerMessage = steerMessage
             self.scrollPosition = scrollPosition
             self.detailMode = detailMode
+            self.activityExpanded = activityExpanded
+            self.followLive = followLive
         }
     }
 
@@ -156,6 +168,25 @@ final class AppModel: ObservableObject {
         var hasRequestInFlight: Bool { isRequestInFlight || !auxiliaryOperations.isEmpty }
     }
 
+    struct HistoryItem: Identifiable, Equatable {
+        let rootRunId: String
+        let sessionId: String?
+        let title: String
+        let status: String
+        let startedAt: String
+        let completedAt: String?
+        let type: String
+
+        var id: String { rootRunId }
+    }
+
+    enum HistoryLoadState: Equatable {
+        case unavailable(String)
+        case loading
+        case loaded
+        case failed(String)
+    }
+
     private struct InspectionCacheMetadata {
         let runId: String
         let eventGeneration: UInt64
@@ -202,8 +233,18 @@ final class AppModel: ObservableObject {
     @Published var runs: [RunRecord] = []
     @Published private(set) var tabs: [RunTab] = []
     @Published private(set) var selectedTabID: UUID?
+    @Published private(set) var historyItems: [HistoryItem] = []
+    @Published private(set) var historyReports: [String: TraceReport] = [:]
+    @Published private(set) var historyReportErrors: [String: String] = [:]
+    @Published private(set) var loadingHistoryRunID: String?
+    @Published private(set) var historyState: HistoryLoadState = .unavailable("Connect to load history")
+    @Published private(set) var historySearchResults: [HistoryItem] = []
+    @Published private(set) var isSearchingHistory = false
+    @Published private(set) var historySearchError: String?
+    @Published var historySearchQuery = ""
 
     private var client: RuntimeClient
+    private var traceClient: TraceSessionClient
     private var didBootstrap = false
     private var isQuitting = false
     private var pendingRootAssignments: [UUID] = []
@@ -213,10 +254,14 @@ final class AppModel: ObservableObject {
     private var loadedSettingsConfigPath: String?
     private var eventGenerationByRunID: [String: UInt64] = [:]
     private var inspectionCacheMetadata: [UUID: InspectionCacheMetadata] = [:]
+    private var historySearchTask: Task<Void, Never>?
+    private var historyRefreshTask: Task<Void, Never>?
+    private var traceConnected = false
     private let inspectionClock = ContinuousClock()
 
     init(
         client: RuntimeClient = RuntimeClient(),
+        traceClient: TraceSessionClient = TraceSessionClient(),
         workingDirectoryURL: URL? = nil
     ) {
         let launchDirectory = (workingDirectoryURL
@@ -224,6 +269,7 @@ final class AppModel: ObservableObject {
             .standardizedFileURL
         let initialTab = RunTab()
         self.client = client
+        self.traceClient = traceClient
         tabs = [initialTab]
         selectedTabID = initialTab.id
         workspacePath = launchDirectory.path
@@ -240,6 +286,8 @@ final class AppModel: ObservableObject {
     }
 
     var selectedRunItemID: UUID? { selectedTab?.selectedRunID }
+
+    var selectedHistoryRunID: String? { selectedTab?.selectedHistoryRunID }
 
     var selectedRun: RunRecord? {
         guard let selectedRunItemID else { return nil }
@@ -281,6 +329,7 @@ final class AppModel: ObservableObject {
         Task {
             if isConnected {
                 status = "Restarting runtime…"
+                await stopTraceHistory()
                 await client.shutdown()
                 client = RuntimeClient()
             }
@@ -441,14 +490,47 @@ final class AppModel: ObservableObject {
 
         if let index = selectedTabIndex, isReusableDraft(tabs[index]) {
             tabs[index].selectedRunID = recordID
+            tabs[index].selectedHistoryRunID = nil
             tabs[index].draftKind = record.kind
             tabs[index].scrollPosition = nil
+            tabs[index].activityExpanded = false
+            tabs[index].followLive = record.status.isActive
             return
         }
 
         let tab = RunTab(selectedRunID: recordID, draftKind: record.kind)
         tabs.append(tab)
         selectedTabID = tab.id
+    }
+
+    func openHistoryTab(_ rootRunId: String) {
+        guard let selectedItem = historyItem(rootRunId: rootRunId) else { return }
+        if !historyItems.contains(where: { $0.rootRunId == rootRunId }) {
+            historyItems = mergeHistory(historyItems, [selectedItem])
+        }
+        if let existing = tabs.first(where: { $0.selectedHistoryRunID == rootRunId }) {
+            selectedTabID = existing.id
+        } else if let index = selectedTabIndex, isReusableDraft(tabs[index]) {
+            tabs[index].selectedRunID = nil
+            tabs[index].selectedHistoryRunID = rootRunId
+            tabs[index].scrollPosition = nil
+            tabs[index].activityExpanded = false
+            tabs[index].followLive = false
+        } else {
+            let tab = RunTab(selectedHistoryRunID: rootRunId, followLive: false)
+            tabs.append(tab)
+            selectedTabID = tab.id
+        }
+        loadHistoryReport(rootRunId)
+    }
+
+    func historyItem(rootRunId: String) -> HistoryItem? {
+        historyItems.first { $0.rootRunId == rootRunId }
+            ?? historySearchResults.first { $0.rootRunId == rootRunId }
+    }
+
+    func openHistoryInRuntime(_ rootRunId: String) {
+        runCommand("run/inspect", runId: rootRunId)
     }
 
     func newRun() {
@@ -479,6 +561,14 @@ final class AppModel: ObservableObject {
         updateTab(tabID) { $0.scrollPosition = position }
     }
 
+    func setActivityExpanded(_ expanded: Bool, forTab tabID: UUID) {
+        updateTab(tabID) { $0.activityExpanded = expanded }
+    }
+
+    func setFollowLive(_ follow: Bool, forTab tabID: UUID) {
+        updateTab(tabID) { $0.followLive = follow }
+    }
+
     func setDetailMode(_ mode: RunDetailMode, forTab tabID: UUID) {
         updateTab(tabID) {
             $0.detailMode = mode
@@ -499,6 +589,7 @@ final class AppModel: ObservableObject {
 
     private func isReusableDraft(_ tab: RunTab) -> Bool {
         tab.selectedRunID == nil
+            && tab.selectedHistoryRunID == nil
             && tab.draftText.isEmpty
             && tab.chatMessage.isEmpty
             && tab.steerMessage.isEmpty
@@ -568,6 +659,7 @@ final class AppModel: ObservableObject {
         ]
         if let sessionId = runs[index].sessionId { fields["sessionId"] = .string(sessionId) }
         bind(rootRunId: runId, to: recordID)
+        tabs[tabIndex].pendingChatMessage = text
         tabs[tabIndex].chatMessage = ""
         beginAgentRequest(method: "agent/chat", fields: fields, recordID: recordID)
     }
@@ -634,14 +726,13 @@ final class AppModel: ObservableObject {
     }
 
     func steerRun(in tabID: UUID) {
-        guard let tabIndex = tabs.firstIndex(where: { $0.id == tabID }),
-              let recordID = tabs[tabIndex].selectedRunID else { return }
-        let message = tabs[tabIndex].steerMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let tab = tabs.first(where: { $0.id == tabID }),
+              let recordID = tab.selectedRunID else { return }
+        let message = tab.steerMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let index = runs.firstIndex(where: { $0.id == recordID }),
               let runId = runs[index].latestRunId,
               !runs[index].auxiliaryOperations.contains(.steer),
               !message.isEmpty else { return }
-        tabs[tabIndex].steerMessage = ""
         runs[index].auxiliaryOperations.insert(.steer)
         runs[index].auxiliaryErrorMessage = nil
         Task {
@@ -812,9 +903,65 @@ final class AppModel: ObservableObject {
 
     func shutdown() async {
         status = "Shutting down…"
+        await stopTraceHistory()
         await client.shutdown()
         isConnected = false
         runtimeInfoSnapshot = nil
+    }
+
+    func refreshHistory() {
+        guard isConnected else { return }
+        Task {
+            if traceConnected {
+                await loadHistory(replacing: true)
+            } else if let runtimeInfoSnapshot {
+                traceClient = TraceSessionClient()
+                await startTraceHistory(using: runtimeInfoSnapshot)
+            }
+        }
+    }
+
+    func loadOlderHistory() {
+        guard case .loaded = historyState, let oldest = historyItems.last?.startedAt else { return }
+        Task { await loadHistory(replacing: false, until: oldest) }
+    }
+
+    func updateHistorySearch(_ query: String) {
+        historySearchQuery = query
+        historySearchTask?.cancel()
+        historySearchError = nil
+        historySearchResults = localHistoryMatches(query)
+        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            isSearchingHistory = false
+            return
+        }
+        guard traceConnected else {
+            isSearchingHistory = false
+            return
+        }
+        isSearchingHistory = true
+        historySearchTask = Task {
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            do {
+                let sessions = try await traceClient.listSessions(.init(goals: [normalized], limit: 100))
+                guard !Task.isCancelled,
+                      historySearchQuery.trimmingCharacters(in: .whitespacesAndNewlines) == normalized else { return }
+                historySearchResults = mergeHistory(localHistoryMatches(normalized), flattenHistory(sessions))
+                isSearchingHistory = false
+            } catch {
+                guard !Task.isCancelled else { return }
+                guard historySearchQuery.trimmingCharacters(in: .whitespacesAndNewlines) == normalized else { return }
+                historySearchError = redactedErrorDescription(error)
+                isSearchingHistory = false
+            }
+        }
+    }
+
+    func retryHistoryReport(_ rootRunId: String) {
+        historyReports.removeValue(forKey: rootRunId)
+        loadHistoryReport(rootRunId)
     }
 
     func updateAccessToken() {
@@ -868,6 +1015,7 @@ final class AppModel: ObservableObject {
         guard let object = result.objectValue,
               let index = runs.firstIndex(where: { $0.id == recordID }) else { return }
         runs[index].isRequestInFlight = false
+        clearPendingChatMessage(for: recordID)
 
         let runId = object["runId"]?.stringValue
         if let runId {
@@ -1000,6 +1148,9 @@ final class AppModel: ObservableObject {
     // Internal for focused protocol result tests.
     func acceptSteeringResult(_ result: JSONValue, for recordID: UUID) {
         appendEvent("run/steer response\n\(result.prettyPrinted)")
+        for index in tabs.indices where tabs[index].selectedRunID == recordID {
+            tabs[index].steerMessage = ""
+        }
         finishAuxiliaryOperation(.steer, for: recordID)
     }
 
@@ -1068,6 +1219,7 @@ final class AppModel: ObservableObject {
             runs[index].isRequestInFlight = false
             runs[index].interaction = nil
             if let output = payload["output"] { applyOutput(output, to: index) }
+            scheduleHistoryRefresh()
         case "run.failed", "replan.required":
             guard isRootEvent, let index = recordIndex(forRunId: runId) else { return }
             runs[index].status = payload["code"]?.stringValue == "INTERRUPTED" ? .interrupted : .failed
@@ -1075,6 +1227,7 @@ final class AppModel: ObservableObject {
             runs[index].isRequestInFlight = false
             runs[index].interaction = nil
             runs[index].errorMessage = payload["error"]?.stringValue ?? "The run failed."
+            scheduleHistoryRefresh()
         case "run.status_changed":
             guard isRootEvent else { return }
             handleStatusChange(payload["toStatus"]?.stringValue, runId: runId)
@@ -1189,11 +1342,153 @@ final class AppModel: ObservableObject {
 
     private func loadRuntimeInfo() async {
         do {
-            runtimeInfoSnapshot = try await client.runtimeInfo()
+            let info = try await client.runtimeInfo()
+            runtimeInfoSnapshot = info
             runtimeInfoError = nil
+            if !traceConnected { await startTraceHistory(using: info) }
         } catch {
             runtimeInfoError = redactedErrorDescription(error)
         }
+    }
+
+    private func startTraceHistory(using info: RuntimeInfo) async {
+        let backend: TraceSessionBackend
+        switch info.runtimeMode {
+        case "sqlite":
+            guard let path = info.connections?.sqlite?.path, !path.isEmpty else {
+                historyState = .unavailable("History unavailable: runtime did not report its SQLite path")
+                return
+            }
+            backend = .sqlite(path: path)
+        case "postgres":
+            backend = .postgres(environmentVariable: "DATABASE_URL")
+        default:
+            historyState = .unavailable("History requires SQLite or Postgres")
+            historyItems = []
+            historySearchResults = []
+            return
+        }
+
+        do {
+            _ = try await traceClient.start(
+                backend: backend,
+                workingDirectoryURL: workspaceRootURL,
+                diagnosticsHandler: { [weak self] message in
+                    await self?.recordTraceDiagnostic(message)
+                },
+                terminationHandler: { [weak self] status in
+                    await self?.traceTerminated(status: status)
+                }
+            )
+            traceConnected = true
+            await loadHistory(replacing: true)
+        } catch {
+            historyState = .failed(redactedErrorDescription(error))
+        }
+    }
+
+    private func stopTraceHistory() async {
+        historySearchTask?.cancel()
+        historySearchTask = nil
+        historyRefreshTask?.cancel()
+        historyRefreshTask = nil
+        await traceClient.shutdown()
+        traceClient = TraceSessionClient()
+        traceConnected = false
+        loadingHistoryRunID = nil
+        isSearchingHistory = false
+        historySearchError = nil
+    }
+
+    private func loadHistory(replacing: Bool, until: String? = nil) async {
+        historyState = .loading
+        do {
+            let sessions = try await traceClient.listSessions(.init(limit: 100, until: until))
+            let loaded = flattenHistory(sessions)
+            if replacing {
+                let openHistoryIDs = Set(tabs.compactMap(\.selectedHistoryRunID))
+                let openItems = historyItems.filter { openHistoryIDs.contains($0.rootRunId) }
+                historyItems = mergeHistory(openItems, loaded)
+            } else {
+                historyItems = mergeHistory(historyItems, loaded)
+            }
+            historyState = .loaded
+            updateHistorySearch(historySearchQuery)
+        } catch {
+            historyState = .failed(redactedErrorDescription(error))
+        }
+    }
+
+    private func loadHistoryReport(_ rootRunId: String) {
+        guard historyReports[rootRunId] == nil, loadingHistoryRunID != rootRunId else { return }
+        loadingHistoryRunID = rootRunId
+        historyReportErrors.removeValue(forKey: rootRunId)
+        Task {
+            do {
+                let report = try await traceClient.getTrace(rootRunId: rootRunId)
+                historyReports[rootRunId] = report
+            } catch {
+                historyReportErrors[rootRunId] = redactedErrorDescription(error)
+            }
+            if loadingHistoryRunID == rootRunId { loadingHistoryRunID = nil }
+        }
+    }
+
+    private func flattenHistory(_ sessions: [TraceSessionListItem]) -> [HistoryItem] {
+        sessions.flatMap { session in
+            session.goals.map { goal in
+                let goalTitle = goal.goal?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let displayTitle = goalTitle.flatMap { $0.isEmpty ? nil : $0 }
+                return HistoryItem(
+                    rootRunId: goal.rootRunId,
+                    sessionId: session.sessionId,
+                    title: displayTitle ?? "Run \(String(goal.rootRunId.prefix(12)))",
+                    status: goal.status ?? session.status ?? "unknown",
+                    startedAt: goal.startedAt ?? goal.linkedAt,
+                    completedAt: goal.completedAt,
+                    type: goal.type ?? "run"
+                )
+            }
+        }
+        .sorted { $0.startedAt > $1.startedAt }
+    }
+
+    private func mergeHistory(_ first: [HistoryItem], _ second: [HistoryItem]) -> [HistoryItem] {
+        var byID = Dictionary(uniqueKeysWithValues: first.map { ($0.rootRunId, $0) })
+        for item in second { byID[item.rootRunId] = item }
+        return byID.values.sorted { $0.startedAt > $1.startedAt }
+    }
+
+    private func localHistoryMatches(_ query: String) -> [HistoryItem] {
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return historyItems }
+        return historyItems.filter { item in
+            [item.title, item.rootRunId, item.sessionId ?? "", item.status, item.type]
+                .contains { $0.localizedCaseInsensitiveContains(query) }
+        }
+    }
+
+    private func scheduleHistoryRefresh() {
+        guard case .loaded = historyState else { return }
+        historyRefreshTask?.cancel()
+        historyRefreshTask = Task {
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else { return }
+            await loadHistory(replacing: true)
+        }
+    }
+
+    private func recordTraceDiagnostic(_ message: String) {
+        appendEvent("Trace diagnostic: \(message)")
+    }
+
+    private func traceTerminated(status: Int32) {
+        historyState = .failed("History helper exited with status \(status)")
+        loadingHistoryRunID = nil
+        isSearchingHistory = false
+        historySearchError = nil
+        traceClient = TraceSessionClient()
+        traceConnected = false
     }
 
     private func redactedErrorDescription(_ error: Error) -> String {
@@ -1539,11 +1834,36 @@ final class AppModel: ObservableObject {
     private func recordRequestFailed(_ error: Error, for recordID: UUID) {
         removePendingAssignment(recordID)
         guard let index = runs.firstIndex(where: { $0.id == recordID }) else { return }
+        restorePendingChatMessage(for: recordID, at: index)
         runs[index].isRequestInFlight = false
         runs[index].status = .failed
         finishActivityTimer(at: index)
         runs[index].errorMessage = error.localizedDescription
         appendEvent("Error: \(error.localizedDescription)")
+    }
+
+    private func clearPendingChatMessage(for recordID: UUID) {
+        for index in tabs.indices where tabs[index].selectedRunID == recordID {
+            tabs[index].pendingChatMessage = nil
+        }
+    }
+
+    private func restorePendingChatMessage(for recordID: UUID, at runIndex: Int) {
+        guard runs[runIndex].kind == .chat else { return }
+        var restoredMessage: String?
+        for index in tabs.indices where tabs[index].selectedRunID == recordID {
+            guard let pending = tabs[index].pendingChatMessage else { continue }
+            restoredMessage = pending
+            if tabs[index].chatMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                tabs[index].chatMessage = pending
+            }
+            tabs[index].pendingChatMessage = nil
+        }
+        if let restoredMessage,
+           runs[runIndex].chatMessages.last?.role == .user,
+           runs[runIndex].chatMessages.last?.content == restoredMessage {
+            runs[runIndex].chatMessages.removeLast()
+        }
     }
 
     // Internal for focused auxiliary-command lifecycle tests.
@@ -1625,6 +1945,7 @@ final class AppModel: ObservableObject {
         markActiveRunsInterrupted()
         resetRuntimeMappings()
         client = RuntimeClient()
+        Task { await stopTraceHistory() }
     }
 
     private func markActiveRunsInterrupted() {

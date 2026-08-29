@@ -5,3 +5,4 @@ DerivedData/
 xcuserdata/
 AdaptiveAgentDesktop.xcodeproj/
 Resources/AgentRuntime/agent-runtime
+Resources/TraceSession/trace-session-sidecar
