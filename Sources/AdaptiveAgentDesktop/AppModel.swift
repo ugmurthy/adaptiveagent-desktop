@@ -1583,6 +1583,13 @@ final class AppModel: ObservableObject {
                     isRootEvent: sourceRunId == runId,
                     at: index
                 )
+                if type == "tool.completed" {
+                    captureFiles(
+                        from: event["payload"]?.objectValue ?? [:],
+                        sourceRunId: sourceRunId,
+                        at: index
+                    )
+                }
             }
         }
 
@@ -1773,11 +1780,15 @@ final class AppModel: ObservableObject {
         runs[index].activityFinishedAt = Date()
     }
 
-    private func captureFiles(from payload: [String: JSONValue], sourceRunId: String) {
+    private func captureFiles(
+        from payload: [String: JSONValue],
+        sourceRunId: String,
+        at targetIndex: Int? = nil
+    ) {
         guard payload["skipped"] != .bool(true),
               let toolName = payload["toolName"]?.stringValue,
               let output = payload["output"]?.objectValue,
-              let index = recordIndex(forRunId: sourceRunId) else { return }
+              let index = targetIndex ?? recordIndex(forRunId: sourceRunId) else { return }
 
         switch toolName {
         case "write_file":

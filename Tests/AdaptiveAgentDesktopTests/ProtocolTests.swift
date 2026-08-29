@@ -619,6 +619,53 @@ done
     }
 
     @MainActor
+    func testInspectionReconstructsRelatedFilesForHistoricalRuns() throws {
+        let workspace = try temporaryDirectoryURL()
+        let generatedFile = workspace.appendingPathComponent("Reports/generated.md")
+        let editedFile = workspace.appendingPathComponent("Sources/Existing.swift")
+        let model = AppModel(workingDirectoryURL: workspace)
+        model.effectiveWorkspaceRoot = workspace.path
+        let recordID = UUID()
+        model.runs = [AppModel.RunRecord(
+            id: recordID,
+            kind: .run,
+            title: "Historical run",
+            runIds: ["root-run"]
+        )]
+
+        let inspection: JSONValue = .object([
+            "run": .object([
+                "id": .string("root-run"),
+                "status": .string("succeeded")
+            ]),
+            "events": .array([
+                toolCompletedEvent(
+                    runId: "root-run",
+                    toolName: "write_file",
+                    output: ["path": .string(generatedFile.path), "sizeBytes": .number(42)]
+                ),
+                toolCompletedEvent(
+                    runId: "child-run",
+                    toolName: "edit_file",
+                    output: ["path": .string(editedFile.path), "changed": .bool(true)]
+                )
+            ])
+        ])
+
+        try model.acceptRunCommandResult(
+            inspection,
+            method: "run/inspect",
+            for: recordID,
+            requestedRunId: "root-run"
+        )
+
+        XCTAssertEqual(model.runs[0].files.map(\.path), [generatedFile.path, editedFile.path].sorted())
+        XCTAssertEqual(model.runs[0].files.first { $0.path == generatedFile.path }?.operation, .written)
+        XCTAssertEqual(model.runs[0].files.first { $0.path == editedFile.path }?.operation, .edited)
+        XCTAssertEqual(model.runs[0].files.first { $0.path == editedFile.path }?.sourceRunId, "child-run")
+    }
+
+    @MainActor
     func testAgentEventsBuildCompactActivityFeedAndUpdateToolsInPlace() throws {
         let model = AppModel(workingDirectoryURL: try temporaryDirectoryURL())
         let recordID = UUID()
