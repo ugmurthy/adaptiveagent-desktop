@@ -517,7 +517,11 @@ done
         XCTAssertTrue(model.isConnected, model.status)
         XCTAssertTrue(model.runs.isEmpty)
 
-        model.runCommand("run/inspect", runId: "  persisted-run  ")
+        model.runCommand(
+            "run/inspect",
+            runId: "  persisted-run  ",
+            displayTitle: "Historical research goal"
+        )
         let recordID = try XCTUnwrap(model.runs.first?.id)
         model.runs[0].output = .string("Original result")
         for _ in 0..<100 {
@@ -528,6 +532,7 @@ done
         let record = try XCTUnwrap(model.runs.first)
         XCTAssertEqual(model.selectedRunItemID, record.id)
         XCTAssertEqual(record.latestRunId, "persisted-run")
+        XCTAssertEqual(record.title, "Historical research goal")
         XCTAssertEqual(record.status, .running)
         XCTAssertEqual(record.output, .string("Original result"), "Inspecting must not replace the run result")
         XCTAssertEqual(record.inspection?.objectValue?["run"]?.objectValue?["id"], .string("persisted-run"))
@@ -536,6 +541,12 @@ done
         model.setDetailMode(.results, forTab: tabID)
         XCTAssertEqual(model.selectedTab?.detailMode, .results)
         XCTAssertEqual(model.selectedRunItemID, recordID)
+        model.runCommand(
+            "run/inspect",
+            runId: "persisted-run",
+            displayTitle: "Updated historical title"
+        )
+        XCTAssertEqual(model.runs.first?.title, "Updated historical title")
         model.runCommand("run/inspect", for: recordID)
         XCTAssertEqual(model.selectedTab?.detailMode, .inspection)
         try? await Task.sleep(for: .milliseconds(50))

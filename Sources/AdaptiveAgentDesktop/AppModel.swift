@@ -530,7 +530,11 @@ final class AppModel: ObservableObject {
     }
 
     func openHistoryInRuntime(_ rootRunId: String) {
-        runCommand("run/inspect", runId: rootRunId)
+        runCommand(
+            "run/inspect",
+            runId: rootRunId,
+            displayTitle: historyItem(rootRunId: rootRunId)?.title
+        )
     }
 
     func newRun() {
@@ -749,14 +753,19 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func runCommand(_ method: String, runId value: String) {
+    func runCommand(_ method: String, runId value: String, displayTitle: String? = nil) {
         let runId = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard isConnected, !runId.isEmpty else { return }
+        let preferredTitle = displayTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if let record = runs.first(where: { $0.runIds.contains(runId) }) {
-            openRunTab(record.id)
-            if method == "run/inspect" { showInspection(for: record.id) }
-            sendRunCommand(method, runId: runId, recordID: record.id)
+        if let index = runs.firstIndex(where: { $0.runIds.contains(runId) }) {
+            if let preferredTitle, !preferredTitle.isEmpty {
+                runs[index].title = preferredTitle
+            }
+            let recordID = runs[index].id
+            openRunTab(recordID)
+            if method == "run/inspect" { showInspection(for: recordID) }
+            sendRunCommand(method, runId: runId, recordID: recordID)
             return
         }
 
@@ -765,7 +774,7 @@ final class AppModel: ObservableObject {
         runs.insert(RunRecord(
             id: recordID,
             kind: .run,
-            title: "Run \(abbreviatedRunId)",
+            title: preferredTitle.flatMap { $0.isEmpty ? nil : $0 } ?? "Run \(abbreviatedRunId)",
             runIds: [runId],
             status: .unknown
         ), at: 0)
