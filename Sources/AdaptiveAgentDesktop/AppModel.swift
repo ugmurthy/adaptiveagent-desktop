@@ -30,6 +30,10 @@ final class AppModel: ObservableObject {
         var selectedHistoryRunID: String?
         var draftKind: RunKind
         var draftText: String
+        var draftAttachments: [AttachmentDescriptor]
+        var attachmentErrorMessage: String?
+        var isImportingAttachments: Bool
+        var isSubmittingDraft: Bool
         var chatMessage: String
         var pendingChatMessage: String?
         var steerMessage: String
@@ -44,6 +48,10 @@ final class AppModel: ObservableObject {
             selectedHistoryRunID: String? = nil,
             draftKind: RunKind = .run,
             draftText: String = "",
+            draftAttachments: [AttachmentDescriptor] = [],
+            attachmentErrorMessage: String? = nil,
+            isImportingAttachments: Bool = false,
+            isSubmittingDraft: Bool = false,
             chatMessage: String = "",
             pendingChatMessage: String? = nil,
             steerMessage: String = "",
@@ -57,6 +65,10 @@ final class AppModel: ObservableObject {
             self.selectedHistoryRunID = selectedHistoryRunID
             self.draftKind = draftKind
             self.draftText = draftText
+            self.draftAttachments = draftAttachments
+            self.attachmentErrorMessage = attachmentErrorMessage
+            self.isImportingAttachments = isImportingAttachments
+            self.isSubmittingDraft = isSubmittingDraft
             self.chatMessage = chatMessage
             self.pendingChatMessage = pendingChatMessage
             self.steerMessage = steerMessage
@@ -144,6 +156,12 @@ final class AppModel: ObservableObject {
         var sourceRunId: String
     }
 
+    struct SubmittedAttachment: Identifiable, Equatable {
+        let id: String
+        let name: String
+        let sizeBytes: Int64
+    }
+
     struct RunRecord: Identifiable, Equatable {
         let id: UUID
         let kind: RunKind
@@ -156,6 +174,7 @@ final class AppModel: ObservableObject {
         var errorMessage: String?
         var interaction: Interaction?
         var files: [RunFile] = []
+        var attachments: [SubmittedAttachment] = []
         var chatMessages: [ChatMessage] = []
         var activities: [RunActivity] = []
         var activityStartedAt: Date?
@@ -214,6 +233,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var runtimeInfoSnapshot: RuntimeInfo?
     @Published private(set) var runtimeInfoError: String?
     @Published private(set) var isRefreshingRuntimeInfo = false
+    @Published private(set) var attachmentCapabilities: AttachmentCapabilities?
+    @Published private(set) var localAttachmentStoreError: String?
 
     @Published var configuredRuntimeMode = ""
     @Published var configuredProvider = ""
@@ -245,6 +266,9 @@ final class AppModel: ObservableObject {
 
     private var client: RuntimeClient
     private var traceClient: TraceSessionClient
+    private var attachmentStore: AttachmentStore?
+    private let attachmentStoreRootURL: URL?
+    private var attachmentStoreDidClean = false
     private var didBootstrap = false
     private var isQuitting = false
     private var pendingRootAssignments: [UUID] = []
@@ -262,7 +286,8 @@ final class AppModel: ObservableObject {
     init(
         client: RuntimeClient = RuntimeClient(),
         traceClient: TraceSessionClient = TraceSessionClient(),
-        workingDirectoryURL: URL? = nil
+        workingDirectoryURL: URL? = nil,
+        attachmentStoreRootURL: URL? = nil
     ) {
         let launchDirectory = (workingDirectoryURL
             ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true))
@@ -270,6 +295,7 @@ final class AppModel: ObservableObject {
         let initialTab = RunTab()
         self.client = client
         self.traceClient = traceClient
+        self.attachmentStoreRootURL = attachmentStoreRootURL
         tabs = [initialTab]
         selectedTabID = initialTab.id
         workspacePath = launchDirectory.path
@@ -299,6 +325,26 @@ final class AppModel: ObservableObject {
     }
 
     var isWaitingForRunIdentity: Bool { !pendingRootAssignments.isEmpty }
+
+    var attachmentsEnabled: Bool {
+        isConnected
+            && attachmentStore != nil
+            && attachmentCapabilities?.enabled == true
+            && attachmentCapabilities?.acceptedKinds.contains("file") == true
+    }
+
+    var attachmentUnavailableReason: String? {
+        if let localAttachmentStoreError { return localAttachmentStoreError }
+        guard isConnected else { return "Connect to the runtime to attach files." }
+        guard let attachmentCapabilities else { return "This runtime does not report file attachment support." }
+        guard attachmentCapabilities.enabled else {
+            return attachmentCapabilities.reason ?? "File attachments are disabled by the runtime."
+        }
+        guard attachmentCapabilities.acceptedKinds.contains("file") else {
+            return "This runtime does not accept generic file attachments."
+        }
+        return nil
+    }
 
     func bootstrap() {
         guard !didBootstrap else { return }
@@ -469,8 +515,17 @@ final class AppModel: ObservableObject {
 
     func closeTab(_ tabID: UUID) {
         guard let closingIndex = tabs.firstIndex(where: { $0.id == tabID }) else { return }
+        let abandonedAttachments = tabs[closingIndex].selectedRunID == nil
+            ? tabs[closingIndex].draftAttachments
+            : []
         let wasSelected = selectedTabID == tabID
         tabs.remove(at: closingIndex)
+
+        if let attachmentStore, !abandonedAttachments.isEmpty {
+            Task {
+                for descriptor in abandonedAttachments { try? await attachmentStore.removeDraft(descriptor) }
+            }
+        }
 
         if tabs.isEmpty {
             let replacement = RunTab()
@@ -546,7 +601,20 @@ final class AppModel: ObservableObject {
     }
 
     func setDraftKind(_ kind: RunKind, forTab tabID: UUID) {
-        updateTab(tabID) { $0.draftKind = kind }
+        guard let index = tabs.firstIndex(where: { $0.id == tabID }),
+              !tabs[index].isImportingAttachments,
+              !tabs[index].isSubmittingDraft else { return }
+        let discardedAttachments = kind == .chat ? tabs[index].draftAttachments : []
+        tabs[index].draftKind = kind
+        if !discardedAttachments.isEmpty {
+            tabs[index].draftAttachments = []
+            tabs[index].attachmentErrorMessage = nil
+            if let attachmentStore {
+                Task {
+                    for descriptor in discardedAttachments { try? await attachmentStore.removeDraft(descriptor) }
+                }
+            }
+        }
     }
 
     func setDraftText(_ text: String, forTab tabID: UUID) {
@@ -595,6 +663,7 @@ final class AppModel: ObservableObject {
         tab.selectedRunID == nil
             && tab.selectedHistoryRunID == nil
             && tab.draftText.isEmpty
+            && tab.draftAttachments.isEmpty
             && tab.chatMessage.isEmpty
             && tab.steerMessage.isEmpty
     }
@@ -604,11 +673,108 @@ final class AppModel: ObservableObject {
         update(&tabs[index])
     }
 
+    func chooseAttachments(forTab tabID: UUID) {
+        guard attachmentsEnabled,
+              let tab = tab(withID: tabID),
+              tab.draftKind == .run,
+              !tab.isImportingAttachments else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = true
+        panel.resolvesAliases = false
+        guard panel.runModal() == .OK else { return }
+        Task { await importAttachments(panel.urls, forTab: tabID) }
+    }
+
+    func importAttachments(_ urls: [URL], forTab tabID: UUID) async {
+        guard attachmentsEnabled,
+              let attachmentStore,
+              let index = tabs.firstIndex(where: { $0.id == tabID && $0.selectedRunID == nil }),
+              tabs[index].draftKind == .run,
+              !tabs[index].isImportingAttachments,
+              !urls.isEmpty else { return }
+        tabs[index].isImportingAttachments = true
+        tabs[index].attachmentErrorMessage = nil
+        let existing = tabs[index].draftAttachments
+        do {
+            let imported = try await attachmentStore.importFiles(urls, existing: existing)
+            guard let currentIndex = tabs.firstIndex(where: {
+                $0.id == tabID && $0.selectedRunID == nil && $0.draftKind == .run
+            }) else {
+                for descriptor in imported { try? await attachmentStore.removeDraft(descriptor) }
+                return
+            }
+            tabs[currentIndex].draftAttachments.append(contentsOf: imported)
+            tabs[currentIndex].isImportingAttachments = false
+        } catch {
+            if let currentIndex = tabs.firstIndex(where: { $0.id == tabID }) {
+                tabs[currentIndex].isImportingAttachments = false
+                tabs[currentIndex].attachmentErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func removeAttachment(_ descriptor: AttachmentDescriptor, fromTab tabID: UUID) {
+        guard let index = tabs.firstIndex(where: { $0.id == tabID && $0.selectedRunID == nil }),
+              tabs[index].draftAttachments.contains(descriptor),
+              let attachmentStore else { return }
+        tabs[index].draftAttachments.removeAll { $0 == descriptor }
+        tabs[index].attachmentErrorMessage = nil
+        Task {
+            do { try await attachmentStore.removeDraft(descriptor) }
+            catch {
+                if let currentIndex = tabs.firstIndex(where: { $0.id == tabID && $0.selectedRunID == nil }) {
+                    tabs[currentIndex].attachmentErrorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
     func submitDraft(in tabID: UUID) {
         guard let tabIndex = tabs.firstIndex(where: { $0.id == tabID && $0.selectedRunID == nil }) else { return }
         let kind = tabs[tabIndex].draftKind
         let text = tabs[tabIndex].draftText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard isConnected, !text.isEmpty, !isWaitingForRunIdentity else { return }
+        let attachments = tabs[tabIndex].draftAttachments
+        guard isConnected, !text.isEmpty, !isWaitingForRunIdentity,
+              !tabs[tabIndex].isImportingAttachments, !tabs[tabIndex].isSubmittingDraft else { return }
+        guard kind == .run || attachments.isEmpty else { return }
+        guard attachments.isEmpty || attachmentsEnabled else {
+            tabs[tabIndex].attachmentErrorMessage = attachmentUnavailableReason
+            return
+        }
+        if attachments.isEmpty {
+            finishDraftSubmission(in: tabID, kind: kind, text: text, attachments: [])
+            return
+        }
+        tabs[tabIndex].isSubmittingDraft = true
+        tabs[tabIndex].attachmentErrorMessage = nil
+
+        Task {
+            do {
+                guard let attachmentStore else { throw AttachmentStoreError.unavailable }
+                try await attachmentStore.markOwned(attachments)
+                if !finishDraftSubmission(in: tabID, kind: kind, text: text, attachments: attachments) {
+                    try? await attachmentStore.discardOwned(attachments)
+                }
+            } catch {
+                guard let currentIndex = tabs.firstIndex(where: { $0.id == tabID && $0.selectedRunID == nil }) else { return }
+                tabs[currentIndex].isSubmittingDraft = false
+                tabs[currentIndex].attachmentErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    @discardableResult
+    private func finishDraftSubmission(
+        in tabID: UUID,
+        kind: RunKind,
+        text: String,
+        attachments: [AttachmentDescriptor]
+    ) -> Bool {
+        guard let tabIndex = tabs.firstIndex(where: {
+            $0.id == tabID && $0.selectedRunID == nil && $0.draftKind == kind
+        }) else { return false }
 
         let recordID = UUID()
         let runId = recordID.uuidString
@@ -619,6 +785,7 @@ final class AppModel: ObservableObject {
             title: title(for: text),
             sessionId: sessionId,
             status: .queued,
+            attachments: attachments.map { SubmittedAttachment(id: $0.attachmentId, name: $0.name, sizeBytes: $0.sizeBytes) },
             isRequestInFlight: true
         )
         if kind == .chat {
@@ -628,17 +795,23 @@ final class AppModel: ObservableObject {
         bind(rootRunId: runId, to: recordID)
         tabs[tabIndex].selectedRunID = recordID
         tabs[tabIndex].draftText = ""
+        tabs[tabIndex].draftAttachments = []
+        tabs[tabIndex].isSubmittingDraft = false
         tabs[tabIndex].scrollPosition = nil
 
         let method = kind == .run ? "agent/run" : "agent/chat"
         var fields: [String: JSONValue] = ["runId": .string(runId)]
         if kind == .run {
             fields["goal"] = .string(text)
+            if !attachments.isEmpty {
+                fields["attachments"] = .array(attachments.map(\.protocolValue))
+            }
         } else {
             fields["transcript"] = .array(record.chatMessages.map(\.protocolValue))
         }
         if let sessionId { fields["sessionId"] = .string(sessionId) }
         beginAgentRequest(method: method, fields: fields, recordID: recordID)
+        return true
     }
 
     func sendChatMessage(in tabID: UUID) {
@@ -1306,6 +1479,25 @@ final class AppModel: ObservableObject {
                     throw error
                 }
             }
+            var managedAttachmentRoot: String?
+            do {
+                let store: AttachmentStore
+                if let attachmentStore {
+                    store = attachmentStore
+                } else {
+                    store = try AttachmentStore(rootURL: attachmentStoreRootURL)
+                }
+                if !attachmentStoreDidClean {
+                    try await store.cleanAbandonedDrafts()
+                    attachmentStoreDidClean = true
+                }
+                attachmentStore = store
+                managedAttachmentRoot = store.rootURL.path
+                localAttachmentStoreError = nil
+            } catch {
+                attachmentStore = nil
+                localAttachmentStoreError = "File attachments are unavailable: \(error.localizedDescription)"
+            }
             status = "Loading workspace configuration…"
             let parameters = RuntimeInitializationParameters(
                 cwd: workingDirectory.path,
@@ -1321,7 +1513,8 @@ final class AppModel: ObservableObject {
                     ? configuredInferenceTier
                     : nil,
                 gatewayURL: gatewayURL.isEmpty ? nil : gatewayURL,
-                requireRunPermit: configuredRequireRunPermit
+                requireRunPermit: configuredRequireRunPermit,
+                managedAttachmentRoot: managedAttachmentRoot
             )
             let result = try await client.initializeRuntime(parameters: parameters)
             applyRuntimeInformation(result, fallbackWorkspace: workingDirectory.path)
@@ -1347,6 +1540,7 @@ final class AppModel: ObservableObject {
         effectiveWorkspaceRoot = result.workspaceRoot.isEmpty ? fallbackWorkspace : result.workspaceRoot
         shellCwd = result.shellCwd.isEmpty ? effectiveWorkspaceRoot : result.shellCwd
         registeredToolNames = result.registeredToolNames
+        attachmentCapabilities = result.attachments
     }
 
     private func loadRuntimeInfo() async {
@@ -1992,6 +2186,7 @@ final class AppModel: ObservableObject {
         effectiveWorkspaceRoot = ""
         shellCwd = ""
         registeredToolNames = []
+        attachmentCapabilities = nil
         runtimeInfoSnapshot = nil
         runtimeInfoError = nil
     }

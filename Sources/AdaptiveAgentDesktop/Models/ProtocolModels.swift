@@ -56,6 +56,7 @@ struct RuntimeInitializationParameters: Codable, Equatable, Sendable {
     var inferenceTier: String? = nil
     var gatewayURL: String? = nil
     var requireRunPermit: Bool? = nil
+    var managedAttachmentRoot: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case cwd
@@ -70,7 +71,49 @@ struct RuntimeInitializationParameters: Codable, Equatable, Sendable {
         case inferenceTier
         case gatewayURL = "gatewayUrl"
         case requireRunPermit
+        case managedAttachmentRoot
     }
+}
+
+struct AttachmentDescriptor: Codable, Equatable, Hashable, Identifiable, Sendable {
+    var id: String { attachmentId }
+
+    let attachmentId: String
+    let kind: String
+    let stagedRelativePath: String
+    let name: String
+    let mimeType: String?
+    let sizeBytes: Int64
+    let sha256: String
+
+    var protocolValue: JSONValue {
+        var fields: [String: JSONValue] = [
+            "attachmentId": .string(attachmentId),
+            "kind": .string(kind),
+            "stagedRelativePath": .string(stagedRelativePath),
+            "name": .string(name),
+            "sizeBytes": .number(Double(sizeBytes)),
+            "sha256": .string(sha256)
+        ]
+        if let mimeType { fields["mimeType"] = .string(mimeType) }
+        return .object(fields)
+    }
+}
+
+struct AttachmentCapabilities: Codable, Equatable, Sendable {
+    struct Routing: Codable, Equatable, Sendable {
+        let taskGeneric: String?
+        let chatGeneric: String?
+    }
+
+    let enabled: Bool
+    let maxFileBytes: Int64
+    let maxAttachmentCount: Int
+    let maxSubmissionBytes: Int64
+    let acceptedKinds: [String]
+    let supportedGenericMimeTypes: [String]
+    let routing: Routing?
+    let reason: String?
 }
 
 struct RuntimeInitializationResult: Codable, Equatable, Sendable {
@@ -86,6 +129,7 @@ struct RuntimeInitializationResult: Codable, Equatable, Sendable {
     let registeredToolNames: [String]
     let inferenceMode: String?
     let inferenceTier: String?
+    let attachments: AttachmentCapabilities?
 }
 
 struct RuntimeInfo: Codable, Equatable, Sendable {
@@ -115,6 +159,7 @@ struct RuntimeInfo: Codable, Equatable, Sendable {
     let inferenceMode: String?
     let inferenceTier: String?
     let connections: Connections?
+    let attachments: AttachmentCapabilities?
 }
 
 struct AccessTokenUpdateResult: Codable, Equatable, Sendable {

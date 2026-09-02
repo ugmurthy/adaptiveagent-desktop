@@ -25,10 +25,12 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testRuntimeInitializationEncodesGatewayURLWithProtocolKey() throws {
+        let managedRoot = "/tmp/adaptive-agent-managed-attachments"
         let parameters = RuntimeInitializationParameters(
             inferenceMode: "local",
             gatewayURL: "ws://127.0.0.1:3006/rpc",
-            requireRunPermit: true
+            requireRunPermit: true,
+            managedAttachmentRoot: managedRoot
         )
         let encoded = try JSONValue.encode(parameters)
         let fields = try XCTUnwrap(encoded.objectValue)
@@ -36,8 +38,126 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(fields["inferenceMode"], .string("local"))
         XCTAssertEqual(fields["gatewayUrl"], .string("ws://127.0.0.1:3006/rpc"))
         XCTAssertEqual(fields["requireRunPermit"], .bool(true))
+        XCTAssertEqual(fields["managedAttachmentRoot"], .string(managedRoot))
         XCTAssertNil(fields["gatewayURL"])
         XCTAssertNil(fields["inferenceTier"])
+    }
+
+    func testAttachmentDescriptorEncodingAndOptionalRuntimeCapabilities() throws {
+        let descriptor = AttachmentDescriptor(
+            attachmentId: "attachment-1",
+            kind: "file",
+            stagedRelativePath: "attachment-1/report.pdf",
+            name: "report.pdf",
+            mimeType: "application/pdf",
+            sizeBytes: 123,
+            sha256: String(repeating: "a", count: 64)
+        )
+        XCTAssertEqual(descriptor.protocolValue.objectValue?["stagedRelativePath"], .string("attachment-1/report.pdf"))
+        XCTAssertEqual(descriptor.protocolValue.objectValue?["sizeBytes"], .number(123))
+
+        let fixture = JSONValue.object([
+            "agent": .object(["id": .string("default"), "name": .string("Default")]),
+            "runtimeMode": .string("memory"),
+            "workspaceRoot": .string("/tmp"),
+            "shellCwd": .string("/tmp"),
+            "registeredToolNames": .array([]),
+            "attachments": .object([
+                "enabled": .bool(true),
+                "maxFileBytes": .number(10 * 1024 * 1024),
+                "maxAttachmentCount": .number(8),
+                "maxSubmissionBytes": .number(40 * 1024 * 1024),
+                "acceptedKinds": .array([.string("file")]),
+                "supportedGenericMimeTypes": .array([.string("application/pdf")]),
+                "routing": .object(["taskGeneric": .string("direct"), "chatGeneric": .string("direct")])
+            ])
+        ])
+        let decoded = try fixture.decode(RuntimeInitializationResult.self)
+        XCTAssertEqual(decoded.attachments?.enabled, true)
+        XCTAssertEqual(decoded.attachments?.maxAttachmentCount, 8)
+
+        var withoutCapabilities = try XCTUnwrap(fixture.objectValue)
+        withoutCapabilities.removeValue(forKey: "attachments")
+        XCTAssertNil(try JSONValue.object(withoutCapabilities).decode(RuntimeInitializationResult.self).attachments)
+    }
+
+    func testAttachmentStoreCreatesImmutableHashedSnapshot() async throws {
+        let base = try temporaryDirectoryURL()
+        let root = base.appendingPathComponent("managed", isDirectory: true)
+        let source = base.appendingPathComponent("quarterly report.txt")
+        try Data("hello".utf8).write(to: source)
+        let store = try AttachmentStore(rootURL: root)
+
+        let imported = try await store.importFiles([source], existing: [])
+        let descriptor = try XCTUnwrap(imported.first)
+        XCTAssertEqual(descriptor.kind, "file")
+        XCTAssertEqual(descriptor.name, "quarterly_report.txt")
+        XCTAssertEqual(descriptor.sizeBytes, 5)
+        XCTAssertEqual(descriptor.sha256, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+        XCTAssertEqual(descriptor.stagedRelativePath, "\(descriptor.attachmentId)/\(descriptor.name)")
+
+        let staged = root
+            .appendingPathComponent(descriptor.attachmentId, isDirectory: true)
+            .appendingPathComponent(descriptor.name)
+        try Data("changed".utf8).write(to: source)
+        XCTAssertEqual(try Data(contentsOf: staged), Data("hello".utf8))
+        let permissions = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: staged.path)[.posixPermissions] as? NSNumber
+        )
+        XCTAssertEqual(permissions.intValue & 0o777, 0o400)
+    }
+
+    func testAttachmentStoreRejectsSymlinksDirectoriesAndLimits() async throws {
+        let base = try temporaryDirectoryURL()
+        let store = try AttachmentStore(rootURL: base.appendingPathComponent("managed", isDirectory: true))
+        let regular = base.appendingPathComponent("regular.txt")
+        try Data("safe".utf8).write(to: regular)
+        let symlink = base.appendingPathComponent("link.txt")
+        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: regular)
+
+        await assertThrows({ try await store.importFiles([symlink], existing: []) }) { error in
+            guard case .invalidFile = error as? AttachmentStoreError else {
+                return XCTFail("expected invalidFile, got \(error)")
+            }
+        }
+        await assertThrows { try await store.importFiles([base], existing: []) }
+
+        let dummy = (0..<AttachmentStore.maximumAttachmentCount).map { index in
+            AttachmentDescriptor(
+                attachmentId: "id-\(index)", kind: "file", stagedRelativePath: "id-\(index)/f",
+                name: "f", mimeType: nil, sizeBytes: 1, sha256: String(repeating: "0", count: 64)
+            )
+        }
+        await assertThrows({ try await store.importFiles([regular], existing: dummy) }) { error in
+            XCTAssertEqual(error as? AttachmentStoreError, .tooManyFiles)
+        }
+
+        let oversized = base.appendingPathComponent("oversized.bin")
+        FileManager.default.createFile(atPath: oversized.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: oversized)
+        try handle.truncate(atOffset: UInt64(AttachmentStore.maximumFileBytes + 1))
+        try handle.close()
+        await assertThrows({ try await store.importFiles([oversized], existing: []) }) { error in
+            guard case .fileTooLarge = error as? AttachmentStoreError else {
+                return XCTFail("expected fileTooLarge, got \(error)")
+            }
+        }
+    }
+
+    func testAttachmentStoreStartupCleanupPreservesOwnedFiles() async throws {
+        let base = try temporaryDirectoryURL()
+        let root = base.appendingPathComponent("managed", isDirectory: true)
+        let first = base.appendingPathComponent("first.txt")
+        let second = base.appendingPathComponent("second.txt")
+        try Data("first".utf8).write(to: first)
+        try Data("second".utf8).write(to: second)
+        let store = try AttachmentStore(rootURL: root)
+        let descriptors = try await store.importFiles([first, second], existing: [])
+        try await store.markOwned([descriptors[1]])
+
+        try await store.cleanAbandonedDrafts()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(descriptors[0].attachmentId).path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent(descriptors[1].attachmentId).path))
     }
 
     func testReadyNotificationRequiresNoIDAndExactStringVersion() throws {
@@ -163,6 +283,7 @@ done
             try? await Task.sleep(for: .milliseconds(20))
         }
         XCTAssertTrue(model.isConnected, model.status)
+        XCTAssertFalse(model.attachmentsEnabled, "Fixtures without attachment capabilities must remain text-only")
         XCTAssertEqual(model.agentName, "Default Agent")
         XCTAssertEqual(model.effectiveWorkspaceRoot, workspace.path)
 
@@ -265,6 +386,8 @@ done
     @MainActor
     func testAppModelSendsProtocol116RunIdentityAndChatTranscript() async throws {
         let workspace = try temporaryDirectoryURL()
+        let unavailableAttachmentRoot = workspace.appendingPathComponent("not-a-directory")
+        try Data("occupied".utf8).write(to: unavailableAttachmentRoot)
         let requestLog = temporaryFileURL(named: "protocol-116-agent-requests.log")
         let executable = try makeRuntimeScript(#"""
 printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
@@ -286,13 +409,16 @@ done
 """#)
         let model = AppModel(
             client: RuntimeClient(executableURL: executable, responseTimeout: .seconds(2)),
-            workingDirectoryURL: workspace
+            workingDirectoryURL: workspace,
+            attachmentStoreRootURL: unavailableAttachmentRoot
         )
         model.bootstrap()
         for _ in 0..<100 where !model.isConnected {
             try? await Task.sleep(for: .milliseconds(20))
         }
         XCTAssertTrue(model.isConnected, model.status)
+        XCTAssertFalse(model.attachmentsEnabled)
+        XCTAssertTrue(model.attachmentUnavailableReason?.contains("unavailable") == true)
 
         let runTabID = try XCTUnwrap(model.selectedTabID)
         model.setDraftText("Run this task", forTab: runTabID)
@@ -321,6 +447,11 @@ done
         let runParams = try XCTUnwrap(runRequest.objectValue?["params"]?.objectValue)
         XCTAssertFalse(try XCTUnwrap(runParams["runId"]?.stringValue).isEmpty)
         XCTAssertEqual(runParams["goal"], .string("Run this task"))
+        XCTAssertNil(runParams["attachments"])
+        let runtimeInitialize = try XCTUnwrap(requests.first {
+            $0.objectValue?["method"] == .string("runtime/initialize")
+        })
+        XCTAssertNil(runtimeInitialize.objectValue?["params"]?.objectValue?["managedAttachmentRoot"])
 
         let chatRequests = requests.filter { $0.objectValue?["method"] == .string("agent/chat") }
         XCTAssertEqual(chatRequests.count, 2)
@@ -342,6 +473,74 @@ done
             .object(["role": .string("assistant"), "content": .string("Reply")]),
             .object(["role": .string("user"), "content": .string("Follow up")])
         ])
+        await model.shutdown()
+    }
+
+    @MainActor
+    func testAppModelStagesSupportedRunAttachmentsWithoutAffectingTextOnlyOrChatPayloads() async throws {
+        let workspace = try temporaryDirectoryURL()
+        let managedRoot = try temporaryDirectoryURL().appendingPathComponent("managed", isDirectory: true)
+        let source = workspace.appendingPathComponent("input.json")
+        try Data(#"{"value":1}"#.utf8).write(to: source)
+        let requestLog = temporaryFileURL(named: "attachment-requests.log")
+        let executable = try makeRuntimeScript(#"""
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
+  id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
+  method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
+  run_id="$(printf '%s' "$line" | sed -E 's/.*"runId":"([^"]+)".*/\1/')"
+  case "$method" in
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}' ;;
+    runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[],"attachments":{"enabled":true,"maxFileBytes":10485760,"maxAttachmentCount":8,"maxSubmissionBytes":41943040,"acceptedKinds":["file"],"supportedGenericMimeTypes":["application/json"],"routing":{"taskGeneric":"direct","chatGeneric":"direct"}}}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
+    agent/run|agent/chat) printf '{"jsonrpc":"2.0","id":"%s","result":{"status":"success","runId":"%s","output":"Done"}}\n' "$id" "$run_id" ;;
+    runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
+    *) exit 91 ;;
+  esac
+done
+"""#)
+        let model = AppModel(
+            client: RuntimeClient(executableURL: executable, responseTimeout: .seconds(2)),
+            workingDirectoryURL: workspace,
+            attachmentStoreRootURL: managedRoot
+        )
+        model.bootstrap()
+        for _ in 0..<100 where !model.attachmentsEnabled { try? await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertTrue(model.attachmentsEnabled, model.attachmentUnavailableReason ?? model.status)
+
+        let runTabID = try XCTUnwrap(model.selectedTabID)
+        await model.importAttachments([source], forTab: runTabID)
+        XCTAssertEqual(model.selectedTab?.draftAttachments.count, 1)
+        model.setDraftText("Read the attachment", forTab: runTabID)
+        model.submitDraft(in: runTabID)
+        for _ in 0..<100 where model.runs.first?.status != .succeeded { try? await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertEqual(model.runs.first?.attachments.first?.name, "input.json")
+
+        model.newChat()
+        let chatTabID = try XCTUnwrap(model.selectedTabID)
+        model.setDraftText("Text only", forTab: chatTabID)
+        model.submitDraft(in: chatTabID)
+        for _ in 0..<100 where model.runs.count < 2 || model.runs.first?.status != .succeeded {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+
+        let requests = try String(contentsOf: requestLog, encoding: .utf8)
+            .split(separator: "\n")
+            .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+        let runtimeInitialize = try XCTUnwrap(requests.first { $0.objectValue?["method"] == .string("runtime/initialize") })
+        XCTAssertEqual(runtimeInitialize.objectValue?["params"]?.objectValue?["managedAttachmentRoot"], .string(managedRoot.path))
+        let run = try XCTUnwrap(requests.first { $0.objectValue?["method"] == .string("agent/run") })
+        guard case .array(let attachments) = run.objectValue?["params"]?.objectValue?["attachments"] else {
+            return XCTFail("agent/run attachments missing")
+        }
+        let sent = try XCTUnwrap(attachments.first?.objectValue)
+        XCTAssertEqual(sent["kind"], .string("file"))
+        XCTAssertEqual(sent["name"], .string("input.json"))
+        XCTAssertFalse(try XCTUnwrap(sent["stagedRelativePath"]?.stringValue).hasPrefix("/"))
+        XCTAssertNil(run.objectValue?["params"]?.objectValue?["path"])
+        let chat = try XCTUnwrap(requests.first { $0.objectValue?["method"] == .string("agent/chat") })
+        XCTAssertNil(chat.objectValue?["params"]?.objectValue?["attachments"])
         await model.shutdown()
     }
 
@@ -1569,6 +1768,18 @@ exit 9
 
     private func shellQuote(_ value: String) -> String {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private func assertThrows<T>(
+        _ operation: () async throws -> T,
+        verify: (Error) -> Void = { _ in }
+    ) async {
+        do {
+            _ = try await operation()
+            XCTFail("Expected operation to throw")
+        } catch {
+            verify(error)
+        }
     }
 
     private func waitForNotifications(_ recorder: NotificationRecorder, count: Int) async -> [(method: String, params: JSONValue)] {

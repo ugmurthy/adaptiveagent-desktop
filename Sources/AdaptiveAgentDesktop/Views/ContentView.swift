@@ -605,6 +605,12 @@ private struct NewRequestView: View {
                 }
                 .frame(maxWidth: 700, minHeight: 150, maxHeight: 230)
 
+                if draftKind == .run {
+                    AttachmentDraftView(tabID: tabID)
+                        .environmentObject(model)
+                        .frame(maxWidth: 700)
+                }
+
                 HStack {
                     if model.isWaitingForRunIdentity {
                         ProgressView()
@@ -616,7 +622,12 @@ private struct NewRequestView: View {
                     Button(draftKind == .run ? "Start Run" : "Start Chat", action: submitDraft)
                         .buttonStyle(.borderedProminent)
                         .keyboardShortcut(.return, modifiers: [.command])
-                        .disabled(draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isWaitingForRunIdentity)
+                        .disabled(
+                            draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                || model.isWaitingForRunIdentity
+                                || (model.tab(withID: tabID)?.isImportingAttachments ?? false)
+                                || (model.tab(withID: tabID)?.isSubmittingDraft ?? false)
+                        )
                 }
                 .frame(maxWidth: 700)
             }
@@ -688,6 +699,82 @@ private struct NewRequestView: View {
     private func submitDraft() {
         dictation.cancel()
         model.submitDraft(in: tabID)
+    }
+}
+
+private struct AttachmentDraftView: View {
+    @EnvironmentObject private var model: AppModel
+    let tabID: UUID
+
+    private var tab: AppModel.RunTab? { model.tab(withID: tabID) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Button("Add Files", systemImage: "paperclip") {
+                    model.chooseAttachments(forTab: tabID)
+                }
+                .disabled(
+                    !model.attachmentsEnabled
+                        || (tab?.isImportingAttachments ?? false)
+                        || (tab?.draftAttachments.count ?? 0) >= AttachmentStore.maximumAttachmentCount
+                )
+                .help(model.attachmentUnavailableReason ?? "Attach up to 8 files to this run")
+
+                if tab?.isImportingAttachments == true {
+                    ProgressView().controlSize(.small)
+                    Text("Importing secure snapshots…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if let reason = model.attachmentUnavailableReason {
+                    Text(reason)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                } else {
+                    Text("10 MiB each · 8 files · 40 MiB total")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            if let attachments = tab?.draftAttachments, !attachments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 7) {
+                        ForEach(attachments) { attachment in
+                            HStack(spacing: 6) {
+                                Image(systemName: "doc")
+                                Text(attachment.name).lineLimit(1)
+                                Text(Self.formattedSize(attachment.sizeBytes))
+                                    .foregroundStyle(.secondary)
+                                Button {
+                                    model.removeAttachment(attachment, fromTab: tabID)
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Remove \(attachment.name)")
+                            }
+                            .font(.caption)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 6)
+                            .background(.quaternary.opacity(0.55), in: Capsule())
+                        }
+                    }
+                }
+            }
+
+            if let error = tab?.attachmentErrorMessage {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+
+    static func formattedSize(_ sizeBytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: sizeBytes, countStyle: .file)
     }
 }
 
@@ -893,6 +980,10 @@ private struct RunDetailView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 18) {
+                        if !record.attachments.isEmpty {
+                            SubmittedAttachmentsView(attachments: record.attachments)
+                                .id("attachments")
+                        }
                         if detailMode == .inspection {
                             inspectionOutput
                                 .id("run-inspection")
@@ -1196,6 +1287,31 @@ private struct RunDetailView: View {
     private func sendChatMessage() {
         dictation.cancel()
         model.sendChatMessage(in: tabID)
+    }
+}
+
+private struct SubmittedAttachmentsView: View {
+    let attachments: [AppModel.SubmittedAttachment]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("ATTACHMENTS").sectionLabel()
+            ForEach(attachments) { attachment in
+                HStack(spacing: 8) {
+                    Image(systemName: "doc")
+                        .foregroundStyle(.secondary)
+                    Text(attachment.name)
+                        .lineLimit(1)
+                    Spacer()
+                    Text(AttachmentDraftView.formattedSize(attachment.sizeBytes))
+                        .foregroundStyle(.secondary)
+                }
+                .font(.callout)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
     }
 }
 

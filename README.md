@@ -66,6 +66,8 @@ The settings override field may be left blank. During initialization the runtime
 
 Choose a workspace directory and agent profile JSON, connect, and then start a run or send a session chat message. The event pane receives incremental `agent/event` notifications. Run results expose approval and clarification controls when requested, plus steering and a **Run Actions** menu with inspect, resume, retry, recover, continue, and interrupt operations.
 
+New runs can include generic files when the connected runtime reports managed attachment support. The app imports each selection into a private Application Support snapshot before submission, sends only relative descriptors over JSON-RPC, and retains submitted snapshots for runtime retry and recovery. Attachments are limited to 10 MiB each, 8 files, and 40 MiB total. Text is still required, and chat attachments are not supported.
+
 Runs and drafts open in app-level tabs above the detail pane. Tabs retain their own draft, chat composer, steering text, selected run, and scroll position while sharing the app's single runtime process. Closing a tab does not interrupt or remove its run; select that run in the history sidebar to reopen it. Background tabs continue showing run status and approval or clarification badges.
 
 When no run is selected, use the **Existing Run** field on the new-request screen to enter a run ID and invoke the same actions. The app attaches that ID as a tracked sidebar record so status changes, inspection output, and errors remain visible in the normal run detail. The ID must be available to the initialized runtime: runs from previous launches generally require Postgres, while memory-mode runs are available only for the lifetime of their runtime process.
