@@ -77,6 +77,7 @@ The result advertises supported methods, notifications, and CLI commands:
         "run/continue",
         "run/interrupt",
         "run/inspect",
+        "run/delete",
         "run/replay",
         "run/steer",
         "interaction/resolveApproval",
@@ -136,6 +137,7 @@ steering, and in-memory run state.
 | `run/continue`                     | `runId`                              | -                                                                                                                       |
 | `run/interrupt`                    | `runId`                              | -                                                                                                                       |
 | `run/inspect`                      | `runId`                              | -                                                                                                                       |
+| `run/delete`                       | `runId`                              | -                                                                                                                       |
 | `run/replay`                       | `runId`                              | -                                                                                                                       |
 | `run/steer`                        | `runId`, `message`                   | `role`, `metadata`                                                                                                      |
 | `interaction/resolveApproval`      | `runId`, `approvalId`, `approved`    | -                                                                                                                       |

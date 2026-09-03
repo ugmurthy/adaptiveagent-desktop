@@ -265,6 +265,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var isSearchingHistory = false
     @Published private(set) var historySearchError: String?
     @Published var historySearchQuery = ""
+    @Published private(set) var deletingRunIDs: Set<String> = []
+    @Published private(set) var runDeletionError: String?
 
     private var client: RuntimeClient
     private var traceClient: TraceSessionClient
@@ -607,6 +609,49 @@ final class AppModel: ObservableObject {
     func historyItem(rootRunId: String) -> HistoryItem? {
         historyItems.first { $0.rootRunId == rootRunId }
             ?? historySearchResults.first { $0.rootRunId == rootRunId }
+    }
+
+    func deletableRootRunID(for recordID: UUID) -> String? {
+        guard let record = runs.first(where: { $0.id == recordID }),
+              !record.status.isActive,
+              !record.hasRequestInFlight else { return nil }
+        return record.runIds.first { runToRoot[$0] == $0 }
+            ?? record.runIds.first
+    }
+
+    func deleteRuns(rootRunIDs: Set<String>) {
+        let requestedIDs = Set(rootRunIDs.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+            .filter { !$0.isEmpty && !deletingRunIDs.contains($0) }
+        guard isConnected, !requestedIDs.isEmpty else { return }
+
+        deletingRunIDs.formUnion(requestedIDs)
+        runDeletionError = nil
+        Task {
+            var failures: [String] = []
+            for runId in requestedIDs.sorted() {
+                do {
+                    let result = try await client.deleteRun(runId)
+                    guard result.deleted else {
+                        failures.append("\(runId): runtime did not confirm deletion")
+                        continue
+                    }
+                    removeDeletedRun(rootRunId: result.rootRunId, requestedRunId: runId)
+                } catch {
+                    failures.append("\(runId): \(redactedErrorDescription(error))")
+                }
+            }
+            deletingRunIDs.subtract(requestedIDs)
+            if !failures.isEmpty {
+                runDeletionError = failures.joined(separator: "\n")
+            }
+            if traceConnected {
+                await loadHistory(replacing: true)
+            }
+        }
+    }
+
+    func clearRunDeletionError() {
+        runDeletionError = nil
     }
 
     func openHistoryInRuntime(_ rootRunId: String) {
@@ -1715,6 +1760,51 @@ final class AppModel: ObservableObject {
         var byID = Dictionary(uniqueKeysWithValues: first.map { ($0.rootRunId, $0) })
         for item in second { byID[item.rootRunId] = item }
         return byID.values.sorted { $0.startedAt > $1.startedAt }
+    }
+
+    private func removeDeletedRun(rootRunId: String, requestedRunId: String) {
+        let deletedRunIDs = Set(
+            runToRoot.compactMap { runId, mappedRoot in mappedRoot == rootRunId ? runId : nil }
+                + [rootRunId, requestedRunId]
+        )
+        let deletedRecordIDs = Set(runs.compactMap { record in
+            record.runIds.contains(where: deletedRunIDs.contains) ? record.id : nil
+        })
+
+        historyItems.removeAll { $0.rootRunId == rootRunId || $0.rootRunId == requestedRunId }
+        historySearchResults.removeAll { $0.rootRunId == rootRunId || $0.rootRunId == requestedRunId }
+        historyReports.removeValue(forKey: rootRunId)
+        historyReports.removeValue(forKey: requestedRunId)
+        historyReportErrors.removeValue(forKey: rootRunId)
+        historyReportErrors.removeValue(forKey: requestedRunId)
+        if loadingHistoryRunID == rootRunId || loadingHistoryRunID == requestedRunId {
+            loadingHistoryRunID = nil
+        }
+
+        runs.removeAll { deletedRecordIDs.contains($0.id) }
+        tabs.removeAll { tab in
+            let selectsDeletedRecord = tab.selectedRunID.map(deletedRecordIDs.contains) ?? false
+            return selectsDeletedRecord
+                || tab.selectedHistoryRunID == rootRunId
+                || tab.selectedHistoryRunID == requestedRunId
+        }
+        if tabs.isEmpty {
+            let replacement = RunTab()
+            tabs = [replacement]
+            selectedTabID = replacement.id
+        } else if !tabs.contains(where: { $0.id == selectedTabID }) {
+            selectedTabID = tabs[0].id
+        }
+
+        for recordID in deletedRecordIDs {
+            resolvedInteractions.remove(recordID)
+            inspectionCacheMetadata.removeValue(forKey: recordID)
+        }
+        for runId in deletedRunIDs {
+            runToRoot.removeValue(forKey: runId)
+            eventGenerationByRunID.removeValue(forKey: runId)
+        }
+        recordByRoot.removeValue(forKey: rootRunId)
     }
 
     private func localHistoryMatches(_ query: String) -> [HistoryItem] {

@@ -1418,6 +1418,115 @@ done
         await client.shutdown()
     }
 
+    func testProtocol117RunDeletionUsesTypedTransportAndRequiresRuntimeInitialization() async throws {
+        let requestLog = temporaryFileURL(named: "run-delete-requests.log")
+        let executable = try makeRuntimeScript(#"""
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","pid":123}}'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
+  id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
+  method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
+  case "$method" in
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.17"}}' ;;
+    runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id" ;;
+    run/delete) printf '{"jsonrpc":"2.0","id":"%s","result":{"deleted":true,"rootRunId":"root-run"}}\n' "$id" ;;
+    runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
+    *) exit 91 ;;
+  esac
+done
+"""#)
+        let client = RuntimeClient(executableURL: executable, responseTimeout: .seconds(2))
+        try await client.start(notificationHandler: { _, _ in }, errorHandler: { _ in })
+
+        do {
+            _ = try await client.deleteRun("root-run")
+            XCTFail("Deletion must require runtime initialization")
+        } catch let error as RuntimeClientError {
+            XCTAssertEqual(error, .notInitialized("Agent runtime"))
+        }
+
+        _ = try await client.initializeRuntime()
+        let result = try await client.deleteRun("  root-run  ")
+        XCTAssertEqual(result, .init(deleted: true, rootRunId: "root-run"))
+
+        let requests = try String(contentsOf: requestLog, encoding: .utf8)
+            .split(separator: "\n")
+            .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+        let deletion = try XCTUnwrap(requests.first {
+            $0.objectValue?["method"] == .string("run/delete")
+        })
+        XCTAssertEqual(deletion.objectValue?["jsonrpc"], .string("2.0"))
+        XCTAssertNotNil(deletion.objectValue?["id"])
+        XCTAssertEqual(deletion.objectValue?["params"]?.objectValue?["runId"], .string("root-run"))
+        await client.shutdown()
+    }
+
+    @MainActor
+    func testDeletingMultipleRunsCleansSuccessfulRunStateAndReportsPartialFailure() async throws {
+        let workspace = try temporaryDirectoryURL()
+        let requestLog = temporaryFileURL(named: "app-run-delete-requests.log")
+        let executable = try makeRuntimeScript(#"""
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","pid":123}}'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
+  id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
+  method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
+  case "$method" in
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.17"}}' ;;
+    runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[]}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
+    run/delete)
+      case "$line" in
+        *root-a*) printf '{"jsonrpc":"2.0","id":"%s","result":{"deleted":true,"rootRunId":"root-a"}}\n' "$id" ;;
+        *) printf '{"jsonrpc":"2.0","id":"%s","error":{"code":-32000,"message":"Run is not terminal","data":{"protocolCode":"RUN_NOT_TERMINAL"}}}\n' "$id" ;;
+      esac
+      ;;
+    runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
+    *) exit 91 ;;
+  esac
+done
+"""#)
+        let model = AppModel(
+            client: RuntimeClient(executableURL: executable, responseTimeout: .seconds(2)),
+            workingDirectoryURL: workspace
+        )
+        model.bootstrap()
+        for _ in 0..<100 where !model.isConnected {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(model.isConnected, model.status)
+
+        let deletedRecordID = UUID()
+        let retainedRecordID = UUID()
+        model.runs = [
+            .init(id: deletedRecordID, kind: .run, title: "Delete me", runIds: ["root-a"], status: .succeeded),
+            .init(id: retainedRecordID, kind: .run, title: "Keep me", runIds: ["root-b"], status: .failed)
+        ]
+        model.openRunTab(deletedRecordID)
+        model.openRunTab(retainedRecordID)
+
+        model.deleteRuns(rootRunIDs: ["root-a", "root-b"])
+        for _ in 0..<100 where !model.deletingRunIDs.isEmpty {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+
+        XCTAssertNil(model.runs.first(where: { $0.id == deletedRecordID }))
+        XCTAssertNotNil(model.runs.first(where: { $0.id == retainedRecordID }))
+        XCTAssertNil(model.tabs.first(where: { $0.selectedRunID == deletedRecordID }))
+        XCTAssertNotNil(model.tabs.first(where: { $0.selectedRunID == retainedRecordID }))
+        XCTAssertTrue(model.runDeletionError?.contains("RUN_NOT_TERMINAL") == true)
+
+        let requests = try String(contentsOf: requestLog, encoding: .utf8)
+            .split(separator: "\n")
+            .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+        let deletedRunIDs = Set(requests.compactMap { request -> String? in
+            guard request.objectValue?["method"] == .string("run/delete") else { return nil }
+            return request.objectValue?["params"]?.objectValue?["runId"]?.stringValue
+        })
+        XCTAssertEqual(deletedRunIDs, ["root-a", "root-b"])
+        await model.shutdown()
+    }
+
     func testProtocolDiagnosticsRedactTokensRecursively() {
         let value: JSONValue = .object([
             "accessToken": .string("top-secret"),

@@ -229,6 +229,11 @@ struct AccessTokenUpdateResult: Codable, Equatable, Sendable {
     let updated: Bool
 }
 
+struct RunDeletionResult: Codable, Equatable, Sendable {
+    let deleted: Bool
+    let rootRunId: String
+}
+
 enum ProtocolRedactor {
     private static let sensitiveKeys = ["accesstoken", "authorization", "apikey", "token"]
 

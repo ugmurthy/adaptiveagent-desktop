@@ -70,6 +70,8 @@ New runs can include generic files, images, and audio when the connected runtime
 
 Runs and drafts open in app-level tabs above the detail pane. Tabs retain their own draft, chat composer, steering text, selected run, and scroll position while sharing the app's single runtime process. Closing a tab does not interrupt or remove its run; select that run in the history sidebar to reopen it. Background tabs continue showing run status and approval or clarification badges.
 
+Select one historical run, or Command-click multiple rows, then use the trash button or a row's **Delete Run…** context-menu action to permanently delete terminal run data through the typed protocol `1.17` `run/delete` method. The app confirms destructive deletion, closes tabs for successful deletions, refreshes persisted history, and reports any runs the runtime could not delete.
+
 When no run is selected, use the **Existing Run** field on the new-request screen to enter a run ID and invoke the same actions. The app attaches that ID as a tracked sidebar record so status changes, inspection output, and errors remain visible in the normal run detail. The ID must be available to the initialized runtime: runs from previous launches generally require Postgres, while memory-mode runs are available only for the lifetime of their runtime process.
 
 The standard **About AdaptiveAgent Desktop** panel displays the marketing version and build number configured in `project.yml`.

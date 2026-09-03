@@ -11,6 +11,9 @@ struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openSettings) private var openSettings
     @State private var inspectorPresented = false
+    @State private var sidebarSelections: Set<SidebarItemID> = []
+    @State private var pendingDeletionRunIDs: Set<String> = []
+    @State private var deletionConfirmationPresented = false
 
     var body: some View {
         NavigationSplitView {
@@ -37,7 +40,27 @@ struct ContentView: View {
         } message: {
             Text("One or more runs still need attention or are in progress. The agent runtime will be shut down before the app exits.")
         }
+        .confirmationDialog(
+            deletionConfirmationTitle,
+            isPresented: $deletionConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button(deletionConfirmationButtonTitle, role: .destructive) {
+                model.deleteRuns(rootRunIDs: pendingDeletionRunIDs)
+                sidebarSelections.subtract(sidebarItems(for: pendingDeletionRunIDs))
+                pendingDeletionRunIDs = []
+            }
+            Button("Cancel", role: .cancel) { pendingDeletionRunIDs = [] }
+        } message: {
+            Text("This permanently removes the selected run data. This action cannot be undone.")
+        }
+        .alert("Couldn’t Delete Runs", isPresented: runDeletionErrorPresented) {
+            Button("OK", action: model.clearRunDeletionError)
+        } message: {
+            Text(model.runDeletionError ?? "The selected runs could not be deleted.")
+        }
         .task { model.bootstrap() }
+        .onChange(of: model.selectedTabID) { _, _ in synchronizeSidebarSelection() }
     }
 
     private var runSidebar: some View {
@@ -59,12 +82,23 @@ struct ContentView: View {
                     .listRowSeparator(.hidden)
 
                     ForEach(recentRuns) { record in
-                        RunRow(record: record).tag(SidebarItemID.live(record.id))
+                        RunRow(record: record)
+                            .tag(SidebarItemID.live(record.id))
+                            .contextMenu {
+                                if let rootRunId = model.deletableRootRunID(for: record.id) {
+                                    deleteRunButton(rootRunId: rootRunId)
+                                }
+                            }
                     }
 
                     ForEach(visibleTraceHistory) { item in
-                        HistoryRunRow(item: item)
+                        HistoryRunRow(item: item, isDeleting: model.deletingRunIDs.contains(item.rootRunId))
                             .tag(SidebarItemID.history(item.rootRunId))
+                            .contextMenu {
+                                if item.allowsDeletion {
+                                    deleteRunButton(rootRunId: item.rootRunId)
+                                }
+                            }
                     }
 
                     historyStatusRow
@@ -90,6 +124,16 @@ struct ContentView: View {
                 }
                 .menuStyle(.borderlessButton)
                 Spacer()
+                Button(action: requestSelectedRunDeletion) {
+                    if selectedDeletionRunIDs.contains(where: model.deletingRunIDs.contains) {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "trash")
+                    }
+                }
+                .buttonStyle(.borderless)
+                .disabled(selectedDeletionRunIDs.isEmpty || !model.isConnected)
+                .help("Delete selected runs")
                 Text("\(activeRuns.count + recentRuns.count + visibleTraceHistory.count)")
                     .foregroundStyle(.tertiary)
                     .monospacedDigit()
@@ -124,6 +168,7 @@ struct ContentView: View {
                         .environmentObject(model)
                 }
             }
+            .id(model.selectedTabID)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
@@ -250,21 +295,91 @@ struct ContentView: View {
         }
     }
 
-    private var sidebarSelection: Binding<SidebarItemID?> {
+    private var sidebarSelection: Binding<Set<SidebarItemID>> {
         Binding(
-            get: {
-                if let recordID = model.selectedRunItemID { return .live(recordID) }
-                if let rootRunId = model.selectedHistoryRunID { return .history(rootRunId) }
-                return nil
-            },
-            set: { selection in
+            get: { sidebarSelections },
+            set: { selections in
+                let newlySelected = selections.subtracting(sidebarSelections)
+                sidebarSelections = selections
+                guard let selection = newlySelected.first else { return }
                 switch selection {
                 case .live(let recordID): model.openRunTab(recordID)
                 case .history(let rootRunId): model.openHistoryTab(rootRunId)
-                case nil: break
                 }
             }
         )
+    }
+
+    private var selectedDeletionRunIDs: Set<String> {
+        Set(sidebarSelections.compactMap { item in
+            switch item {
+            case .live(let recordID):
+                return model.deletableRootRunID(for: recordID)
+            case .history(let rootRunId):
+                guard model.historyItem(rootRunId: rootRunId)?.allowsDeletion != false else { return nil }
+                return rootRunId
+            }
+        })
+    }
+
+    private var deletionConfirmationTitle: String {
+        pendingDeletionRunIDs.count == 1 ? "Delete Run?" : "Delete \(pendingDeletionRunIDs.count) Runs?"
+    }
+
+    private var deletionConfirmationButtonTitle: String {
+        pendingDeletionRunIDs.count == 1 ? "Delete Run" : "Delete Runs"
+    }
+
+    private var runDeletionErrorPresented: Binding<Bool> {
+        Binding(
+            get: { model.runDeletionError != nil },
+            set: { if !$0 { model.clearRunDeletionError() } }
+        )
+    }
+
+    @ViewBuilder
+    private func deleteRunButton(rootRunId: String) -> some View {
+        Button("Delete Run…", systemImage: "trash", role: .destructive) {
+            let selected = selectedDeletionRunIDs
+            pendingDeletionRunIDs = selected.contains(rootRunId) ? selected : [rootRunId]
+            deletionConfirmationPresented = true
+        }
+        .disabled(model.deletingRunIDs.contains(rootRunId) || !model.isConnected)
+    }
+
+    private func requestSelectedRunDeletion() {
+        pendingDeletionRunIDs = selectedDeletionRunIDs
+        deletionConfirmationPresented = !pendingDeletionRunIDs.isEmpty
+    }
+
+    private func sidebarItems(for rootRunIDs: Set<String>) -> Set<SidebarItemID> {
+        Set(sidebarSelections.filter { item in
+            switch item {
+            case .live(let recordID):
+                guard let rootRunId = model.deletableRootRunID(for: recordID) else { return false }
+                return rootRunIDs.contains(rootRunId)
+            case .history(let rootRunId):
+                return rootRunIDs.contains(rootRunId)
+            }
+        })
+    }
+
+    private func synchronizeSidebarSelection() {
+        let selectedItem: SidebarItemID?
+        if let recordID = model.selectedRunItemID {
+            selectedItem = .live(recordID)
+        } else if let rootRunId = model.selectedHistoryRunID {
+            selectedItem = .history(rootRunId)
+        } else {
+            selectedItem = nil
+        }
+        guard let selectedItem else {
+            sidebarSelections = []
+            return
+        }
+        if !sidebarSelections.contains(selectedItem) {
+            sidebarSelections = [selectedItem]
+        }
     }
 
     private var historySearchBinding: Binding<String> {
@@ -513,12 +628,19 @@ private struct HistorySearchField: View {
 
 private struct HistoryRunRow: View {
     let item: AppModel.HistoryItem
+    let isDeleting: Bool
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: item.systemImage)
-                .foregroundStyle(statusColor)
-                .frame(width: 18)
+            if isDeleting {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 18)
+            } else {
+                Image(systemName: item.systemImage)
+                    .foregroundStyle(statusColor)
+                    .frame(width: 18)
+            }
             VStack(alignment: .leading, spacing: 3) {
                 Text(item.title).lineLimit(2)
                 HStack(spacing: 5) {
@@ -554,6 +676,13 @@ private struct HistoryRunRow: View {
 private extension AppModel.HistoryItem {
     var systemImage: String {
         type == "chat" ? "bubble.left.and.bubble.right.fill" : "play.fill"
+    }
+
+    var allowsDeletion: Bool {
+        ![
+            "queued", "planning", "running", "awaiting_subagent",
+            "awaiting_approval", "clarification_requested"
+        ].contains(status.lowercased())
     }
 }
 

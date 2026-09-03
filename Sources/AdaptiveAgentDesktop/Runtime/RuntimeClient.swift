@@ -240,6 +240,15 @@ actor RuntimeClient {
         return try decodeResult(result, as: AccessTokenUpdateResult.self, method: "auth/updateAccessToken")
     }
 
+    func deleteRun(_ runId: String) async throws -> RunDeletionResult {
+        let runId = runId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !runId.isEmpty else {
+            throw RuntimeClientError.protocolViolation("run ID must not be empty")
+        }
+        let result = try await send(method: "run/delete", params: ["runId": .string(runId)])
+        return try decodeResult(result, as: RunDeletionResult.self, method: "run/delete")
+    }
+
     func send(
         method: String,
         params: [String: JSONValue] = [:],
