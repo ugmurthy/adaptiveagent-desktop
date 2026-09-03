@@ -1,13 +1,13 @@
 # AdaptiveAgent Desktop
 
-A restrained macOS 14+ SwiftUI vertical slice for the local AdaptiveAgent runtime. The app supervises a bundled `agent-runtime` process and communicates exclusively over protocol `1.16` using JSON-RPC 2.0 NDJSON on stdin/stdout. Filesystem access, agent loading, tools, providers, and Postgres runtime semantics remain in the runtime process.
+A restrained macOS 14+ SwiftUI vertical slice for the local AdaptiveAgent runtime. The app supervises a bundled `agent-runtime` process and communicates exclusively over protocol `1.17` using JSON-RPC 2.0 NDJSON on stdin/stdout. Filesystem access, agent loading, tools, providers, and Postgres runtime semantics remain in the runtime process.
 
 ## Requirements
 
 - macOS 14 or newer and Xcode 16+
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`)
 - A local Postgres instance and valid `DATABASE_URL` when settings explicitly select the Postgres runtime
-- A protocol `1.16` standalone `agent-runtime` executable
+- A protocol `1.17` standalone `agent-runtime` executable
 
 ## Install the runtime bridge
 
@@ -66,7 +66,7 @@ The settings override field may be left blank. During initialization the runtime
 
 Choose a workspace directory and agent profile JSON, connect, and then start a run or send a session chat message. The event pane receives incremental `agent/event` notifications. Run results expose approval and clarification controls when requested, plus steering and a **Run Actions** menu with inspect, resume, retry, recover, continue, and interrupt operations.
 
-New runs can include generic files when the connected runtime reports managed attachment support. The app imports each selection into a private Application Support snapshot before submission, sends only relative descriptors over JSON-RPC, and retains submitted snapshots for runtime retry and recovery. Attachments are limited to 10 MiB each, 8 files, and 40 MiB total. Text is still required, and chat attachments are not supported.
+New runs can include generic files, images, and audio when the connected runtime advertises each managed attachment kind. The app validates selected media, imports it into a private Application Support snapshot, sends only relative descriptors over JSON-RPC, and retains submitted snapshots for runtime retry and recovery. Runtime-advertised limits are enforced up to the app's maximums of 10 MiB each, 8 attachments, and 40 MiB total. Text is still required, and chat attachments are not supported.
 
 Runs and drafts open in app-level tabs above the detail pane. Tabs retain their own draft, chat composer, steering text, selected run, and scroll position while sharing the app's single runtime process. Closing a tab does not interrupt or remove its run; select that run in the history sidebar to reopen it. Background tabs continue showing run status and approval or clarification badges.
 
@@ -80,7 +80,7 @@ The standard **About AdaptiveAgent Desktop** panel displays the marketing versio
 - `TraceSessionClient` independently supervises the optional read-only
   `trace-session-sidecar` helper over its protocol `1.0`. Its failure disables
   persisted history only and never changes agent execution.
-- Startup requires a JSON-RPC `runtime/ready` notification, protocol `1.16` negotiation with `initialize`, and then a separate `runtime/initialize` before agent operations.
+- Startup requires a JSON-RPC `runtime/ready` notification, protocol `1.17` negotiation with `initialize`, and then a separate `runtime/initialize` before agent operations.
 - `AppModel` is main-actor isolated and translates UI actions into typed JSON-RPC methods. It reads only the non-secret runtime, model-selection, and interaction fields needed to seed editable `runtime/initialize` overrides.
 - The Swift renderer does not read agent profiles or other workspace contents and has no cloud behavior. It ignores secret-related settings fields; native file panels otherwise select paths only, and the runtime process performs runtime and filesystem behavior.
 - Runtime stderr is captured separately and displayed as diagnostic event entries; it is never parsed as protocol traffic.

@@ -1,6 +1,8 @@
+import AudioToolbox
 import CryptoKit
 import Darwin
 import Foundation
+import ImageIO
 import UniformTypeIdentifiers
 
 enum AttachmentStoreError: LocalizedError, Equatable {
@@ -9,6 +11,9 @@ enum AttachmentStoreError: LocalizedError, Equatable {
     case fileTooLarge(String)
     case tooManyFiles
     case submissionTooLarge
+    case unsupportedKind(AttachmentKind)
+    case unsupportedType(String, AttachmentKind)
+    case mediaTypeMismatch(String, AttachmentKind)
     case storageFailure(String)
 
     var errorDescription: String? {
@@ -23,6 +28,12 @@ enum AttachmentStoreError: LocalizedError, Equatable {
             return "A run can include at most 8 attachments."
         case .submissionTooLarge:
             return "Attachments can total at most 40 MiB per run."
+        case .unsupportedKind(let kind):
+            return "The runtime does not accept \(kind.displayName.lowercased()) attachments."
+        case .unsupportedType(let name, let kind):
+            return "\(name) is not a supported \(kind.displayName.lowercased()) type."
+        case .mediaTypeMismatch(let name, let kind):
+            return "\(name) does not contain valid \(kind.displayName.lowercased()) data matching its file type."
         case .storageFailure(let message):
             return "Could not store attachment: \(message)"
         }
@@ -94,18 +105,31 @@ actor AttachmentStore {
         }
     }
 
-    func importFiles(_ sourceURLs: [URL], existing: [AttachmentDescriptor]) throws -> [AttachmentDescriptor] {
-        guard existing.count + sourceURLs.count <= Self.maximumAttachmentCount else {
+    func importFiles(
+        _ sourceURLs: [URL],
+        existing: [AttachmentDescriptor],
+        kind: AttachmentKind = .file,
+        capabilities: AttachmentCapabilities? = nil
+    ) throws -> [AttachmentDescriptor] {
+        if let capabilities, !capabilities.acceptedKinds.contains(kind) {
+            throw AttachmentStoreError.unsupportedKind(kind)
+        }
+        let maximumCount = min(capabilities?.maxAttachmentCount ?? Self.maximumAttachmentCount, Self.maximumAttachmentCount)
+        guard existing.count + sourceURLs.count <= maximumCount else {
             throw AttachmentStoreError.tooManyFiles
         }
         var totalBytes = existing.reduce(Int64(0)) { $0 + $1.sizeBytes }
+        let maximumSubmissionBytes = min(
+            capabilities?.maxSubmissionBytes ?? Self.maximumSubmissionBytes,
+            Self.maximumSubmissionBytes
+        )
         var imported: [AttachmentDescriptor] = []
         do {
             for sourceURL in sourceURLs {
-                let descriptor = try importFile(sourceURL)
+                let descriptor = try importFile(sourceURL, kind: kind, capabilities: capabilities)
                 imported.append(descriptor)
                 totalBytes += descriptor.sizeBytes
-                guard totalBytes <= Self.maximumSubmissionBytes else {
+                guard totalBytes <= maximumSubmissionBytes else {
                     throw AttachmentStoreError.submissionTooLarge
                 }
             }
@@ -129,6 +153,30 @@ actor AttachmentStore {
         }
     }
 
+    func validate(_ descriptors: [AttachmentDescriptor], capabilities: AttachmentCapabilities) throws {
+        guard descriptors.count <= min(capabilities.maxAttachmentCount, Self.maximumAttachmentCount) else {
+            throw AttachmentStoreError.tooManyFiles
+        }
+        guard descriptors.reduce(Int64(0), { $0 + $1.sizeBytes }) <= min(capabilities.maxSubmissionBytes, Self.maximumSubmissionBytes) else {
+            throw AttachmentStoreError.submissionTooLarge
+        }
+        for descriptor in descriptors {
+            guard capabilities.acceptedKinds.contains(descriptor.kind) else {
+                throw AttachmentStoreError.unsupportedKind(descriptor.kind)
+            }
+            guard descriptor.sizeBytes <= min(capabilities.maxFileBytes, Self.maximumFileBytes) else {
+                throw AttachmentStoreError.fileTooLarge(descriptor.name)
+            }
+            try validateAdvertisedType(
+                name: descriptor.name,
+                kind: descriptor.kind,
+                mimeType: descriptor.mimeType,
+                audioFormat: descriptor.audioFormat,
+                capabilities: capabilities
+            )
+        }
+    }
+
     func removeDraft(_ descriptor: AttachmentDescriptor) throws {
         try remove(descriptor, ownership: .draft)
     }
@@ -145,7 +193,11 @@ actor AttachmentStore {
         try fileManager.removeItem(at: directory)
     }
 
-    private func importFile(_ sourceURL: URL) throws -> AttachmentDescriptor {
+    private func importFile(
+        _ sourceURL: URL,
+        kind: AttachmentKind,
+        capabilities: AttachmentCapabilities?
+    ) throws -> AttachmentDescriptor {
         let displayName = sourceURL.lastPathComponent.isEmpty ? "attachment" : sourceURL.lastPathComponent
         var sourceInfo = stat()
         guard lstat(sourceURL.path, &sourceInfo) == 0,
@@ -159,7 +211,8 @@ actor AttachmentStore {
         guard fstat(sourceFD, &sourceInfo) == 0, (sourceInfo.st_mode & S_IFMT) == S_IFREG else {
             throw AttachmentStoreError.invalidFile(displayName)
         }
-        guard sourceInfo.st_size <= Self.maximumFileBytes else {
+        let maximumFileBytes = min(capabilities?.maxFileBytes ?? Self.maximumFileBytes, Self.maximumFileBytes)
+        guard sourceInfo.st_size <= maximumFileBytes else {
             throw AttachmentStoreError.fileTooLarge(displayName)
         }
 
@@ -180,17 +233,31 @@ actor AttachmentStore {
             let descriptor: AttachmentDescriptor
             do {
                 let result = try copyAndHash(sourceFD: sourceFD, destinationFD: destinationFD, name: displayName)
+                guard result.sizeBytes <= maximumFileBytes else {
+                    throw AttachmentStoreError.fileTooLarge(displayName)
+                }
                 guard fsync(destinationFD) == 0 else {
                     throw AttachmentStoreError.storageFailure("could not flush managed snapshot")
                 }
+                let media = try detectedType(for: destination, kind: kind)
+                if let capabilities {
+                    try validateAdvertisedType(
+                        name: displayName,
+                        kind: kind,
+                        mimeType: media.mimeType,
+                        audioFormat: media.audioFormat,
+                        capabilities: capabilities
+                    )
+                }
                 descriptor = AttachmentDescriptor(
                     attachmentId: attachmentID,
-                    kind: "file",
+                    kind: kind,
                     stagedRelativePath: "\(attachmentID)/\(name)",
                     name: name,
-                    mimeType: genericMIMEType(for: sourceURL),
+                    mimeType: media.mimeType,
                     sizeBytes: result.sizeBytes,
-                    sha256: result.sha256
+                    sha256: result.sha256,
+                    audioFormat: media.audioFormat
                 )
             } catch {
                 close(destinationFD)
@@ -233,10 +300,98 @@ actor AttachmentStore {
         return result.isEmpty || result == "." || result == ".." ? "attachment" : result
     }
 
+    private func detectedType(
+        for url: URL,
+        kind: AttachmentKind
+    ) throws -> (mimeType: String?, audioFormat: AttachmentAudioFormat?) {
+        switch kind {
+        case .file:
+            return (genericMIMEType(for: url), nil)
+        case .image:
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  CGImageSourceGetCount(source) > 0,
+                  let identifier = CGImageSourceGetType(source) as String?,
+                  let mimeType = UTType(identifier)?.preferredMIMEType else {
+                throw AttachmentStoreError.mediaTypeMismatch(url.lastPathComponent, kind)
+            }
+            if let extensionType = UTType(filenameExtension: url.pathExtension),
+               extensionType.conforms(to: .image),
+               let extensionMIME = extensionType.preferredMIMEType,
+               normalizedImageMIME(extensionMIME) != normalizedImageMIME(mimeType) {
+                throw AttachmentStoreError.mediaTypeMismatch(url.lastPathComponent, kind)
+            }
+            return (normalizedImageMIME(mimeType), nil)
+        case .audio:
+            var audioFile: AudioFileID?
+            guard AudioFileOpenURL(url as CFURL, .readPermission, 0, &audioFile) == noErr,
+                  let audioFile else {
+                throw AttachmentStoreError.mediaTypeMismatch(url.lastPathComponent, kind)
+            }
+            defer { AudioFileClose(audioFile) }
+            var fileType: AudioFileTypeID = 0
+            var size = UInt32(MemoryLayout<AudioFileTypeID>.size)
+            guard AudioFileGetProperty(audioFile, kAudioFilePropertyFileFormat, &size, &fileType) == noErr,
+                  let detected = audioType(fileType) else {
+                throw AttachmentStoreError.mediaTypeMismatch(url.lastPathComponent, kind)
+            }
+            if let extensionFormat = audioFormat(forExtension: url.pathExtension),
+               extensionFormat != detected.audioFormat {
+                throw AttachmentStoreError.mediaTypeMismatch(url.lastPathComponent, kind)
+            }
+            return detected
+        }
+    }
+
+    private func validateAdvertisedType(
+        name: String,
+        kind: AttachmentKind,
+        mimeType: String?,
+        audioFormat: AttachmentAudioFormat?,
+        capabilities: AttachmentCapabilities
+    ) throws {
+        switch kind {
+        case .file:
+            guard let mimeType, capabilities.supportedGenericMimeTypes.contains(mimeType) else {
+                throw AttachmentStoreError.unsupportedType(name, kind)
+            }
+        case .image:
+            guard let mimeType, capabilities.supportedImageMimeTypes?.contains(mimeType) == true else {
+                throw AttachmentStoreError.unsupportedType(name, kind)
+            }
+        case .audio:
+            guard let mimeType,
+                  capabilities.supportedAudioMimeTypes?.contains(mimeType) == true,
+                  let audioFormat,
+                  capabilities.supportedAudioFormats?.contains(audioFormat) == true else {
+                throw AttachmentStoreError.unsupportedType(name, kind)
+            }
+        }
+    }
+
     private func genericMIMEType(for url: URL) -> String {
-        let detected = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType
-        let supported = ["application/octet-stream", "application/pdf", "text/plain", "application/json"]
-        return detected.flatMap { supported.contains($0) ? $0 : nil } ?? "application/octet-stream"
+        UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+    }
+
+    private func normalizedImageMIME(_ mimeType: String) -> String {
+        mimeType == "image/jpg" ? "image/jpeg" : mimeType
+    }
+
+    private func audioFormat(forExtension pathExtension: String) -> AttachmentAudioFormat? {
+        let value = pathExtension.lowercased()
+        return value == "wave" ? .wav : AttachmentAudioFormat(rawValue: value)
+    }
+
+    private func audioType(_ fileType: AudioFileTypeID) -> (mimeType: String, audioFormat: AttachmentAudioFormat)? {
+        switch fileType {
+        case kAudioFileWAVEType: return ("audio/wav", .wav)
+        case kAudioFileMP3Type: return ("audio/mpeg", .mp3)
+        case kAudioFileFLACType: return ("audio/flac", .flac)
+        case kAudioFileM4AType, kAudioFileMPEG4Type: return ("audio/mp4", .m4a)
+        case kAudioFileAAC_ADTSType: return ("audio/aac", .aac)
+        case 0x4F676753: return ("audio/ogg", .ogg) // 'OggS'
+        case kAudioFileAIFFType, kAudioFileAIFCType: return ("audio/aiff", .aiff)
+        default: return nil
+        }
     }
 
     private func directoryURL(for descriptor: AttachmentDescriptor) -> URL {

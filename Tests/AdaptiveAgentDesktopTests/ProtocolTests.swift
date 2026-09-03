@@ -46,15 +46,31 @@ final class ProtocolTests: XCTestCase {
     func testAttachmentDescriptorEncodingAndOptionalRuntimeCapabilities() throws {
         let descriptor = AttachmentDescriptor(
             attachmentId: "attachment-1",
-            kind: "file",
+            kind: .image,
             stagedRelativePath: "attachment-1/report.pdf",
             name: "report.pdf",
             mimeType: "application/pdf",
             sizeBytes: 123,
-            sha256: String(repeating: "a", count: 64)
+            sha256: String(repeating: "a", count: 64),
+            audioFormat: .wav
         )
         XCTAssertEqual(descriptor.protocolValue.objectValue?["stagedRelativePath"], .string("attachment-1/report.pdf"))
         XCTAssertEqual(descriptor.protocolValue.objectValue?["sizeBytes"], .number(123))
+        XCTAssertEqual(descriptor.protocolValue.objectValue?["kind"], .string("image"))
+        XCTAssertNil(descriptor.protocolValue.objectValue?["audioFormat"])
+
+        let audio = AttachmentDescriptor(
+            attachmentId: "attachment-2",
+            kind: .audio,
+            stagedRelativePath: "attachment-2/recording.mp3",
+            name: "recording.mp3",
+            mimeType: "audio/mpeg",
+            sizeBytes: 456,
+            sha256: String(repeating: "b", count: 64),
+            audioFormat: .mp3
+        )
+        XCTAssertEqual(audio.protocolValue.objectValue?["kind"], .string("audio"))
+        XCTAssertEqual(audio.protocolValue.objectValue?["audioFormat"], .string("mp3"))
 
         let fixture = JSONValue.object([
             "agent": .object(["id": .string("default"), "name": .string("Default")]),
@@ -67,14 +83,33 @@ final class ProtocolTests: XCTestCase {
                 "maxFileBytes": .number(10 * 1024 * 1024),
                 "maxAttachmentCount": .number(8),
                 "maxSubmissionBytes": .number(40 * 1024 * 1024),
-                "acceptedKinds": .array([.string("file")]),
+                "acceptedKinds": .array([.string("file"), .string("image"), .string("audio")]),
+                "supportedImageMimeTypes": .array([.string("image/png")]),
+                "supportedAudioMimeTypes": .array([.string("audio/mpeg")]),
+                "supportedAudioFormats": .array([.string("mp3")]),
                 "supportedGenericMimeTypes": .array([.string("application/pdf")]),
-                "routing": .object(["taskGeneric": .string("direct"), "chatGeneric": .string("direct")])
+                "routing": .object([
+                    "taskGeneric": .string("direct"), "chatGeneric": .string("direct"),
+                    "taskImage": .string("direct"), "taskAudio": .string("direct"),
+                    "chatImage": .string("direct"), "chatAudio": .string("direct")
+                ])
             ])
         ])
         let decoded = try fixture.decode(RuntimeInitializationResult.self)
         XCTAssertEqual(decoded.attachments?.enabled, true)
         XCTAssertEqual(decoded.attachments?.maxAttachmentCount, 8)
+        XCTAssertEqual(decoded.attachments?.supportedAudioFormats, [.mp3])
+
+        var legacyFields = try XCTUnwrap(fixture.objectValue?["attachments"]?.objectValue)
+        legacyFields.removeValue(forKey: "supportedImageMimeTypes")
+        legacyFields.removeValue(forKey: "supportedAudioMimeTypes")
+        legacyFields.removeValue(forKey: "supportedAudioFormats")
+        var legacyFixture = try XCTUnwrap(fixture.objectValue)
+        legacyFixture["attachments"] = .object(legacyFields)
+        let legacy = try JSONValue.object(legacyFixture).decode(RuntimeInitializationResult.self)
+        XCTAssertNil(legacy.attachments?.supportedImageMimeTypes)
+        XCTAssertNil(legacy.attachments?.supportedAudioMimeTypes)
+        XCTAssertNil(legacy.attachments?.supportedAudioFormats)
 
         var withoutCapabilities = try XCTUnwrap(fixture.objectValue)
         withoutCapabilities.removeValue(forKey: "attachments")
@@ -90,7 +125,7 @@ final class ProtocolTests: XCTestCase {
 
         let imported = try await store.importFiles([source], existing: [])
         let descriptor = try XCTUnwrap(imported.first)
-        XCTAssertEqual(descriptor.kind, "file")
+        XCTAssertEqual(descriptor.kind, .file)
         XCTAssertEqual(descriptor.name, "quarterly_report.txt")
         XCTAssertEqual(descriptor.sizeBytes, 5)
         XCTAssertEqual(descriptor.sha256, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
@@ -124,7 +159,7 @@ final class ProtocolTests: XCTestCase {
 
         let dummy = (0..<AttachmentStore.maximumAttachmentCount).map { index in
             AttachmentDescriptor(
-                attachmentId: "id-\(index)", kind: "file", stagedRelativePath: "id-\(index)/f",
+                attachmentId: "id-\(index)", kind: .file, stagedRelativePath: "id-\(index)/f",
                 name: "f", mimeType: nil, sizeBytes: 1, sha256: String(repeating: "0", count: 64)
             )
         }
@@ -141,6 +176,55 @@ final class ProtocolTests: XCTestCase {
             guard case .fileTooLarge = error as? AttachmentStoreError else {
                 return XCTFail("expected fileTooLarge, got \(error)")
             }
+        }
+    }
+
+    func testAttachmentStoreInfersAndValidatesImageAndAudioMedia() async throws {
+        let base = try temporaryDirectoryURL()
+        let store = try AttachmentStore(rootURL: base.appendingPathComponent("managed", isDirectory: true))
+        let image = base.appendingPathComponent("pixel.png")
+        try Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")!.write(to: image)
+        let audio = base.appendingPathComponent("silence.wav")
+        try waveData().write(to: audio)
+        let capabilities = try mediaAttachmentCapabilities()
+
+        let images = try await store.importFiles([image], existing: [], kind: .image, capabilities: capabilities)
+        XCTAssertEqual(images.first?.kind, .image)
+        XCTAssertEqual(images.first?.mimeType, "image/png")
+        XCTAssertNil(images.first?.audioFormat)
+
+        let audioFiles = try await store.importFiles([audio], existing: images, kind: .audio, capabilities: capabilities)
+        XCTAssertEqual(audioFiles.first?.kind, .audio)
+        XCTAssertEqual(audioFiles.first?.mimeType, "audio/wav")
+        XCTAssertEqual(audioFiles.first?.audioFormat, .wav)
+
+        let disguised = base.appendingPathComponent("not-an-image.png")
+        try Data("not image data".utf8).write(to: disguised)
+        await assertThrows({
+            try await store.importFiles([disguised], existing: [], kind: .image, capabilities: capabilities)
+        }) { error in
+            guard case .mediaTypeMismatch = error as? AttachmentStoreError else {
+                return XCTFail("expected mediaTypeMismatch, got \(error)")
+            }
+        }
+
+        let fileOnly = try JSONDecoder().decode(
+            AttachmentCapabilities.self,
+            from: Data(#"{"enabled":true,"maxFileBytes":10485760,"maxAttachmentCount":8,"maxSubmissionBytes":41943040,"acceptedKinds":["file"],"supportedGenericMimeTypes":["application/json"]}"#.utf8)
+        )
+        await assertThrows({
+            try await store.importFiles([image], existing: [], kind: .image, capabilities: fileOnly)
+        }) { error in
+            XCTAssertEqual(error as? AttachmentStoreError, .unsupportedKind(.image))
+        }
+
+        var unsupportedImageFields = try XCTUnwrap(try JSONValue.encode(capabilities).objectValue)
+        unsupportedImageFields["supportedImageMimeTypes"] = .array([.string("image/jpeg")])
+        let unsupportedImage = try JSONValue.object(unsupportedImageFields).decode(AttachmentCapabilities.self)
+        await assertThrows({
+            try await store.importFiles([image], existing: [], kind: .image, capabilities: unsupportedImage)
+        }) { error in
+            XCTAssertEqual(error as? AttachmentStoreError, .unsupportedType("pixel.png", .image))
         }
     }
 
@@ -161,11 +245,11 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testReadyNotificationRequiresNoIDAndExactStringVersion() throws {
-        let message = try ProtocolCodec.decodeMessage(Data(#"{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":12}}"#.utf8))
-        XCTAssertEqual(message, .ready(RuntimeReady(protocolVersion: "1.16", bridgeVersion: "0.1.0", pid: 12)))
+        let message = try ProtocolCodec.decodeMessage(Data(#"{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","pid":12}}"#.utf8))
+        XCTAssertEqual(message, .ready(RuntimeReady(protocolVersion: "1.17", bridgeVersion: "0.1.0", pid: 12)))
 
-        XCTAssertThrowsError(try ProtocolCodec.decodeMessage(Data(#"{"jsonrpc":"2.0","id":"ready","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":12}}"#.utf8)))
-        XCTAssertThrowsError(try ProtocolCodec.decodeMessage(Data(#"{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":1.16,"bridgeVersion":"0.1.0","pid":12}}"#.utf8)))
+        XCTAssertThrowsError(try ProtocolCodec.decodeMessage(Data(#"{"jsonrpc":"2.0","id":"ready","method":"runtime/ready","params":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","pid":12}}"#.utf8)))
+        XCTAssertThrowsError(try ProtocolCodec.decodeMessage(Data(#"{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":1.17,"bridgeVersion":"0.1.0","pid":12}}"#.utf8)))
     }
 
     func testResponsesPreserveIDTypesAndDecodeProtocolErrorCode() throws {
@@ -242,17 +326,17 @@ final class ProtocolTests: XCTestCase {
         """#.write(to: settings, atomically: true, encoding: .utf8)
         let requestLog = temporaryFileURL(named: "app-model-requests.log")
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}' ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.17"}}' ;;
     runtime/initialize)
       printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":["write_file"]}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path))
       ;;
-    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s","connections":{"sqlite":{"configured":true,"state":"connected"},"gateway":{"configured":false,"state":"not_configured"}}}}\n' "$id" \#(shellQuote(workspace.path)) ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s","connections":{"sqlite":{"configured":true,"state":"connected"},"gateway":{"configured":false,"state":"not_configured"}}}}\n' "$id" \#(shellQuote(workspace.path)) ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
     *) exit 91 ;;
   esac
@@ -284,6 +368,10 @@ done
         }
         XCTAssertTrue(model.isConnected, model.status)
         XCTAssertFalse(model.attachmentsEnabled, "Fixtures without attachment capabilities must remain text-only")
+        XCTAssertFalse(model.attachmentEnabled(for: .image))
+        XCTAssertFalse(model.attachmentEnabled(for: .audio))
+        XCTAssertTrue(model.attachmentUnavailableReason(for: .image)?.contains("does not report") == true)
+        XCTAssertTrue(model.attachmentUnavailableReason(for: .audio)?.contains("does not report") == true)
         XCTAssertEqual(model.agentName, "Default Agent")
         XCTAssertEqual(model.effectiveWorkspaceRoot, workspace.path)
 
@@ -318,16 +406,16 @@ done
         let workspace = try temporaryDirectoryURL()
         let requestLog = temporaryFileURL(named: "app-model-auth-requests.log")
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}' ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.17"}}' ;;
     auth/updateAccessToken) printf '{"jsonrpc":"2.0","id":"%s","result":{"updated":true}}\n' "$id" ;;
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[],"inferenceMode":"gateway","inferenceTier":"high"}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
-    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop","version":"1.0.2"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s","inferenceMode":"gateway","inferenceTier":"high","connections":{"sqlite":{"configured":true,"state":"connected"},"gateway":{"configured":true,"state":"connected"}}}}\n' "$id" \#(shellQuote(workspace.path)) ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop","version":"1.0.2"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s","inferenceMode":"gateway","inferenceTier":"high","connections":{"sqlite":{"configured":true,"state":"connected"},"gateway":{"configured":true,"state":"connected"}}}}\n' "$id" \#(shellQuote(workspace.path)) ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
     *) exit 91 ;;
   esac
@@ -384,22 +472,22 @@ done
     }
 
     @MainActor
-    func testAppModelSendsProtocol116RunIdentityAndChatTranscript() async throws {
+    func testAppModelSendsProtocol117RunIdentityAndChatTranscript() async throws {
         let workspace = try temporaryDirectoryURL()
         let unavailableAttachmentRoot = workspace.appendingPathComponent("not-a-directory")
         try Data("occupied".utf8).write(to: unavailableAttachmentRoot)
-        let requestLog = temporaryFileURL(named: "protocol-116-agent-requests.log")
+        let requestLog = temporaryFileURL(named: "protocol-117-agent-requests.log")
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   run_id="$(printf '%s' "$line" | sed -E 's/.*"runId":"([^"]+)".*/\1/')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}' ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.17"}}' ;;
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[]}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
-    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
     agent/run) printf '{"jsonrpc":"2.0","id":"%s","result":{"status":"success","runId":"%s","output":"Done"}}\n' "$id" "$run_id" ;;
     agent/chat) printf '{"jsonrpc":"2.0","id":"%s","result":{"status":"success","runId":"%s","output":"Reply"}}\n' "$id" "$run_id" ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
@@ -482,18 +570,22 @@ done
         let managedRoot = try temporaryDirectoryURL().appendingPathComponent("managed", isDirectory: true)
         let source = workspace.appendingPathComponent("input.json")
         try Data(#"{"value":1}"#.utf8).write(to: source)
+        let image = workspace.appendingPathComponent("pixel.png")
+        try Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")!.write(to: image)
+        let audio = workspace.appendingPathComponent("silence.wav")
+        try waveData().write(to: audio)
         let requestLog = temporaryFileURL(named: "attachment-requests.log")
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   run_id="$(printf '%s' "$line" | sed -E 's/.*"runId":"([^"]+)".*/\1/')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}' ;;
-    runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[],"attachments":{"enabled":true,"maxFileBytes":10485760,"maxAttachmentCount":8,"maxSubmissionBytes":41943040,"acceptedKinds":["file"],"supportedGenericMimeTypes":["application/json"],"routing":{"taskGeneric":"direct","chatGeneric":"direct"}}}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
-    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.17"}}' ;;
+    runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[],"attachments":{"enabled":true,"maxFileBytes":10485760,"maxAttachmentCount":8,"maxSubmissionBytes":41943040,"acceptedKinds":["file","image","audio"],"supportedImageMimeTypes":["image/png"],"supportedAudioMimeTypes":["audio/wav"],"supportedAudioFormats":["wav"],"supportedGenericMimeTypes":["application/json"],"routing":{"taskGeneric":"direct","chatGeneric":"direct","taskImage":"direct","taskAudio":"direct","chatImage":"direct","chatAudio":"direct"}}}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
     agent/run|agent/chat) printf '{"jsonrpc":"2.0","id":"%s","result":{"status":"success","runId":"%s","output":"Done"}}\n' "$id" "$run_id" ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
     *) exit 91 ;;
@@ -508,11 +600,15 @@ done
         model.bootstrap()
         for _ in 0..<100 where !model.attachmentsEnabled { try? await Task.sleep(for: .milliseconds(20)) }
         XCTAssertTrue(model.attachmentsEnabled, model.attachmentUnavailableReason ?? model.status)
+        XCTAssertTrue(model.attachmentEnabled(for: .image))
+        XCTAssertTrue(model.attachmentEnabled(for: .audio))
 
         let runTabID = try XCTUnwrap(model.selectedTabID)
         await model.importAttachments([source], forTab: runTabID)
-        XCTAssertEqual(model.selectedTab?.draftAttachments.count, 1)
-        model.setDraftText("Read the attachment", forTab: runTabID)
+        await model.importAttachments([image], kind: .image, forTab: runTabID)
+        await model.importAttachments([audio], kind: .audio, forTab: runTabID)
+        XCTAssertEqual(model.selectedTab?.draftAttachments.map(\.kind), [.file, .image, .audio])
+        model.setDraftText("Read the attachments", forTab: runTabID)
         model.submitDraft(in: runTabID)
         for _ in 0..<100 where model.runs.first?.status != .succeeded { try? await Task.sleep(for: .milliseconds(20)) }
         XCTAssertEqual(model.runs.first?.attachments.first?.name, "input.json")
@@ -534,11 +630,19 @@ done
         guard case .array(let attachments) = run.objectValue?["params"]?.objectValue?["attachments"] else {
             return XCTFail("agent/run attachments missing")
         }
-        let sent = try XCTUnwrap(attachments.first?.objectValue)
-        XCTAssertEqual(sent["kind"], .string("file"))
-        XCTAssertEqual(sent["name"], .string("input.json"))
-        XCTAssertFalse(try XCTUnwrap(sent["stagedRelativePath"]?.stringValue).hasPrefix("/"))
-        XCTAssertNil(run.objectValue?["params"]?.objectValue?["path"])
+        XCTAssertEqual(attachments.count, 3)
+        let sent = try attachments.map { try XCTUnwrap($0.objectValue) }
+        XCTAssertEqual(sent.map { $0["kind"] }, [.string("file"), .string("image"), .string("audio")])
+        XCTAssertEqual(sent.map { $0["name"] }, [.string("input.json"), .string("pixel.png"), .string("silence.wav")])
+        XCTAssertEqual(sent.map { $0["mimeType"] }, [.string("application/json"), .string("image/png"), .string("audio/wav")])
+        XCTAssertNil(sent[0]["audioFormat"])
+        XCTAssertNil(sent[1]["audioFormat"])
+        XCTAssertEqual(sent[2]["audioFormat"], .string("wav"))
+        XCTAssertTrue(sent.allSatisfy { $0["stagedRelativePath"]?.stringValue?.hasPrefix("/") == false })
+        let runParams = try XCTUnwrap(run.objectValue?["params"]?.objectValue)
+        XCTAssertEqual(runParams["goal"], .string("Read the attachments"))
+        XCTAssertNotNil(runParams["runId"]?.stringValue)
+        XCTAssertEqual(Set(runParams.keys), ["runId", "goal", "attachments"])
         let chat = try XCTUnwrap(requests.first { $0.objectValue?["method"] == .string("agent/chat") })
         XCTAssertNil(chat.objectValue?["params"]?.objectValue?["attachments"])
         await model.shutdown()
@@ -585,15 +689,15 @@ done
             .write(to: replacementSettings, atomically: true, encoding: .utf8)
         let requestLog = temporaryFileURL(named: "typed-settings-requests.log")
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}' ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.17"}}' ;;
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[]}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
-    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
     *) exit 91 ;;
   esac
@@ -692,15 +796,15 @@ done
         let workspace = try temporaryDirectoryURL()
         let requestLog = temporaryFileURL(named: "entered-run-action-requests.log")
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}' ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.17"}}' ;;
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[]}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
-    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
     run/inspect) printf '{"jsonrpc":"2.0","id":"%s","result":{"run":{"id":"persisted-run","status":"running"},"events":[]}}\n' "$id" ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
     *) exit 91 ;;
@@ -1219,12 +1323,12 @@ done
         let pwdLog = temporaryFileURL(named: "pwd.txt")
         let executable = try makeRuntimeScript(#"""
 pwd > \#(shellQuote(pwdLog.path))
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}' ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.17"}}' ;;
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id" ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
     *) exit 91 ;;
@@ -1245,12 +1349,12 @@ done
 
     func testLongRunningAgentRequestCanDisableTheStandardResponseTimeout() async throws {
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}' ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.17"}}' ;;
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id" ;;
     agent/run) sleep 0.15; printf '{"jsonrpc":"2.0","id":"%s","result":{"status":"success","runId":"slow-run","output":"Done"}}\n' "$id" ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
@@ -1270,18 +1374,18 @@ done
         await client.shutdown()
     }
 
-    func testProtocol116AuthUpdateAndRuntimeInfoUseTypedTransport() async throws {
+    func testProtocol117AuthUpdateAndRuntimeInfoUseTypedTransport() async throws {
         let requestLog = temporaryFileURL(named: "auth-info-requests.log")
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}' ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.17"}}' ;;
     auth/updateAccessToken) printf '{"jsonrpc":"2.0","id":"%s","result":{"updated":true}}\n' "$id" ;;
-    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop","version":"1.0.2"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"/workspace","inferenceMode":"gateway","inferenceTier":"medium","connections":{"sqlite":{"configured":false,"state":"not_configured"},"gateway":{"configured":true,"state":"connected"}}}}\n' "$id" ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop","version":"1.0.2"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"/workspace","inferenceMode":"gateway","inferenceTier":"medium","connections":{"sqlite":{"configured":false,"state":"not_configured"},"gateway":{"configured":true,"state":"connected"}}}}\n' "$id" ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
     *) exit 91 ;;
   esac
@@ -1293,7 +1397,7 @@ done
         let tokenUpdate = try await client.updateAccessToken("secret-access-token")
         XCTAssertEqual(tokenUpdate, .init(updated: true))
         let info = try await client.runtimeInfo()
-        XCTAssertEqual(info.protocolVersion, "1.16")
+        XCTAssertEqual(info.protocolVersion, "1.17")
         XCTAssertTrue(info.initialized)
         XCTAssertEqual(info.inferenceMode, "gateway")
         XCTAssertEqual(info.inferenceTier, "medium")
@@ -1340,14 +1444,14 @@ done
         let executable = try makeRuntimeScript(#"""
 printf '%s' '{"jsonrpc":"2.0","method":"runtime/'
 sleep 0.05
-printf '%s\n' 'ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' 'ready","params":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> \#(shellQuote(logURL.path))
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
     initialize)
-      printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","capabilities":{}}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","capabilities":{}}}'
       ;;
     runtime/initialize)
       printf '{"jsonrpc":"2.0","id":"%s","result":{"runtimeMode":"postgres"}}\n' "$id"
@@ -1393,7 +1497,7 @@ done
         XCTAssertEqual(initialize.objectValue?["jsonrpc"], .string("2.0"))
         XCTAssertEqual(initialize.objectValue?["id"], .string("initialize"))
         XCTAssertEqual(initialize.objectValue?["method"], .string("initialize"))
-        XCTAssertEqual(initialize.objectValue?["params"]?.objectValue?["protocolVersion"], .string("1.16"))
+        XCTAssertEqual(initialize.objectValue?["params"]?.objectValue?["protocolVersion"], .string("1.17"))
 
         do {
             _ = try await client.send(method: "agent/run", params: ["runId": .string("early-run"), "goal": .string("too early")])
@@ -1456,9 +1560,9 @@ done
 
     func testOutOfOrderResponsesAreCorrelatedByID() async throws {
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","pid":123}}'
 IFS= read -r line
-printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.17"}}'
 IFS= read -r line
 id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
 printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"
@@ -1488,12 +1592,12 @@ printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"
 
     func testSlowNotificationHandlerDoesNotDelayFollowingResponse() async throws {
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","pid":123}}'
 while IFS= read -r line; do
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
   case "$method" in
-    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}' ;;
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.17"}}' ;;
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id" ;;
     runtime/info)
       printf '%s\n' '{"jsonrpc":"2.0","method":"agent/event","params":{"schemaVersion":1,"type":"run.started","runId":"run-1"}}'
@@ -1544,9 +1648,9 @@ sleep 5
 
     func testLegacyOperationalMessageIsRejected() async throws {
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","pid":123}}'
 IFS= read -r line
-printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.17"}}'
 IFS= read -r line
 printf '%s\n' '{"version":1,"id":"old","type":"response","ok":true,"result":{}}'
 sleep 5
@@ -1577,9 +1681,9 @@ sleep 5
 
     func testUnexpectedRuntimeTerminationFailsPendingRequest() async throws {
         let executable = try makeRuntimeScript(#"""
-printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.16","bridgeVersion":"0.1.0","pid":123}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","pid":123}}'
 IFS= read -r line
-printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.16"}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.17"}}'
 IFS= read -r line
 exit 7
 """#)
@@ -1751,6 +1855,38 @@ exit 9
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         return url
+    }
+
+    private func mediaAttachmentCapabilities() throws -> AttachmentCapabilities {
+        try JSONDecoder().decode(
+            AttachmentCapabilities.self,
+            from: Data(#"{"enabled":true,"maxFileBytes":10485760,"maxAttachmentCount":8,"maxSubmissionBytes":41943040,"acceptedKinds":["file","image","audio"],"supportedImageMimeTypes":["image/png","image/jpeg","image/webp","image/gif"],"supportedAudioMimeTypes":["audio/wav","audio/x-wav","audio/mpeg","audio/flac","audio/mp4","audio/ogg","audio/aac","audio/aiff"],"supportedAudioFormats":["wav","mp3","flac","m4a","ogg","aac","aiff","pcm16","pcm24"],"supportedGenericMimeTypes":["application/octet-stream","application/pdf","text/plain","application/json"],"routing":{"taskGeneric":"direct","chatGeneric":"direct","taskImage":"direct","taskAudio":"direct","chatImage":"direct","chatAudio":"direct"}}"#.utf8)
+        )
+    }
+
+    private func waveData() -> Data {
+        var data = Data()
+        func appendASCII(_ value: String) { data.append(contentsOf: value.utf8) }
+        func appendUInt16(_ value: UInt16) {
+            withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
+        }
+        func appendUInt32(_ value: UInt32) {
+            withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
+        }
+        appendASCII("RIFF")
+        appendUInt32(38)
+        appendASCII("WAVEfmt ")
+        appendUInt32(16)
+        appendUInt16(1)
+        appendUInt16(1)
+        appendUInt32(8_000)
+        appendUInt32(16_000)
+        appendUInt16(2)
+        appendUInt16(16)
+        appendASCII("data")
+        appendUInt32(2)
+        appendUInt16(0)
+        return data
     }
 
     private func toolCompletedEvent(

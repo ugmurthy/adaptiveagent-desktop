@@ -14,11 +14,11 @@ object per line to stdout and reserves stderr for diagnostics. Requests may run
 concurrently, so clients must correlate responses by `id` and process
 notifications independently.
 
-The bridge currently exposes protocol `1.16` over JSON-RPC 2.0. There is no
+The bridge currently exposes protocol `1.17` over JSON-RPC 2.0. There is no
 legacy custom-envelope compatibility: every request must use JSON-RPC,
 including before initialization.
 
-Protocol `1.16` is intentionally a string. Protocol versions are identifiers
+Protocol `1.17` is intentionally a string. Protocol versions are identifiers
 and must not be represented as JSON numbers.
 
 At startup the bridge emits this JSON-RPC notification:
@@ -27,11 +27,11 @@ At startup the bridge emits this JSON-RPC notification:
 {
   "jsonrpc": "2.0",
   "method": "runtime/ready",
-  "params": { "protocolVersion": "1.16", "bridgeVersion": "0.1.0", "pid": 1234 }
+  "params": { "protocolVersion": "1.17", "bridgeVersion": "0.1.0", "pid": 1234 }
 }
 ```
 
-## Protocol 1.16 handshake
+## Protocol 1.17 handshake
 
 The first JSON-RPC request must negotiate the protocol. Once successful, the
 connection is sticky: subsequent input and agent events use JSON-RPC only.
@@ -42,7 +42,7 @@ connection is sticky: subsequent input and agent events use JSON-RPC only.
   "id": "initialize",
   "method": "initialize",
   "params": {
-    "protocolVersion": "1.16",
+    "protocolVersion": "1.17",
     "clientInfo": { "name": "adaptive-agent-desktop", "version": "1.0.0" },
     "capabilities": {}
   }
@@ -56,7 +56,7 @@ The result advertises supported methods, notifications, and CLI commands:
   "jsonrpc": "2.0",
   "id": "initialize",
   "result": {
-    "protocolVersion": "1.16",
+    "protocolVersion": "1.17",
     "bridgeVersion": "0.1.0",
     "serverInfo": {
       "name": "@adaptive-agent/desktop-bridge",
@@ -109,7 +109,8 @@ database connection.
     "approvalMode": "manual",
     "clarificationMode": "interactive",
     "inferenceMode": "byok",
-    "inferenceTier": "medium"
+    "inferenceTier": "medium",
+    "managedAttachmentRoot": "/private/application-support/ManagedAttachments"
   }
 }
 ```
@@ -123,11 +124,11 @@ steering, and in-memory run state.
 | Method                             | Required params                      | Optional params                                                                                                         |
 | ---------------------------------- | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
 | `initialize`                       | `protocolVersion`, `clientInfo.name` | `clientInfo.version`, `capabilities`                                                                                    |
-| `runtime/initialize`               | -                                    | `cwd`, `agentConfigPath`, `settingsConfigPath`, `runtimeMode`, `provider`, `model`, `approvalMode`, `clarificationMode`, `inferenceMode`, `inferenceTier` |
+| `runtime/initialize`               | -                                    | `cwd`, `agentConfigPath`, `settingsConfigPath`, `runtimeMode`, `provider`, `model`, `approvalMode`, `clarificationMode`, `inferenceMode`, `inferenceTier`, `managedAttachmentRoot` |
 | `runtime/info`                     | -                                    | -                                                                                                                       |
 | `runtime/shutdown`                 | -                                    | -                                                                                                                       |
 | `auth/updateAccessToken`           | `accessToken`                        | -                                                                                                                       |
-| `agent/run`                        | `runId`, `goal`                      | `sessionId`, `input`                                                                                                    |
+| `agent/run`                        | `runId`, `goal`                      | `sessionId`, `input`, `attachments`                                                                                     |
 | `agent/chat`                       | `runId`, `transcript`                | `sessionId`                                                                                                             |
 | `run/resume`                       | `runId`                              | -                                                                                                                       |
 | `run/retry`                        | `runId`                              | -                                                                                                                       |
@@ -151,11 +152,36 @@ Example run request:
   "method": "agent/run",
   "params": {
     "runId": "018f2b8e-7b9a-7bb0-9a2d-0f47fddbd304",
-    "goal": "Summarize this repository",
-    "sessionId": "desktop-session"
+    "goal": "Describe and transcribe these attachments",
+    "attachments": [
+      {
+        "attachmentId": "018f2b8e-7b9a-7bb0-9a2d-0f47fddbd305",
+        "kind": "image",
+        "stagedRelativePath": "018f2b8e-7b9a-7bb0-9a2d-0f47fddbd305/photo.png",
+        "name": "photo.png",
+        "mimeType": "image/png",
+        "sizeBytes": 12345,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "attachmentId": "018f2b8e-7b9a-7bb0-9a2d-0f47fddbd306",
+        "kind": "audio",
+        "stagedRelativePath": "018f2b8e-7b9a-7bb0-9a2d-0f47fddbd306/recording.mp3",
+        "name": "recording.mp3",
+        "mimeType": "audio/mpeg",
+        "sizeBytes": 23456,
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "audioFormat": "mp3"
+      }
+    ]
   }
 }
 ```
+
+Managed attachment descriptors use `kind` values `file`, `image`, or `audio`.
+`audioFormat` is optional, audio-only, and accepts `wav`, `mp3`, `flac`, `m4a`,
+`ogg`, `aac`, `aiff`, `pcm16`, or `pcm24`. Clients must validate advertised
+attachment capabilities and send only paths relative to `managedAttachmentRoot`.
 
 Events are notifications and have no `id`:
 
@@ -241,7 +267,7 @@ Postgres runtime for cross-process inspection and recovery.
 
 ## Errors
 
-Protocol 1.16 uses standard JSON-RPC codes and includes a stable protocol code in
+Protocol 1.17 uses standard JSON-RPC codes and includes a stable protocol code in
 `error.data.protocolCode`.
 
 | JSON-RPC code | Meaning                                       |
@@ -265,7 +291,7 @@ ids may be strings or finite numbers and are echoed without coercion.
 ```sh
 bun run compile
 printf '%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1.16","clientInfo":{"name":"smoke"}}}' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1.17","clientInfo":{"name":"smoke"}}}' \
   '{"jsonrpc":"2.0","id":2,"method":"cli/execute","params":{"argv":["--version"]}}' \
   | dist/agent-runtime
 ```

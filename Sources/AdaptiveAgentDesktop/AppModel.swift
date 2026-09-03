@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Foundation
+import UniformTypeIdentifiers
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -158,6 +159,7 @@ final class AppModel: ObservableObject {
 
     struct SubmittedAttachment: Identifiable, Equatable {
         let id: String
+        let kind: AttachmentKind
         let name: String
         let sizeBytes: Int64
     }
@@ -327,21 +329,44 @@ final class AppModel: ObservableObject {
     var isWaitingForRunIdentity: Bool { !pendingRootAssignments.isEmpty }
 
     var attachmentsEnabled: Bool {
-        isConnected
-            && attachmentStore != nil
-            && attachmentCapabilities?.enabled == true
-            && attachmentCapabilities?.acceptedKinds.contains("file") == true
+        attachmentEnabled(for: .file)
     }
 
     var attachmentUnavailableReason: String? {
+        attachmentUnavailableReason(for: .file)
+    }
+
+    func attachmentEnabled(for kind: AttachmentKind) -> Bool {
+        attachmentUnavailableReason(for: kind) == nil
+    }
+
+    func attachmentUnavailableReason(for kind: AttachmentKind) -> String? {
         if let localAttachmentStoreError { return localAttachmentStoreError }
-        guard isConnected else { return "Connect to the runtime to attach files." }
-        guard let attachmentCapabilities else { return "This runtime does not report file attachment support." }
-        guard attachmentCapabilities.enabled else {
-            return attachmentCapabilities.reason ?? "File attachments are disabled by the runtime."
+        guard isConnected else { return "Connect to the runtime to attach \(kind.displayName.lowercased())s." }
+        guard attachmentStore != nil else { return "Attachment storage is unavailable." }
+        guard let attachmentCapabilities else {
+            return "This runtime does not report \(kind.displayName.lowercased()) attachment support."
         }
-        guard attachmentCapabilities.acceptedKinds.contains("file") else {
-            return "This runtime does not accept generic file attachments."
+        guard attachmentCapabilities.enabled else {
+            return attachmentCapabilities.reason ?? "Attachments are disabled by the runtime."
+        }
+        guard attachmentCapabilities.acceptedKinds.contains(kind) else {
+            return "This runtime does not accept \(kind.displayName.lowercased()) attachments."
+        }
+        switch kind {
+        case .file:
+            guard !attachmentCapabilities.supportedGenericMimeTypes.isEmpty else {
+                return "The runtime did not advertise any supported generic file types."
+            }
+        case .image:
+            guard attachmentCapabilities.supportedImageMimeTypes?.isEmpty == false else {
+                return "The runtime did not advertise any supported image types."
+            }
+        case .audio:
+            guard attachmentCapabilities.supportedAudioMimeTypes?.isEmpty == false,
+                  attachmentCapabilities.supportedAudioFormats?.isEmpty == false else {
+                return "The runtime did not advertise supported audio types and formats."
+            }
         }
         return nil
     }
@@ -673,8 +698,8 @@ final class AppModel: ObservableObject {
         update(&tabs[index])
     }
 
-    func chooseAttachments(forTab tabID: UUID) {
-        guard attachmentsEnabled,
+    func chooseAttachments(kind: AttachmentKind, forTab tabID: UUID) {
+        guard attachmentEnabled(for: kind),
               let tab = tab(withID: tabID),
               tab.draftKind == .run,
               !tab.isImportingAttachments else { return }
@@ -683,13 +708,19 @@ final class AppModel: ObservableObject {
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = true
         panel.resolvesAliases = false
+        panel.allowedContentTypes = allowedContentTypes(for: kind)
         guard panel.runModal() == .OK else { return }
-        Task { await importAttachments(panel.urls, forTab: tabID) }
+        Task { await importAttachments(panel.urls, kind: kind, forTab: tabID) }
     }
 
-    func importAttachments(_ urls: [URL], forTab tabID: UUID) async {
-        guard attachmentsEnabled,
+    func importAttachments(
+        _ urls: [URL],
+        kind: AttachmentKind = .file,
+        forTab tabID: UUID
+    ) async {
+        guard attachmentEnabled(for: kind),
               let attachmentStore,
+              let attachmentCapabilities,
               let index = tabs.firstIndex(where: { $0.id == tabID && $0.selectedRunID == nil }),
               tabs[index].draftKind == .run,
               !tabs[index].isImportingAttachments,
@@ -698,7 +729,12 @@ final class AppModel: ObservableObject {
         tabs[index].attachmentErrorMessage = nil
         let existing = tabs[index].draftAttachments
         do {
-            let imported = try await attachmentStore.importFiles(urls, existing: existing)
+            let imported = try await attachmentStore.importFiles(
+                urls,
+                existing: existing,
+                kind: kind,
+                capabilities: attachmentCapabilities
+            )
             guard let currentIndex = tabs.firstIndex(where: {
                 $0.id == tabID && $0.selectedRunID == nil && $0.draftKind == .run
             }) else {
@@ -715,9 +751,27 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func allowedContentTypes(for kind: AttachmentKind) -> [UTType] {
+        guard let attachmentCapabilities else { return [] }
+        let mimeTypes: [String]
+        switch kind {
+        case .file:
+            if attachmentCapabilities.supportedGenericMimeTypes.contains("application/octet-stream") {
+                return [.data]
+            }
+            mimeTypes = attachmentCapabilities.supportedGenericMimeTypes
+        case .image:
+            mimeTypes = attachmentCapabilities.supportedImageMimeTypes ?? []
+        case .audio:
+            mimeTypes = attachmentCapabilities.supportedAudioMimeTypes ?? []
+        }
+        return Array(Set(mimeTypes.compactMap { UTType(mimeType: $0) }))
+    }
+
     func removeAttachment(_ descriptor: AttachmentDescriptor, fromTab tabID: UUID) {
         guard let index = tabs.firstIndex(where: { $0.id == tabID && $0.selectedRunID == nil }),
               tabs[index].draftAttachments.contains(descriptor),
+              !tabs[index].isSubmittingDraft,
               let attachmentStore else { return }
         tabs[index].draftAttachments.removeAll { $0 == descriptor }
         tabs[index].attachmentErrorMessage = nil
@@ -739,10 +793,6 @@ final class AppModel: ObservableObject {
         guard isConnected, !text.isEmpty, !isWaitingForRunIdentity,
               !tabs[tabIndex].isImportingAttachments, !tabs[tabIndex].isSubmittingDraft else { return }
         guard kind == .run || attachments.isEmpty else { return }
-        guard attachments.isEmpty || attachmentsEnabled else {
-            tabs[tabIndex].attachmentErrorMessage = attachmentUnavailableReason
-            return
-        }
         if attachments.isEmpty {
             finishDraftSubmission(in: tabID, kind: kind, text: text, attachments: [])
             return
@@ -752,7 +802,10 @@ final class AppModel: ObservableObject {
 
         Task {
             do {
-                guard let attachmentStore else { throw AttachmentStoreError.unavailable }
+                guard let attachmentStore, let attachmentCapabilities else {
+                    throw AttachmentStoreError.unavailable
+                }
+                try await attachmentStore.validate(attachments, capabilities: attachmentCapabilities)
                 try await attachmentStore.markOwned(attachments)
                 if !finishDraftSubmission(in: tabID, kind: kind, text: text, attachments: attachments) {
                     try? await attachmentStore.discardOwned(attachments)
@@ -785,7 +838,9 @@ final class AppModel: ObservableObject {
             title: title(for: text),
             sessionId: sessionId,
             status: .queued,
-            attachments: attachments.map { SubmittedAttachment(id: $0.attachmentId, name: $0.name, sizeBytes: $0.sizeBytes) },
+            attachments: attachments.map {
+                SubmittedAttachment(id: $0.attachmentId, kind: $0.kind, name: $0.name, sizeBytes: $0.sizeBytes)
+            },
             isRequestInFlight: true
         )
         if kind == .chat {

@@ -711,28 +711,28 @@ private struct AttachmentDraftView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Button("Add Files", systemImage: "paperclip") {
-                    model.chooseAttachments(forTab: tabID)
+                ForEach(AttachmentKind.allCases, id: \.self) { kind in
+                    Button("Add \(kind.displayName)", systemImage: kind.systemImage) {
+                        model.chooseAttachments(kind: kind, forTab: tabID)
+                    }
+                    .disabled(
+                        !model.attachmentEnabled(for: kind)
+                            || (tab?.isImportingAttachments ?? false)
+                            || (tab?.draftAttachments.count ?? 0) >= maximumAttachmentCount
+                    )
+                    .help(
+                        model.attachmentUnavailableReason(for: kind)
+                            ?? "Add \(kind.displayName.lowercased()) attachments to this run"
+                    )
                 }
-                .disabled(
-                    !model.attachmentsEnabled
-                        || (tab?.isImportingAttachments ?? false)
-                        || (tab?.draftAttachments.count ?? 0) >= AttachmentStore.maximumAttachmentCount
-                )
-                .help(model.attachmentUnavailableReason ?? "Attach up to 8 files to this run")
 
                 if tab?.isImportingAttachments == true {
                     ProgressView().controlSize(.small)
                     Text("Importing secure snapshots…")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                } else if let reason = model.attachmentUnavailableReason {
-                    Text(reason)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
                 } else {
-                    Text("10 MiB each · 8 files · 40 MiB total")
+                    Text(limitSummary)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -744,7 +744,9 @@ private struct AttachmentDraftView: View {
                     HStack(spacing: 7) {
                         ForEach(attachments) { attachment in
                             HStack(spacing: 6) {
-                                Image(systemName: "doc")
+                                Image(systemName: attachment.kind.systemImage)
+                                Text(attachment.kind.displayName)
+                                    .foregroundStyle(.secondary)
                                 Text(attachment.name).lineLimit(1)
                                 Text(Self.formattedSize(attachment.sizeBytes))
                                     .foregroundStyle(.secondary)
@@ -754,6 +756,7 @@ private struct AttachmentDraftView: View {
                                     Image(systemName: "xmark.circle.fill")
                                 }
                                 .buttonStyle(.plain)
+                                .disabled(tab?.isSubmittingDraft == true)
                                 .accessibilityLabel("Remove \(attachment.name)")
                             }
                             .font(.caption)
@@ -775,6 +778,20 @@ private struct AttachmentDraftView: View {
 
     static func formattedSize(_ sizeBytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: sizeBytes, countStyle: .file)
+    }
+
+    private var maximumAttachmentCount: Int {
+        min(model.attachmentCapabilities?.maxAttachmentCount ?? AttachmentStore.maximumAttachmentCount,
+            AttachmentStore.maximumAttachmentCount)
+    }
+
+    private var limitSummary: String {
+        guard let capabilities = model.attachmentCapabilities else {
+            return "Connect to see attachment availability"
+        }
+        let fileSize = Self.formattedSize(min(capabilities.maxFileBytes, AttachmentStore.maximumFileBytes))
+        let totalSize = Self.formattedSize(min(capabilities.maxSubmissionBytes, AttachmentStore.maximumSubmissionBytes))
+        return "\(fileSize) each · \(maximumAttachmentCount) attachments · \(totalSize) total"
     }
 }
 
@@ -1298,7 +1315,9 @@ private struct SubmittedAttachmentsView: View {
             Text("ATTACHMENTS").sectionLabel()
             ForEach(attachments) { attachment in
                 HStack(spacing: 8) {
-                    Image(systemName: "doc")
+                    Image(systemName: attachment.kind.systemImage)
+                        .foregroundStyle(.secondary)
+                    Text(attachment.kind.displayName)
                         .foregroundStyle(.secondary)
                     Text(attachment.name)
                         .lineLimit(1)

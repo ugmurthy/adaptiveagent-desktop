@@ -19,12 +19,12 @@ In this repository:
 - Do not introduce or restore a legacy Sidecar service, sidecar framework,
   sidecar-specific API, HTTP server, WebSocket transport, or XPC protocol.
 - The Swift application launches agent-runtime as a managed child process.
-- Communication with that process exclusively uses protocol "1.16", which
+- Communication with that process exclusively uses protocol "1.17", which
   uses JSON-RPC 2.0 over newline-delimited stdin/stdout.
-- Protocol "1.16" is the only supported protocol version.
+- Protocol "1.17" is the only supported protocol version.
 - Do not emit, accept, or depend on the removed protocol-v1
   { "version", "id", "type" } envelope, including during startup.
-- Do not fall back to protocol v1 when protocol "1.16" negotiation fails.
+- Do not fall back to protocol v1 when protocol "1.17" negotiation fails.
   Report an incompatible-runtime error instead.
 - Treat a legacy-shaped message from the runtime as an incompatible-runtime or
   protocol error rather than attempting to decode it.
@@ -61,11 +61,11 @@ Required startup sequence
 
 1. Launch the bundled agent-runtime executable.
 2. Read its JSON-RPC runtime/ready notification.
-3. Verify that params.protocolVersion is exactly the string "1.16".
+3. Verify that params.protocolVersion is exactly the string "1.17".
 4. If the version is missing or unsupported, terminate the process and report
    an incompatible-runtime error. Do not attempt a protocol-v1 fallback.
 5. Send the JSON-RPC initialize request shown below.
-6. Verify that the successful response selects protocol "1.16".
+6. Verify that the successful response selects protocol "1.17".
 7. Send runtime/initialize.
 8. Only after both initialization operations succeed, issue methods that
    require the persistent agent runtime, such as agent/run.
@@ -78,13 +78,13 @@ The startup message is a JSON-RPC notification. It has no request id:
 "jsonrpc": "2.0",
 "method": "runtime/ready",
 "params": {
-"protocolVersion": "1.16",
+"protocolVersion": "1.17",
 "bridgeVersion": "0.1.0",
 "pid": 1234
 }
 }
 
-The first outbound request must negotiate protocol "1.16" using JSON-RPC
+The first outbound request must negotiate protocol "1.17" using JSON-RPC
 2.0:
 
 {
@@ -92,7 +92,7 @@ The first outbound request must negotiate protocol "1.16" using JSON-RPC
 "id": "initialize",
 "method": "initialize",
 "params": {
-"protocolVersion": "1.16",
+"protocolVersion": "1.17",
 "clientInfo": {
 "name": "<Swift application name>",
 "version": "<application version>"
@@ -101,7 +101,7 @@ The first outbound request must negotiate protocol "1.16" using JSON-RPC
 }
 }
 
-protocolVersion must be the JSON string "1.16", never the number 1.16.
+protocolVersion must be the JSON string "1.17", never the number 1.17.
 Protocol versions are identifiers and must not be represented as JSON numbers.
 
 After protocol negotiation, initialize the persistent agent runtime separately:
@@ -216,10 +216,16 @@ Prefer typed JSON-RPC methods for persistent desktop operations:
 - interaction/resolveApproval
 - interaction/resolveClarification
 
-Protocol 1.16 requires the Swift client to assign a non-empty runId for every
+Protocol 1.17 requires the Swift client to assign a non-empty runId for every
 agent/run and agent/chat request. agent/chat sends the complete non-empty
 transcript rather than a singular message. interaction/resolveApproval sends
 the approvalId received in the approval result or event payload.
+
+New agent/run submissions may include managed attachment descriptors with kind
+file, image, or audio when advertised by runtime/initialize capabilities.
+audioFormat is optional, valid only for audio, and supports wav, mp3, flac,
+m4a, ogg, aac, aiff, pcm16, and pcm24. Keep descriptor paths relative to
+managedAttachmentRoot; never send attachment bytes or absolute paths.
 
 Use cli/execute only for non-interactive CLI functionality that has no typed
 JSON-RPC method. Do not use cli/execute as the normal implementation of run,
@@ -238,12 +244,16 @@ Tests must cover:
 
 - Parsing the initial JSON-RPC runtime/ready notification.
 - Verifying that runtime/ready.params.protocolVersion is exactly the string
-  "1.16".
+  "1.17".
 - Verifying that runtime/ready has no id.
-- Negotiating protocol "1.16" as a string.
+- Negotiating protocol "1.17" as a string.
 - Sending auth/updateAccessToken only after protocol initialization and
   decoding its typed { "updated": true } response.
 - Encoding typed runtime/initialize fields and decoding typed runtime/info.
+- Encoding file, image, and audio run attachment descriptors, including the
+  audio-only audioFormat field, while preserving text-only and chat behavior.
+- Validating attachment kinds, MIME types, audio formats, and limits against
+  runtime-advertised capabilities before agent/run submission.
 - Redacting access tokens and authorization/API-key values from diagnostics.
 - Ensuring every outbound request contains "jsonrpc": "2.0" and an id.
 - Rejecting or surfacing unsupported protocol versions without protocol-v1

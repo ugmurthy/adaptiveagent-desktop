@@ -33,7 +33,7 @@ easy to follow, intervention is easy to find, and past work is easy to reopen.
   current app process.
 - The trace-session executable already exposes a separate, read-only NDJSON
   JSON-RPC 2.0 interface. Its protocol is `1.0`; this must not be confused with
-  the agent runtime process, whose only supported protocol remains `1.16`.
+  the agent runtime process, whose only supported protocol remains `1.17`.
 
 ## 3. Proposed experience
 
@@ -282,7 +282,7 @@ The initial historical detail displays:
 
 Historical tabs must not show steering, approvals, clarification, interrupt, or
 recovery controls. An explicit **Open in Runtime** action may attach the root ID
-through the existing protocol-1.16 flow and invoke `run/inspect`; only then may
+through the existing protocol-1.17 flow and invoke `run/inspect`; only then may
 runtime-owned actions appear.
 
 Important contract: the current trace-session projection intentionally removes
@@ -304,7 +304,7 @@ messages by default. Therefore:
 │                                                                     │
 │  Sidebar/RunDetail ───────▶ AppModel live run state                 │
 │          │                            │                              │
-│          │                            ▼ protocol 1.16                │
+│          │                            ▼ protocol 1.17                │
 │          │                   ┌─────────────────────┐                 │
 │          │                   │ agent runtime       │                 │
 │          │                   │ execute/control     │                 │
@@ -341,7 +341,7 @@ Add these focused types rather than expanding `RuntimeClient`:
 - `CompactToolActivityView`: shared compact/expanded rendering for live and
   historical activity sources.
 
-Keep `RuntimeClient` exclusively responsible for agent-runtime protocol `1.16`.
+Keep `RuntimeClient` exclusively responsible for agent-runtime protocol `1.17`.
 Do not share protocol-version constants between the two clients.
 
 ### 4.2 Process startup and target selection
@@ -354,7 +354,7 @@ existing agent-runtime scripts and generate the Xcode project from
 
 Start order:
 
-1. Start and initialize agent runtime protocol `1.16`.
+1. Start and initialize agent runtime protocol `1.17`.
 2. Complete `runtime/initialize`.
 3. Read the resolved runtime mode from `runtime/info`.
 4. For SQLite, decode `connections.sqlite.path` and launch trace-session with
@@ -498,7 +498,7 @@ This phase is independent of trace-session and should ship first.
 - Timeout, oversized response, malformed response, and unexpected termination
   fail history only.
 - Shutdown waits for its response before closing stdin.
-- No trace client code emits or accepts agent-runtime protocol `1.16` messages,
+- No trace client code emits or accepts agent-runtime protocol `1.17` messages,
   and no `RuntimeClient` code emits trace protocol `1.0` messages.
 
 ### History

@@ -75,27 +75,83 @@ struct RuntimeInitializationParameters: Codable, Equatable, Sendable {
     }
 }
 
+enum AttachmentKind: String, Codable, CaseIterable, Equatable, Hashable, Sendable {
+    case file
+    case image
+    case audio
+
+    var displayName: String {
+        switch self {
+        case .file: return "File"
+        case .image: return "Image"
+        case .audio: return "Audio"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .file: return "doc"
+        case .image: return "photo"
+        case .audio: return "waveform"
+        }
+    }
+}
+
+enum AttachmentAudioFormat: String, Codable, CaseIterable, Equatable, Hashable, Sendable {
+    case wav
+    case mp3
+    case flac
+    case m4a
+    case ogg
+    case aac
+    case aiff
+    case pcm16
+    case pcm24
+}
+
 struct AttachmentDescriptor: Codable, Equatable, Hashable, Identifiable, Sendable {
     var id: String { attachmentId }
 
     let attachmentId: String
-    let kind: String
+    let kind: AttachmentKind
     let stagedRelativePath: String
     let name: String
     let mimeType: String?
     let sizeBytes: Int64
     let sha256: String
+    let audioFormat: AttachmentAudioFormat?
+
+    init(
+        attachmentId: String,
+        kind: AttachmentKind,
+        stagedRelativePath: String,
+        name: String,
+        mimeType: String?,
+        sizeBytes: Int64,
+        sha256: String,
+        audioFormat: AttachmentAudioFormat? = nil
+    ) {
+        self.attachmentId = attachmentId
+        self.kind = kind
+        self.stagedRelativePath = stagedRelativePath
+        self.name = name
+        self.mimeType = mimeType
+        self.sizeBytes = sizeBytes
+        self.sha256 = sha256
+        self.audioFormat = kind == .audio ? audioFormat : nil
+    }
 
     var protocolValue: JSONValue {
         var fields: [String: JSONValue] = [
             "attachmentId": .string(attachmentId),
-            "kind": .string(kind),
+            "kind": .string(kind.rawValue),
             "stagedRelativePath": .string(stagedRelativePath),
             "name": .string(name),
             "sizeBytes": .number(Double(sizeBytes)),
             "sha256": .string(sha256)
         ]
         if let mimeType { fields["mimeType"] = .string(mimeType) }
+        if let audioFormat { fields["audioFormat"] = .string(audioFormat.rawValue) }
         return .object(fields)
     }
 }
@@ -104,13 +160,20 @@ struct AttachmentCapabilities: Codable, Equatable, Sendable {
     struct Routing: Codable, Equatable, Sendable {
         let taskGeneric: String?
         let chatGeneric: String?
+        let taskImage: String?
+        let taskAudio: String?
+        let chatImage: String?
+        let chatAudio: String?
     }
 
     let enabled: Bool
     let maxFileBytes: Int64
     let maxAttachmentCount: Int
     let maxSubmissionBytes: Int64
-    let acceptedKinds: [String]
+    let acceptedKinds: [AttachmentKind]
+    let supportedImageMimeTypes: [String]?
+    let supportedAudioMimeTypes: [String]?
+    let supportedAudioFormats: [AttachmentAudioFormat]?
     let supportedGenericMimeTypes: [String]
     let routing: Routing?
     let reason: String?
@@ -230,7 +293,7 @@ enum RuntimeProtocolMessage: Equatable, Sendable {
 }
 
 enum ProtocolCodec {
-    static let version = "1.16"
+    static let version = "1.17"
 
     static func encodeRequest(id: JSONRPCID, method: String, params: [String: JSONValue] = [:]) throws -> Data {
         let request = JSONValue.object([
