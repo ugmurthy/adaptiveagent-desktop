@@ -68,7 +68,7 @@ Choose a workspace directory and agent profile JSON, connect, and then start a r
 
 New runs can include generic files, images, and audio when the connected runtime advertises each managed attachment kind. The app validates selected media, imports it into a private Application Support snapshot, sends only relative descriptors over JSON-RPC, and retains submitted snapshots for runtime retry and recovery. Runtime-advertised limits are enforced up to the app's maximums of 10 MiB each, 8 attachments, and 40 MiB total. Text is still required, and chat attachments are not supported.
 
-Runs and drafts open in app-level tabs above the detail pane. Tabs retain their own draft, chat composer, steering text, selected run, and scroll position while sharing the app's single runtime process. Closing a tab does not interrupt or remove its run; select that run in the history sidebar to reopen it. Background tabs continue showing run status and approval or clarification badges.
+Each native macOS window tab owns its own runtime process and workspace configuration, so changing one tab's agent, model, or workspace does not interrupt runs in another tab. Within a tab, runs remain available in the sidebar while the detail pane switches between drafts and run results. Closing a native tab shuts down only that tab's runtime process.
 
 Select one historical run, or Command-click multiple rows, then use the trash button or a row's **Delete Run…** context-menu action to permanently delete terminal run data through the typed protocol `1.17` `run/delete` method. The app confirms destructive deletion, closes tabs for successful deletions, refreshes persisted history, and reports any runs the runtime could not delete.
 

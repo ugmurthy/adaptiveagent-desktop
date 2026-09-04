@@ -498,7 +498,10 @@ done
         let model = AppModel(
             client: RuntimeClient(executableURL: executable, responseTimeout: .seconds(2)),
             workingDirectoryURL: workspace,
-            attachmentStoreRootURL: unavailableAttachmentRoot
+            attachmentStoreRootURL: unavailableAttachmentRoot,
+            runtimeClientFactory: {
+                RuntimeClient(executableURL: executable, responseTimeout: .seconds(2))
+            }
         )
         model.bootstrap()
         for _ in 0..<100 where !model.isConnected {
@@ -517,6 +520,10 @@ done
 
         model.newChat()
         let chatTabID = try XCTUnwrap(model.selectedTabID)
+        for _ in 0..<100 where !model.isConnected {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(model.isConnected, model.status)
         model.setDraftText("First question", forTab: chatTabID)
         model.submitDraft(in: chatTabID)
         for _ in 0..<100 where model.runs.first?.status != .succeeded {
@@ -595,7 +602,10 @@ done
         let model = AppModel(
             client: RuntimeClient(executableURL: executable, responseTimeout: .seconds(2)),
             workingDirectoryURL: workspace,
-            attachmentStoreRootURL: managedRoot
+            attachmentStoreRootURL: managedRoot,
+            runtimeClientFactory: {
+                RuntimeClient(executableURL: executable, responseTimeout: .seconds(2))
+            }
         )
         model.bootstrap()
         for _ in 0..<100 where !model.attachmentsEnabled { try? await Task.sleep(for: .milliseconds(20)) }
@@ -615,6 +625,10 @@ done
 
         model.newChat()
         let chatTabID = try XCTUnwrap(model.selectedTabID)
+        for _ in 0..<100 where !model.isConnected {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(model.isConnected, model.status)
         model.setDraftText("Text only", forTab: chatTabID)
         model.submitDraft(in: chatTabID)
         for _ in 0..<100 where model.runs.count < 2 || model.runs.first?.status != .succeeded {
@@ -732,63 +746,307 @@ done
     }
 
     @MainActor
-    func testRunTabsKeepIndependentUIStateAndReopenClosedRunsWithoutInterrupting() throws {
+    func testSidebarNavigationUsesOneDetailAndKeepsBackgroundRunsAvailable() throws {
         let model = AppModel(workingDirectoryURL: try temporaryDirectoryURL())
-        let firstTabID = try XCTUnwrap(model.selectedTabID)
-        model.setDraftText("First draft", forTab: firstTabID)
-        model.setChatMessage("First chat composer", forTab: firstTabID)
-        model.setSteerMessage("First steering note", forTab: firstTabID)
-        model.setScrollPosition("message-first", forTab: firstTabID)
-        model.setDetailMode(.inspection, forTab: firstTabID)
+        let sessionID = try XCTUnwrap(model.selectedTab?.runtimeSessionID)
+        let firstRecordID = UUID()
+        let secondRecordID = UUID()
+        model.runs = [
+            AppModel.RunRecord(
+                id: firstRecordID,
+                runtimeSessionID: sessionID,
+                kind: .run,
+                title: "Background run",
+                status: .running,
+                isRequestInFlight: true
+            ),
+            AppModel.RunRecord(
+                id: secondRecordID,
+                runtimeSessionID: sessionID,
+                kind: .run,
+                title: "Completed run",
+                status: .succeeded
+            )
+        ]
+
+        model.selectRun(firstRecordID)
+        XCTAssertEqual(model.tabs.count, 1)
+        XCTAssertEqual(model.selectedRunItemID, firstRecordID)
+        XCTAssertFalse(model.canEditSelectedRuntimeConfiguration)
+
+        model.selectRun(secondRecordID)
+        XCTAssertEqual(model.tabs.count, 1)
+        XCTAssertEqual(model.selectedRunItemID, secondRecordID)
+        XCTAssertFalse(model.canEditSelectedRuntimeConfiguration)
+        XCTAssertEqual(model.runs.first(where: { $0.id == firstRecordID })?.status, .running)
+        XCTAssertEqual(model.runs.first(where: { $0.id == firstRecordID })?.isRequestInFlight, true)
 
         model.newChat()
-        let secondTabID = try XCTUnwrap(model.selectedTabID)
-        XCTAssertNotEqual(secondTabID, firstTabID)
-        model.setDraftText("Second draft", forTab: secondTabID)
-        model.setChatMessage("Second chat composer", forTab: secondTabID)
-        model.setSteerMessage("Second steering note", forTab: secondTabID)
-        model.setScrollPosition("message-second", forTab: secondTabID)
-
-        model.selectTab(firstTabID)
-        XCTAssertEqual(model.selectedTab?.draftKind, .run)
-        XCTAssertEqual(model.selectedTab?.draftText, "First draft")
-        XCTAssertEqual(model.selectedTab?.chatMessage, "First chat composer")
-        XCTAssertEqual(model.selectedTab?.steerMessage, "First steering note")
-        XCTAssertNil(model.selectedTab?.scrollPosition, "Changing the detail mode should reset its scroll target")
-        XCTAssertEqual(model.selectedTab?.detailMode, .inspection)
-
-        model.selectTab(secondTabID)
+        XCTAssertEqual(model.tabs.count, 1)
+        XCTAssertNil(model.selectedRunItemID)
         XCTAssertEqual(model.selectedTab?.draftKind, .chat)
-        XCTAssertEqual(model.selectedTab?.draftText, "Second draft")
-        XCTAssertEqual(model.selectedTab?.chatMessage, "Second chat composer")
-        XCTAssertEqual(model.selectedTab?.steerMessage, "Second steering note")
-        XCTAssertEqual(model.selectedTab?.scrollPosition, "message-second")
-        XCTAssertEqual(model.selectedTab?.detailMode, .results)
+        XCTAssertTrue(model.canEditSelectedRuntimeConfiguration)
+        XCTAssertEqual(model.runs.count, 2, "Starting a draft must not remove runs from the navigator")
 
-        let recordID = UUID()
+        model.selectRun(firstRecordID)
+        XCTAssertEqual(model.tabs.count, 1)
+        XCTAssertEqual(model.selectedRunItemID, firstRecordID)
+    }
+
+    @MainActor
+    func testOpeningNewDraftCopiesConfigurationIntoAnIndependentRuntimeSession() throws {
+        let workspace = try temporaryDirectoryURL()
+        let model = AppModel(workingDirectoryURL: workspace)
+        let sessionID = try XCTUnwrap(model.selectedTab?.runtimeSessionID)
+        model.agentConfigPath = "/tmp/byok-agent.json"
+        model.settingsConfigPath = "/tmp/settings.json"
+        model.configuredProvider = "ollama"
+        model.configuredModel = "qwen3.8"
         model.runs = [AppModel.RunRecord(
-            id: recordID,
+            id: UUID(),
+            runtimeSessionID: sessionID,
             kind: .run,
-            title: "Background run",
+            title: "Previous run",
             status: .running,
             isRequestInFlight: true
         )]
-        model.openRunTab(recordID)
+
+        model.newRun()
+
+        XCTAssertEqual(model.tabs.count, 1)
+        XCTAssertNotEqual(model.selectedTab?.runtimeSessionID, sessionID)
+        XCTAssertTrue(model.hasActiveWork)
+        XCTAssertFalse(
+            model.selectedSessionHasActiveWork,
+            "An active run in the previous session must not trigger an interruption warning for the new draft."
+        )
+        XCTAssertEqual(model.workspacePath, workspace.path)
+        XCTAssertEqual(model.agentConfigPath, "/tmp/byok-agent.json")
+        XCTAssertEqual(model.settingsConfigPath, "/tmp/settings.json")
+        XCTAssertEqual(model.configuredProvider, "ollama")
+        XCTAssertEqual(model.configuredModel, "qwen3.8")
+        XCTAssertFalse(model.isConnected)
+    }
+
+    @MainActor
+    func testBYOKChatRemainsOnItsRuntimeAfterDefaultAgentRunInANewTab() async throws {
+        let workspace = try temporaryDirectoryURL()
+        let byokLog = temporaryFileURL(named: "byok-tab-runtime.log")
+        let defaultLog = temporaryFileURL(named: "default-tab-runtime.log")
+        let byokExecutable = try makeRuntimeScript(#"""
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","pid":101}}'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> \#(shellQuote(byokLog.path))
+  id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
+  method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
+  run_id="$(printf '%s' "$line" | sed -E 's/.*"runId":"([^"]+)".*/\1/')"
+  case "$method" in
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.17"}}' ;;
+    runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"byok-agent","name":"BYOK Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[]}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"byok-agent","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
+    agent/chat) printf '{"jsonrpc":"2.0","id":"%s","result":{"status":"success","runId":"%s","output":"BYOK reply"}}\n' "$id" "$run_id" ;;
+    runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
+    *) exit 91 ;;
+  esac
+done
+"""#)
+        let defaultExecutable = try makeRuntimeScript(#"""
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","pid":202}}'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> \#(shellQuote(defaultLog.path))
+  id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
+  method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
+  run_id="$(printf '%s' "$line" | sed -E 's/.*"runId":"([^"]+)".*/\1/')"
+  case "$method" in
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.17"}}' ;;
+    runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[]}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
+    agent/run) printf '{"jsonrpc":"2.0","id":"%s","result":{"status":"success","runId":"%s","output":"Default run complete"}}\n' "$id" "$run_id" ;;
+    agent/chat) printf '{"jsonrpc":"2.0","id":"%s","error":{"code":-32603,"message":"Chat reached the Default Agent runtime","data":{"protocolCode":"WRONG_RUNTIME"}}}\n' "$id" ;;
+    runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
+    *) exit 91 ;;
+  esac
+done
+"""#)
+        let model = AppModel(
+            client: RuntimeClient(executableURL: byokExecutable, responseTimeout: .seconds(2)),
+            workingDirectoryURL: workspace,
+            runtimeClientFactory: {
+                RuntimeClient(executableURL: defaultExecutable, responseTimeout: .seconds(2))
+            }
+        )
+        model.agentConfigPath = "/tmp/byok-agent.json"
+        model.configuredProvider = "ollama"
+        model.configuredModel = "qwen3.8"
+        model.bootstrap()
+        for _ in 0..<100 where !model.isConnected { try? await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertEqual(model.agentName, "BYOK Agent")
+
+        let chatTabID = try XCTUnwrap(model.selectedTabID)
+        model.setDraftKind(.chat, forTab: chatTabID)
+        model.setDraftText("First chat turn", forTab: chatTabID)
+        model.submitDraft(in: chatTabID)
+        for _ in 0..<100 where model.runs.first?.isRequestInFlight == true {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        let chatRecordID = try XCTUnwrap(model.runs.first?.id)
+        let byokSessionID = try XCTUnwrap(model.runs.first?.runtimeSessionID)
+
+        model.newRun()
         let runTabID = try XCTUnwrap(model.selectedTabID)
-        XCTAssertEqual(model.selectedRunItemID, recordID)
-        XCTAssertEqual(model.tabs.count, 3)
+        XCTAssertNotEqual(model.selectedTab?.runtimeSessionID, byokSessionID)
+        for _ in 0..<100 where !model.isConnected { try? await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertTrue(model.isConnected, model.status)
+        model.agentConfigPath = ""
+        model.configuredProvider = "ollama"
+        model.configuredModel = "qwen3.8"
+        model.applyConfiguration()
+        for _ in 0..<100 where !model.isConnected { try? await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertEqual(model.agentName, "Default Agent")
+        model.setDraftText("Independent run", forTab: runTabID)
+        model.submitDraft(in: runTabID)
+        for _ in 0..<100 where model.runs.first?.isRequestInFlight == true {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
 
-        model.closeTab(runTabID)
-        XCTAssertEqual(model.runs.first?.status, .running)
-        XCTAssertEqual(model.runs.first?.isRequestInFlight, true)
-        XCTAssertNil(model.tabs.first(where: { $0.selectedRunID == recordID }))
+        model.selectRun(chatRecordID)
+        let reopenedChatTabID = try XCTUnwrap(model.selectedTabID)
+        XCTAssertEqual(model.selectedTab?.runtimeSessionID, byokSessionID)
+        XCTAssertEqual(model.agentName, "BYOK Agent")
+        XCTAssertEqual(model.agentConfigPath, "/tmp/byok-agent.json")
+        XCTAssertEqual(model.configuredProvider, "ollama")
+        XCTAssertEqual(model.configuredModel, "qwen3.8")
+        model.setChatMessage("Second chat turn", forTab: reopenedChatTabID)
+        model.sendChatMessage(in: reopenedChatTabID)
+        for _ in 0..<100 where model.runs.first(where: { $0.id == chatRecordID })?.isRequestInFlight == true {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
 
-        model.openRunTab(recordID)
-        XCTAssertEqual(model.selectedRunItemID, recordID)
-        XCTAssertNotNil(model.tabs.first(where: { $0.selectedRunID == recordID }))
-        let reopenedTabCount = model.tabs.count
-        model.openRunTab(recordID)
-        XCTAssertEqual(model.tabs.count, reopenedTabCount, "An already open run should activate its tab instead of duplicating it")
+        let byokRequests = try protocolRequests(in: byokLog)
+        let defaultRequests = try protocolRequests(in: defaultLog)
+        XCTAssertEqual(byokRequests.filter { $0.objectValue?["method"] == .string("agent/chat") }.count, 2)
+        XCTAssertEqual(defaultRequests.filter { $0.objectValue?["method"] == .string("agent/run") }.count, 1)
+        XCTAssertEqual(defaultRequests.filter { $0.objectValue?["method"] == .string("agent/chat") }.count, 0)
+        XCTAssertEqual(model.runs.first(where: { $0.id == chatRecordID })?.status, .succeeded)
+        await model.shutdown()
+    }
+
+    @MainActor
+    func testAgentProfileSelectedAsRuntimeSettingsIsRejectedClearly() throws {
+        let workspace = try temporaryDirectoryURL()
+        let agentProfile = workspace.appendingPathComponent("audio-agent.json")
+        try #"{"id":"audio-agent","name":"Audio Agent","systemInstructions":"Analyze audio."}"#
+            .write(to: agentProfile, atomically: true, encoding: .utf8)
+        let model = AppModel(workingDirectoryURL: workspace)
+
+        model.settingsConfigPath = agentProfile.path
+        model.reloadSettingsConfiguration()
+
+        XCTAssertEqual(
+            model.settingsConfigurationError,
+            "This looks like an agent profile. Select it in Agent Profile instead."
+        )
+    }
+
+    @MainActor
+    func testNativeWindowTabsOwnDifferentApplicationModels() throws {
+        let registry = ApplicationModelRegistry()
+        let firstWindow = WindowModelOwner(registry: registry)
+        let secondWindow = WindowModelOwner(registry: registry)
+
+        XCTAssertFalse(firstWindow.model === secondWindow.model)
+        XCTAssertEqual(registry.registeredModelCount, 2)
+
+        firstWindow.model.workspacePath = "/tmp/window-a"
+        firstWindow.model.agentConfigPath = "/tmp/agent-a.json"
+        secondWindow.model.workspacePath = "/tmp/window-b"
+        secondWindow.model.agentConfigPath = "/tmp/agent-b.json"
+
+        XCTAssertEqual(firstWindow.model.workspacePath, "/tmp/window-a")
+        XCTAssertEqual(firstWindow.model.agentConfigPath, "/tmp/agent-a.json")
+        XCTAssertEqual(secondWindow.model.workspacePath, "/tmp/window-b")
+        XCTAssertEqual(secondWindow.model.agentConfigPath, "/tmp/agent-b.json")
+    }
+
+    @MainActor
+    func testInitializingASecondNativeWindowTabDoesNotStopTheFirstTabsRun() async throws {
+        let workspace = try temporaryDirectoryURL()
+        let firstLog = temporaryFileURL(named: "first-window-runtime.log")
+        let secondLog = temporaryFileURL(named: "second-window-runtime.log")
+        let firstExecutable = try makeRuntimeScript(#"""
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","pid":101}}'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> \#(shellQuote(firstLog.path))
+  id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
+  method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
+  case "$method" in
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.17"}}' ;;
+    runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"first","name":"First Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[]}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"first","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
+    agent/run)
+      run_id="$(printf '%s' "$line" | sed -E 's/.*"runId":"([^"]+)".*/\1/')"
+      printf '{"jsonrpc":"2.0","method":"agent/event","params":{"schemaVersion":1,"type":"run.started","runId":"%s","payload":{"rootRunId":"%s"}}}\n' "$run_id" "$run_id"
+      ;;
+    runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
+    *) exit 91 ;;
+  esac
+done
+"""#)
+        let secondExecutable = try makeRuntimeScript(#"""
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","pid":202}}'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> \#(shellQuote(secondLog.path))
+  id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
+  method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
+  case "$method" in
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.17"}}' ;;
+    runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"second","name":"Second Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[]}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.17","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"second","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
+    runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
+    *) exit 91 ;;
+  esac
+done
+"""#)
+        let registry = ApplicationModelRegistry()
+        let firstWindow = WindowModelOwner(
+            registry: registry,
+            model: AppModel(
+                client: RuntimeClient(executableURL: firstExecutable, responseTimeout: .seconds(2)),
+                workingDirectoryURL: workspace
+            )
+        )
+        let secondWindow = WindowModelOwner(
+            registry: registry,
+            model: AppModel(
+                client: RuntimeClient(executableURL: secondExecutable, responseTimeout: .seconds(2)),
+                workingDirectoryURL: workspace
+            )
+        )
+
+        firstWindow.model.bootstrap()
+        for _ in 0..<100 where !firstWindow.model.isConnected {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(firstWindow.model.agentName, "First Agent")
+        let firstTabID = try XCTUnwrap(firstWindow.model.selectedTabID)
+        firstWindow.model.setDraftText("Keep running", forTab: firstTabID)
+        firstWindow.model.submitDraft(in: firstTabID)
+        for _ in 0..<100 where firstWindow.model.runs.first?.status != .running {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+
+        secondWindow.model.agentConfigPath = "/tmp/second-agent.json"
+        secondWindow.model.bootstrap()
+        for _ in 0..<100 where !secondWindow.model.isConnected {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+
+        XCTAssertEqual(secondWindow.model.agentName, "Second Agent")
+        XCTAssertEqual(firstWindow.model.agentName, "First Agent")
+        XCTAssertEqual(firstWindow.model.runs.first?.status, .running)
+        XCTAssertFalse(try String(contentsOf: firstLog, encoding: .utf8).contains("runtime/shutdown"))
+        XCTAssertFalse(try String(contentsOf: secondLog, encoding: .utf8).isEmpty)
+        await registry.shutdownAll()
     }
 
     @MainActor
@@ -1502,8 +1760,8 @@ done
             .init(id: deletedRecordID, kind: .run, title: "Delete me", runIds: ["root-a"], status: .succeeded),
             .init(id: retainedRecordID, kind: .run, title: "Keep me", runIds: ["root-b"], status: .failed)
         ]
-        model.openRunTab(deletedRecordID)
-        model.openRunTab(retainedRecordID)
+        model.selectRun(deletedRecordID)
+        model.selectRun(retainedRecordID)
 
         model.deleteRuns(rootRunIDs: ["root-a", "root-b"])
         for _ in 0..<100 where !model.deletingRunIDs.isEmpty {
@@ -1956,6 +2214,12 @@ exit 9
             .appendingPathComponent("AdaptiveAgentDesktopTests-\(UUID().uuidString)-\(name)")
         addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         return url
+    }
+
+    private func protocolRequests(in log: URL) throws -> [JSONValue] {
+        try String(contentsOf: log, encoding: .utf8)
+            .split(separator: "\n")
+            .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
     }
 
     private func temporaryDirectoryURL() throws -> URL {

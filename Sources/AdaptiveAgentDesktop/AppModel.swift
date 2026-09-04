@@ -27,6 +27,7 @@ final class AppModel: ObservableObject {
 
     struct RunTab: Identifiable, Equatable {
         let id: UUID
+        var runtimeSessionID: UUID
         var selectedRunID: UUID?
         var selectedHistoryRunID: String?
         var draftKind: RunKind
@@ -45,6 +46,7 @@ final class AppModel: ObservableObject {
 
         init(
             id: UUID = UUID(),
+            runtimeSessionID: UUID = UUID(),
             selectedRunID: UUID? = nil,
             selectedHistoryRunID: String? = nil,
             draftKind: RunKind = .run,
@@ -62,6 +64,7 @@ final class AppModel: ObservableObject {
             followLive: Bool = true
         ) {
             self.id = id
+            self.runtimeSessionID = runtimeSessionID
             self.selectedRunID = selectedRunID
             self.selectedHistoryRunID = selectedHistoryRunID
             self.draftKind = draftKind
@@ -166,6 +169,8 @@ final class AppModel: ObservableObject {
 
     struct RunRecord: Identifiable, Equatable {
         let id: UUID
+        var runtimeSessionID: UUID? = nil
+        var agentName = ""
         let kind: RunKind
         var title: String
         var sessionId: String?
@@ -191,6 +196,7 @@ final class AppModel: ObservableObject {
 
     struct HistoryItem: Identifiable, Equatable {
         let rootRunId: String
+        var runtimeSessionID: UUID? = nil
         let sessionId: String?
         let title: String
         let status: String
@@ -216,9 +222,18 @@ final class AppModel: ObservableObject {
 
     private static let inspectionMinimumRefreshInterval: Duration = .seconds(5)
 
-    @Published var workspacePath = ""
-    @Published var agentConfigPath = ""
-    @Published var settingsConfigPath = ""
+    var workspacePath: String {
+        get { selectedSession?.configuration.workspacePath ?? "" }
+        set { updateSelectedConfiguration { $0.workspacePath = newValue } }
+    }
+    var agentConfigPath: String {
+        get { selectedSession?.configuration.agentConfigPath ?? "" }
+        set { updateSelectedConfiguration { $0.agentConfigPath = newValue } }
+    }
+    var settingsConfigPath: String {
+        get { selectedSession?.configuration.settingsConfigPath ?? "" }
+        set { updateSelectedConfiguration { $0.settingsConfigPath = newValue } }
+    }
     @Published var status = "Starting…"
     @Published var events: [String] = []
     @Published var isBusy = false
@@ -238,15 +253,42 @@ final class AppModel: ObservableObject {
     @Published private(set) var attachmentCapabilities: AttachmentCapabilities?
     @Published private(set) var localAttachmentStoreError: String?
 
-    @Published var configuredRuntimeMode = ""
-    @Published var configuredProvider = ""
-    @Published var configuredModel = ""
-    @Published var configuredInferenceMode = ""
-    @Published var configuredInferenceTier = ""
-    @Published var configuredGatewayURL = ""
-    @Published var configuredRequireRunPermit = false
-    @Published var configuredApprovalMode = "manual"
-    @Published var configuredClarificationMode = "interactive"
+    var configuredRuntimeMode: String {
+        get { selectedSession?.configuration.runtimeMode ?? "" }
+        set { updateSelectedConfiguration { $0.runtimeMode = newValue } }
+    }
+    var configuredProvider: String {
+        get { selectedSession?.configuration.provider ?? "" }
+        set { updateSelectedConfiguration { $0.provider = newValue } }
+    }
+    var configuredModel: String {
+        get { selectedSession?.configuration.model ?? "" }
+        set { updateSelectedConfiguration { $0.model = newValue } }
+    }
+    var configuredInferenceMode: String {
+        get { selectedSession?.configuration.inferenceMode ?? "" }
+        set { updateSelectedConfiguration { $0.inferenceMode = newValue } }
+    }
+    var configuredInferenceTier: String {
+        get { selectedSession?.configuration.inferenceTier ?? "" }
+        set { updateSelectedConfiguration { $0.inferenceTier = newValue } }
+    }
+    var configuredGatewayURL: String {
+        get { selectedSession?.configuration.gatewayURL ?? "" }
+        set { updateSelectedConfiguration { $0.gatewayURL = newValue } }
+    }
+    var configuredRequireRunPermit: Bool {
+        get { selectedSession?.configuration.requireRunPermit ?? false }
+        set { updateSelectedConfiguration { $0.requireRunPermit = newValue } }
+    }
+    var configuredApprovalMode: String {
+        get { selectedSession?.configuration.approvalMode ?? "manual" }
+        set { updateSelectedConfiguration { $0.approvalMode = newValue } }
+    }
+    var configuredClarificationMode: String {
+        get { selectedSession?.configuration.clarificationMode ?? "interactive" }
+        set { updateSelectedConfiguration { $0.clarificationMode = newValue } }
+    }
     @Published private(set) var settingsConfigurationError: String?
     @Published var accessTokenDraft = ""
     @Published private(set) var accessTokenMessage: String?
@@ -255,7 +297,11 @@ final class AppModel: ObservableObject {
 
     @Published var runs: [RunRecord] = []
     @Published private(set) var tabs: [RunTab] = []
-    @Published private(set) var selectedTabID: UUID?
+    @Published private(set) var selectedTabID: UUID? {
+        didSet {
+            if oldValue != selectedTabID { publishSelectedSession() }
+        }
+    }
     @Published private(set) var historyItems: [HistoryItem] = []
     @Published private(set) var historyReports: [String: TraceReport] = [:]
     @Published private(set) var historyReportErrors: [String: String] = [:]
@@ -268,8 +314,18 @@ final class AppModel: ObservableObject {
     @Published private(set) var deletingRunIDs: Set<String> = []
     @Published private(set) var runDeletionError: String?
 
-    private var client: RuntimeClient
-    private var traceClient: TraceSessionClient
+    private var sessions: [UUID: RuntimeSession] = [:]
+    private let runtimeClientFactory: () -> RuntimeClient
+    private let traceClientFactory: () -> TraceSessionClient
+    private var selectedSession: RuntimeSession? {
+        guard let id = selectedTab?.runtimeSessionID else { return nil }
+        return sessions[id]
+    }
+    private func updateSelectedConfiguration(_ update: (inout RuntimeConfiguration) -> Void) {
+        guard let session = selectedSession else { return }
+        objectWillChange.send()
+        update(&session.configuration)
+    }
     private var attachmentStore: AttachmentStore?
     private let attachmentStoreRootURL: URL?
     private var attachmentStoreDidClean = false
@@ -284,21 +340,30 @@ final class AppModel: ObservableObject {
     private var inspectionCacheMetadata: [UUID: InspectionCacheMetadata] = [:]
     private var historySearchTask: Task<Void, Never>?
     private var historyRefreshTask: Task<Void, Never>?
-    private var traceConnected = false
+    private var receivingSessionID: UUID?
     private let inspectionClock = ContinuousClock()
+    var applicationQuitHandler: ((AppModel, Bool) -> Void)?
 
     init(
         client: RuntimeClient = RuntimeClient(),
         traceClient: TraceSessionClient = TraceSessionClient(),
         workingDirectoryURL: URL? = nil,
-        attachmentStoreRootURL: URL? = nil
+        attachmentStoreRootURL: URL? = nil,
+        runtimeClientFactory: @escaping () -> RuntimeClient = { RuntimeClient() },
+        traceClientFactory: @escaping () -> TraceSessionClient = { TraceSessionClient() }
     ) {
         let launchDirectory = (workingDirectoryURL
             ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true))
             .standardizedFileURL
-        let initialTab = RunTab()
-        self.client = client
-        self.traceClient = traceClient
+        let session = RuntimeSession(
+            configuration: RuntimeConfiguration(workspacePath: launchDirectory.path),
+            client: client,
+            traceClient: traceClient
+        )
+        let initialTab = RunTab(runtimeSessionID: session.id)
+        self.runtimeClientFactory = runtimeClientFactory
+        self.traceClientFactory = traceClientFactory
+        sessions[session.id] = session
         self.attachmentStoreRootURL = attachmentStoreRootURL
         tabs = [initialTab]
         selectedTabID = initialTab.id
@@ -324,11 +389,27 @@ final class AppModel: ObservableObject {
         return runs.first { $0.id == selectedRunItemID }
     }
 
+    var canEditSelectedRuntimeConfiguration: Bool {
+        selectedTab?.selectedRunID == nil && selectedTab?.selectedHistoryRunID == nil
+    }
+
     var hasActiveWork: Bool {
         runs.contains { $0.status.isActive || $0.hasRequestInFlight }
     }
 
-    var isWaitingForRunIdentity: Bool { !pendingRootAssignments.isEmpty }
+    var selectedSessionHasActiveWork: Bool {
+        guard let sessionID = selectedTab?.runtimeSessionID else { return false }
+        return runs.contains {
+            $0.runtimeSessionID == sessionID && ($0.status.isActive || $0.hasRequestInFlight)
+        }
+    }
+
+    var isWaitingForRunIdentity: Bool {
+        guard let sessionID = selectedTab?.runtimeSessionID else { return false }
+        return pendingRootAssignments.contains { recordID in
+            runs.first(where: { $0.id == recordID })?.runtimeSessionID == sessionID
+        }
+    }
 
     var attachmentsEnabled: Bool {
         attachmentEnabled(for: .file)
@@ -382,9 +463,16 @@ final class AppModel: ObservableObject {
     func connect() {
         guard !isBusy, !isConnected else { return }
         isBusy = true
-        Task {
-            await connectRuntime()
+        persistSelectedConfiguration()
+        guard let sessionID = selectedTab?.runtimeSessionID, let session = sessions[sessionID] else {
             isBusy = false
+            return
+        }
+        session.isBusy = true
+        Task {
+            await connectRuntime(sessionID: sessionID)
+            session.isBusy = false
+            if selectedTab?.runtimeSessionID == sessionID { publishSelectedSession() }
         }
     }
 
@@ -398,19 +486,25 @@ final class AppModel: ObservableObject {
             return
         }
         guard !isBusy else { return }
+        persistSelectedConfiguration()
+        guard let sessionID = selectedTab?.runtimeSessionID,
+              let session = sessions[sessionID] else { return }
         isBusy = true
+        session.isBusy = true
         Task {
-            if isConnected {
-                status = "Restarting runtime…"
-                await stopTraceHistory()
-                await client.shutdown()
-                client = RuntimeClient()
+            if session.isConnected {
+                session.status = "Restarting runtime…"
+                session.isConnected = false
+                if selectedTab?.runtimeSessionID == sessionID { publishSelectedSession() }
+                await stopTraceHistory(sessionID: sessionID)
+                await session.client.shutdown()
+                session.client = runtimeClientFactory()
             }
-            markActiveRunsInterrupted()
-            isConnected = false
-            resetRuntimeMappings()
-            await connectRuntime()
-            isBusy = false
+            markActiveRunsInterrupted(sessionID: sessionID)
+            resetRuntimeMappings(sessionID: sessionID)
+            await connectRuntime(sessionID: sessionID)
+            session.isBusy = false
+            if selectedTab?.runtimeSessionID == sessionID { publishSelectedSession() }
         }
     }
 
@@ -466,6 +560,14 @@ final class AppModel: ObservableObject {
 
         do {
             let data = try Data(contentsOf: URL(fileURLWithPath: path))
+            let root = try JSONDecoder().decode(JSONValue.self, from: data)
+            if let fields = root.objectValue,
+               fields["id"]?.stringValue != nil,
+               fields["name"]?.stringValue != nil,
+               fields["systemInstructions"]?.stringValue != nil {
+                settingsConfigurationError = "This looks like an agent profile. Select it in Agent Profile instead."
+                return
+            }
             let settings = try JSONDecoder().decode(DesktopSettingsSeed.self, from: data)
             var unsupportedValues: [String] = []
 
@@ -535,74 +637,26 @@ final class AppModel: ObservableObject {
         tabs.first { $0.id == tabID }
     }
 
-    func selectTab(_ tabID: UUID) {
-        guard tabs.contains(where: { $0.id == tabID }) else { return }
-        selectedTabID = tabID
-    }
-
-    func closeTab(_ tabID: UUID) {
-        guard let closingIndex = tabs.firstIndex(where: { $0.id == tabID }) else { return }
-        let abandonedAttachments = tabs[closingIndex].selectedRunID == nil
-            ? tabs[closingIndex].draftAttachments
-            : []
-        let wasSelected = selectedTabID == tabID
-        tabs.remove(at: closingIndex)
-
-        if let attachmentStore, !abandonedAttachments.isEmpty {
-            Task {
-                for descriptor in abandonedAttachments { try? await attachmentStore.removeDraft(descriptor) }
-            }
-        }
-
-        if tabs.isEmpty {
-            let replacement = RunTab()
-            tabs = [replacement]
-            selectedTabID = replacement.id
-        } else if wasSelected {
-            selectedTabID = tabs[min(closingIndex, tabs.count - 1)].id
-        }
-    }
-
-    func openRunTab(_ recordID: UUID) {
+    func selectRun(_ recordID: UUID) {
         guard let record = runs.first(where: { $0.id == recordID }) else { return }
-        if let existing = tabs.first(where: { $0.selectedRunID == recordID }) {
-            selectedTabID = existing.id
-            return
-        }
-
-        if let index = selectedTabIndex, isReusableDraft(tabs[index]) {
-            tabs[index].selectedRunID = recordID
-            tabs[index].selectedHistoryRunID = nil
-            tabs[index].draftKind = record.kind
-            tabs[index].scrollPosition = nil
-            tabs[index].activityExpanded = false
-            tabs[index].followLive = record.status.isActive
-            return
-        }
-
-        let tab = RunTab(selectedRunID: recordID, draftKind: record.kind)
-        tabs.append(tab)
-        selectedTabID = tab.id
+        replaceDetail(with: RunTab(
+            runtimeSessionID: record.runtimeSessionID ?? selectedTab?.runtimeSessionID ?? sessions.keys.first!,
+            selectedRunID: recordID,
+            draftKind: record.kind,
+            followLive: record.status.isActive
+        ))
     }
 
-    func openHistoryTab(_ rootRunId: String) {
+    func selectHistoryRun(_ rootRunId: String) {
         guard let selectedItem = historyItem(rootRunId: rootRunId) else { return }
         if !historyItems.contains(where: { $0.rootRunId == rootRunId }) {
             historyItems = mergeHistory(historyItems, [selectedItem])
         }
-        if let existing = tabs.first(where: { $0.selectedHistoryRunID == rootRunId }) {
-            selectedTabID = existing.id
-        } else if let index = selectedTabIndex, isReusableDraft(tabs[index]) {
-            tabs[index].selectedRunID = nil
-            tabs[index].selectedHistoryRunID = rootRunId
-            tabs[index].scrollPosition = nil
-            tabs[index].activityExpanded = false
-            tabs[index].followLive = false
-        } else {
-            let tab = RunTab(selectedHistoryRunID: rootRunId, followLive: false)
-            tabs.append(tab)
-            selectedTabID = tab.id
-        }
+        replaceDetail(with: RunTab(
+            runtimeSessionID: selectedItem.runtimeSessionID ?? selectedTab?.runtimeSessionID ?? sessions.keys.first!,
+            selectedHistoryRunID: rootRunId,
+            followLive: false
+        ))
         loadHistoryReport(rootRunId)
     }
 
@@ -626,11 +680,22 @@ final class AppModel: ObservableObject {
 
         deletingRunIDs.formUnion(requestedIDs)
         runDeletionError = nil
+        let fallbackSessionID = selectedTab?.runtimeSessionID
         Task {
             var failures: [String] = []
+            var affectedSessionIDs: Set<UUID> = []
             for runId in requestedIDs.sorted() {
                 do {
-                    let result = try await client.deleteRun(runId)
+                    let owningSessionID = runs.first(where: { $0.runIds.contains(runId) })?.runtimeSessionID
+                        ?? historyItem(rootRunId: runId)?.runtimeSessionID
+                        ?? fallbackSessionID
+                    guard let owningSessionID, let owningSession = sessions[owningSessionID] else {
+                        failures.append("\(runId): runtime session is unavailable")
+                        continue
+                    }
+                    affectedSessionIDs.insert(owningSessionID)
+                    let owningClient = owningSession.client
+                    let result = try await owningClient.deleteRun(runId)
                     guard result.deleted else {
                         failures.append("\(runId): runtime did not confirm deletion")
                         continue
@@ -644,8 +709,8 @@ final class AppModel: ObservableObject {
             if !failures.isEmpty {
                 runDeletionError = failures.joined(separator: "\n")
             }
-            if traceConnected {
-                await loadHistory(replacing: true)
+            for sessionID in affectedSessionIDs where sessions[sessionID]?.traceConnected == true {
+                await loadHistory(sessionID: sessionID, replacing: true)
             }
         }
     }
@@ -663,11 +728,11 @@ final class AppModel: ObservableObject {
     }
 
     func newRun() {
-        openDraftTab(kind: .run)
+        openDraft(kind: .run)
     }
 
     func newChat() {
-        openDraftTab(kind: .chat)
+        openDraft(kind: .chat)
     }
 
     func setDraftKind(_ kind: RunKind, forTab tabID: UUID) {
@@ -718,29 +783,82 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private var selectedTabIndex: Int? {
-        guard let selectedTabID else { return nil }
-        return tabs.firstIndex { $0.id == selectedTabID }
+    private func openDraft(kind: RunKind) {
+        persistSelectedConfiguration()
+        guard let source = selectedSession else { return }
+        let session = RuntimeSession(
+            configuration: source.configuration,
+            client: runtimeClientFactory(),
+            traceClient: traceClientFactory()
+        )
+        session.loadedSettingsConfigPath = source.loadedSettingsConfigPath
+        session.settingsConfigurationError = source.settingsConfigurationError
+        session.accessToken = source.accessToken
+        session.accessTokenMessage = source.accessTokenMessage
+        session.accessTokenUpdateFailed = source.accessTokenUpdateFailed
+        session.isBusy = true
+        sessions[session.id] = session
+        replaceDetail(with: RunTab(runtimeSessionID: session.id, draftKind: kind))
+        Task {
+            await connectRuntime(sessionID: session.id)
+            session.isBusy = false
+            if selectedTab?.runtimeSessionID == session.id { publishSelectedSession() }
+        }
     }
 
-    private func openDraftTab(kind: RunKind) {
-        let tab = RunTab(draftKind: kind)
-        tabs.append(tab)
-        selectedTabID = tab.id
-    }
-
-    private func isReusableDraft(_ tab: RunTab) -> Bool {
-        tab.selectedRunID == nil
-            && tab.selectedHistoryRunID == nil
-            && tab.draftText.isEmpty
-            && tab.draftAttachments.isEmpty
-            && tab.chatMessage.isEmpty
-            && tab.steerMessage.isEmpty
+    private func replaceDetail(with detail: RunTab) {
+        let abandonedAttachments = selectedTab?.selectedRunID == nil
+            ? selectedTab?.draftAttachments ?? []
+            : []
+        tabs = [detail]
+        selectedTabID = detail.id
+        if let attachmentStore, !abandonedAttachments.isEmpty {
+            Task {
+                for descriptor in abandonedAttachments { try? await attachmentStore.removeDraft(descriptor) }
+            }
+        }
     }
 
     private func updateTab(_ tabID: UUID, _ update: (inout RunTab) -> Void) {
         guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
         update(&tabs[index])
+    }
+
+    private func persistSelectedConfiguration() {
+        guard let session = selectedSession else { return }
+        session.loadedSettingsConfigPath = loadedSettingsConfigPath
+        session.settingsConfigurationError = settingsConfigurationError
+        session.accessToken = accessTokenDraft
+        session.accessTokenMessage = accessTokenMessage
+        session.accessTokenUpdateFailed = accessTokenUpdateFailed
+        session.isUpdatingAccessToken = isUpdatingAccessToken
+    }
+
+    private func publishSelectedSession() {
+        guard let session = selectedSession else { return }
+        isConnected = session.isConnected
+        isBusy = session.isBusy
+        status = session.status
+        agentName = session.agentName
+        agentId = session.agentId
+        runtimeMode = session.runtimeMode
+        effectiveWorkspaceRoot = session.effectiveWorkspaceRoot
+        shellCwd = session.shellCwd
+        registeredToolNames = session.registeredToolNames
+        runtimeInfoSnapshot = session.runtimeInfo
+        runtimeInfoError = session.runtimeInfoError
+        attachmentCapabilities = session.attachmentCapabilities
+        loadedSettingsConfigPath = session.loadedSettingsConfigPath
+        settingsConfigurationError = session.settingsConfigurationError
+        accessTokenDraft = session.accessToken
+        accessTokenMessage = session.accessTokenMessage
+        accessTokenUpdateFailed = session.accessTokenUpdateFailed
+        isUpdatingAccessToken = session.isUpdatingAccessToken
+    }
+
+    private func client(for recordID: UUID) -> RuntimeClient? {
+        guard let sessionID = runs.first(where: { $0.id == recordID })?.runtimeSessionID else { return selectedSession?.client }
+        return sessions[sessionID]?.client
     }
 
     func chooseAttachments(kind: AttachmentKind, forTab tabID: UUID) {
@@ -879,6 +997,8 @@ final class AppModel: ObservableObject {
         let sessionId = kind == .chat ? UUID().uuidString : nil
         var record = RunRecord(
             id: recordID,
+            runtimeSessionID: tabs[tabIndex].runtimeSessionID,
+            agentName: sessions[tabs[tabIndex].runtimeSessionID]?.agentName ?? "",
             kind: kind,
             title: title(for: text),
             sessionId: sessionId,
@@ -959,6 +1079,7 @@ final class AppModel: ObservableObject {
 
         Task {
             do {
+                guard let client = client(for: recordID) else { return }
                 let result = try await client.send(
                     method: "interaction/resolveApproval",
                     params: [
@@ -990,6 +1111,7 @@ final class AppModel: ObservableObject {
 
         Task {
             do {
+                guard let client = client(for: recordID) else { return }
                 let result = try await client.send(
                     method: "interaction/resolveClarification",
                     params: ["runId": .string(interaction.runId), "answer": .string(response)],
@@ -1014,6 +1136,7 @@ final class AppModel: ObservableObject {
         runs[index].auxiliaryErrorMessage = nil
         Task {
             do {
+                guard let client = client(for: recordID) else { return }
                 let result = try await client.send(
                     method: "run/steer",
                     params: ["runId": .string(runId), "message": .string(message)],
@@ -1036,7 +1159,7 @@ final class AppModel: ObservableObject {
                 runs[index].title = preferredTitle
             }
             let recordID = runs[index].id
-            openRunTab(recordID)
+            selectRun(recordID)
             if method == "run/inspect" { showInspection(for: recordID) }
             sendRunCommand(method, runId: runId, recordID: recordID)
             return
@@ -1046,13 +1169,15 @@ final class AppModel: ObservableObject {
         let abbreviatedRunId = runId.count > 20 ? String(runId.prefix(17)) + "…" : runId
         runs.insert(RunRecord(
             id: recordID,
+            runtimeSessionID: historyItem(rootRunId: runId)?.runtimeSessionID ?? selectedTab?.runtimeSessionID,
+            agentName: selectedSession?.agentName ?? "",
             kind: .run,
             title: preferredTitle.flatMap { $0.isEmpty ? nil : $0 } ?? "Run \(abbreviatedRunId)",
             runIds: [runId],
             status: .unknown
         ), at: 0)
         bind(rootRunId: runId, to: recordID)
-        openRunTab(recordID)
+        selectRun(recordID)
         if method == "run/inspect" { showInspection(for: recordID) }
         sendRunCommand(method, runId: runId, recordID: recordID)
     }
@@ -1106,6 +1231,7 @@ final class AppModel: ObservableObject {
         let inspectionEventGeneration = method == "run/inspect" ? eventGenerationByRunID[runId, default: 0] : nil
         Task {
             do {
+                guard let client = client(for: recordID) else { return }
                 let result = try await client.send(
                     method: method,
                     params: ["runId": .string(runId)],
@@ -1171,6 +1297,10 @@ final class AppModel: ObservableObject {
     }
 
     func requestQuit() {
+        if let applicationQuitHandler {
+            applicationQuitHandler(self, false)
+            return
+        }
         if hasActiveWork {
             showQuitConfirmation = true
         } else {
@@ -1180,32 +1310,48 @@ final class AppModel: ObservableObject {
 
     func confirmQuit() {
         showQuitConfirmation = false
+        if let applicationQuitHandler {
+            applicationQuitHandler(self, true)
+            return
+        }
         quitAfterShutdown()
     }
 
     func shutdown() async {
         status = "Shutting down…"
-        await stopTraceHistory()
-        await client.shutdown()
+        let allSessions = Array(sessions.values)
+        let clients = allSessions.map { ($0.client, $0.traceClient) }
+        await withTaskGroup(of: Void.self) { group in
+            for (client, traceClient) in clients {
+                group.addTask {
+                    await traceClient.shutdown()
+                    await client.shutdown()
+                }
+            }
+        }
+        for session in allSessions { session.isConnected = false }
         isConnected = false
         runtimeInfoSnapshot = nil
     }
 
     func refreshHistory() {
-        guard isConnected else { return }
+        guard isConnected, let sessionID = selectedTab?.runtimeSessionID,
+              let session = sessions[sessionID] else { return }
         Task {
-            if traceConnected {
-                await loadHistory(replacing: true)
+            if session.traceConnected {
+                await loadHistory(sessionID: sessionID, replacing: true)
             } else if let runtimeInfoSnapshot {
-                traceClient = TraceSessionClient()
-                await startTraceHistory(using: runtimeInfoSnapshot)
+                session.traceClient = traceClientFactory()
+                await startTraceHistory(using: runtimeInfoSnapshot, sessionID: sessionID)
             }
         }
     }
 
     func loadOlderHistory() {
-        guard case .loaded = historyState, let oldest = historyItems.last?.startedAt else { return }
-        Task { await loadHistory(replacing: false, until: oldest) }
+        guard case .loaded = historyState,
+              let sessionID = selectedTab?.runtimeSessionID,
+              let oldest = historyItems.filter({ $0.runtimeSessionID == sessionID }).last?.startedAt else { return }
+        Task { await loadHistory(sessionID: sessionID, replacing: false, until: oldest) }
     }
 
     func updateHistorySearch(_ query: String) {
@@ -1218,10 +1364,12 @@ final class AppModel: ObservableObject {
             isSearchingHistory = false
             return
         }
-        guard traceConnected else {
+        guard let sessionID = selectedTab?.runtimeSessionID,
+              let session = sessions[sessionID], session.traceConnected else {
             isSearchingHistory = false
             return
         }
+        let traceClient = session.traceClient
         isSearchingHistory = true
         historySearchTask = Task {
             try? await Task.sleep(for: .milliseconds(250))
@@ -1230,7 +1378,10 @@ final class AppModel: ObservableObject {
                 let sessions = try await traceClient.listSessions(.init(goals: [normalized], limit: 100))
                 guard !Task.isCancelled,
                       historySearchQuery.trimmingCharacters(in: .whitespacesAndNewlines) == normalized else { return }
-                historySearchResults = mergeHistory(localHistoryMatches(normalized), flattenHistory(sessions))
+                historySearchResults = mergeHistory(
+                    localHistoryMatches(normalized),
+                    flattenHistory(sessions, runtimeSessionID: sessionID)
+                )
                 isSearchingHistory = false
             } catch {
                 guard !Task.isCancelled else { return }
@@ -1259,17 +1410,23 @@ final class AppModel: ObservableObject {
         }
         guard !isUpdatingAccessToken else { return }
         let accessToken = accessTokenDraft
+        guard let sessionID = selectedTab?.runtimeSessionID,
+              let session = sessions[sessionID] else { return }
         isUpdatingAccessToken = true
+        session.isUpdatingAccessToken = true
+        session.accessToken = accessToken
         accessTokenUpdateFailed = false
         Task {
             do {
-                _ = try await client.updateAccessToken(accessToken)
-                accessTokenMessage = "Access token updated for the current runtime process."
+                _ = try await session.client.updateAccessToken(accessToken)
+                session.accessTokenMessage = "Access token updated for the current runtime process."
+                session.accessTokenUpdateFailed = false
             } catch {
-                accessTokenUpdateFailed = true
-                accessTokenMessage = "Token update failed: \(redactedErrorDescription(error))"
+                session.accessTokenUpdateFailed = true
+                session.accessTokenMessage = "Token update failed: \(redactedErrorDescription(error))"
             }
-            isUpdatingAccessToken = false
+            session.isUpdatingAccessToken = false
+            if selectedTab?.runtimeSessionID == sessionID { publishSelectedSession() }
         }
     }
 
@@ -1279,13 +1436,15 @@ final class AppModel: ObservableObject {
         accessTokenMessage = isConnected
             ? "Local entry cleared. Restart the runtime to remove a token already sent to the process."
             : "Local access token entry cleared."
+        persistSelectedConfiguration()
     }
 
     func refreshRuntimeInfo() {
         guard isConnected, !isRefreshingRuntimeInfo else { return }
+        guard let sessionID = selectedTab?.runtimeSessionID else { return }
         isRefreshingRuntimeInfo = true
         Task {
-            await loadRuntimeInfo()
+            await loadRuntimeInfo(sessionID: sessionID)
             isRefreshingRuntimeInfo = false
         }
     }
@@ -1437,7 +1596,9 @@ final class AppModel: ObservableObject {
     }
 
     // Internal for focused event/result tests.
-    func receive(method: String, params: JSONValue, diagnostic: String? = nil) {
+    func receive(method: String, params: JSONValue, diagnostic: String? = nil, sessionID: UUID? = nil) {
+        receivingSessionID = sessionID
+        defer { receivingSessionID = nil }
         appendEvent("\(method)\n\(diagnostic ?? Self.protocolDiagnostic(params))")
         guard method == "agent/event",
               let event = params.objectValue,
@@ -1467,7 +1628,10 @@ final class AppModel: ObservableObject {
             let rootRunId = payload["rootRunId"]?.stringValue ?? runId
             runToRoot[runId] = rootRunId
             if runId == rootRunId {
-                if recordByRoot[rootRunId] == nil, let pendingID = pendingRootAssignments.first {
+                if recordByRoot[rootRunId] == nil,
+                   let pendingID = pendingRootAssignments.first(where: { pendingID in
+                       runs.first(where: { $0.id == pendingID })?.runtimeSessionID == receivingSessionID
+                   }) {
                     bind(rootRunId: rootRunId, to: pendingID)
                     removePendingAssignment(pendingID)
                 }
@@ -1501,7 +1665,7 @@ final class AppModel: ObservableObject {
             runs[index].isRequestInFlight = false
             runs[index].interaction = nil
             if let output = payload["output"] { applyOutput(output, to: index) }
-            scheduleHistoryRefresh()
+            scheduleHistoryRefresh(sessionID: receivingSessionID ?? runs[index].runtimeSessionID)
         case "run.failed", "replan.required":
             guard isRootEvent, let index = recordIndex(forRunId: runId) else { return }
             runs[index].status = payload["code"]?.stringValue == "INTERRUPTED" ? .interrupted : .failed
@@ -1509,7 +1673,7 @@ final class AppModel: ObservableObject {
             runs[index].isRequestInFlight = false
             runs[index].interaction = nil
             runs[index].errorMessage = payload["error"]?.stringValue ?? "The run failed."
-            scheduleHistoryRefresh()
+            scheduleHistoryRefresh(sessionID: receivingSessionID ?? runs[index].runtimeSessionID)
         case "run.status_changed":
             guard isRootEvent else { return }
             handleStatusChange(payload["toStatus"]?.stringValue, runId: runId)
@@ -1545,37 +1709,41 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func connectRuntime() async {
+    private func connectRuntime(sessionID: UUID) async {
+        guard let session = sessions[sessionID] else { return }
+        let configuration = session.configuration
+        let client = session.client
         do {
-            let workingDirectory = URL(fileURLWithPath: workspacePath, isDirectory: true).standardizedFileURL
-            let gatewayURL = configuredGatewayURL.trimmingCharacters(in: .whitespacesAndNewlines)
-            if (configuredInferenceMode == "gateway" || configuredRequireRunPermit) && gatewayURL.isEmpty {
+            let workingDirectory = URL(fileURLWithPath: configuration.workspacePath, isDirectory: true).standardizedFileURL
+            let gatewayURL = configuration.gatewayURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            if (configuration.inferenceMode == "gateway" || configuration.requireRunPermit) && gatewayURL.isEmpty {
                 throw RuntimeClientError.protocolViolation("Gateway URL is required for gateway inference or required run permits.")
             }
-            status = "Starting agent runtime…"
+            session.status = "Starting agent runtime…"
+            if selectedTab?.runtimeSessionID == sessionID { publishSelectedSession() }
             try await client.start(
                 workingDirectoryURL: workingDirectory,
                 notificationHandler: { [weak self] method, params in
                     let diagnostic = AppModel.protocolDiagnostic(params)
-                    await self?.receive(method: method, params: params, diagnostic: diagnostic)
+                    await self?.receive(method: method, params: params, diagnostic: diagnostic, sessionID: sessionID)
                 },
                 errorHandler: { [weak self] message in
                     await self?.recordDiagnostic(message)
                 },
                 terminationHandler: { [weak self] status in
-                    await self?.runtimeTerminated(status: status)
+                    await self?.runtimeTerminated(status: status, sessionID: sessionID)
                 }
             )
-            let accessToken = accessTokenDraft
+            let accessToken = session.accessToken
             if !accessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                status = "Updating runtime access token…"
+                session.status = "Updating runtime access token…"
                 do {
                     _ = try await client.updateAccessToken(accessToken)
-                    accessTokenUpdateFailed = false
-                    accessTokenMessage = "Access token applied for the current runtime process."
+                    session.accessTokenUpdateFailed = false
+                    session.accessTokenMessage = "Access token applied for the current runtime process."
                 } catch {
-                    accessTokenUpdateFailed = true
-                    accessTokenMessage = "Token update failed: \(redactedErrorDescription(error))"
+                    session.accessTokenUpdateFailed = true
+                    session.accessTokenMessage = "Token update failed: \(redactedErrorDescription(error))"
                     throw error
                 }
             }
@@ -1598,63 +1766,70 @@ final class AppModel: ObservableObject {
                 attachmentStore = nil
                 localAttachmentStoreError = "File attachments are unavailable: \(error.localizedDescription)"
             }
-            status = "Loading workspace configuration…"
+            session.status = "Loading workspace configuration…"
             let parameters = RuntimeInitializationParameters(
                 cwd: workingDirectory.path,
-                agentConfigPath: agentConfigPath.isEmpty ? nil : agentConfigPath,
-                settingsConfigPath: settingsConfigPath.isEmpty ? nil : settingsConfigPath,
-                runtimeMode: configuredRuntimeMode.isEmpty ? nil : configuredRuntimeMode,
-                provider: configuredProvider.isEmpty ? nil : configuredProvider,
-                model: configuredModel.isEmpty ? nil : configuredModel,
-                approvalMode: configuredApprovalMode,
-                clarificationMode: configuredClarificationMode,
-                inferenceMode: configuredInferenceMode.isEmpty ? nil : configuredInferenceMode,
-                inferenceTier: configuredInferenceMode == "gateway" && !configuredInferenceTier.isEmpty
-                    ? configuredInferenceTier
+                agentConfigPath: configuration.agentConfigPath.isEmpty ? nil : configuration.agentConfigPath,
+                settingsConfigPath: configuration.settingsConfigPath.isEmpty ? nil : configuration.settingsConfigPath,
+                runtimeMode: configuration.runtimeMode.isEmpty ? nil : configuration.runtimeMode,
+                provider: configuration.provider.isEmpty ? nil : configuration.provider,
+                model: configuration.model.isEmpty ? nil : configuration.model,
+                approvalMode: configuration.approvalMode,
+                clarificationMode: configuration.clarificationMode,
+                inferenceMode: configuration.inferenceMode.isEmpty ? nil : configuration.inferenceMode,
+                inferenceTier: configuration.inferenceMode == "gateway" && !configuration.inferenceTier.isEmpty
+                    ? configuration.inferenceTier
                     : nil,
                 gatewayURL: gatewayURL.isEmpty ? nil : gatewayURL,
-                requireRunPermit: configuredRequireRunPermit,
+                requireRunPermit: configuration.requireRunPermit,
                 managedAttachmentRoot: managedAttachmentRoot
             )
             let result = try await client.initializeRuntime(parameters: parameters)
-            applyRuntimeInformation(result, fallbackWorkspace: workingDirectory.path)
-            isConnected = true
-            status = "Ready"
-            showConfiguration = false
+            applyRuntimeInformation(result, fallbackWorkspace: workingDirectory.path, sessionID: sessionID)
+            session.isConnected = true
+            session.status = "Ready"
+            if selectedTab?.runtimeSessionID == sessionID { publishSelectedSession() }
+            if selectedTab?.runtimeSessionID == sessionID { showConfiguration = false }
             appendEvent("Initialized\n\(String(describing: result))")
-            await loadRuntimeInfo()
+            await loadRuntimeInfo(sessionID: sessionID)
         } catch {
             await client.shutdown()
-            client = RuntimeClient()
-            isConnected = false
-            status = redactedErrorDescription(error)
+            session.client = runtimeClientFactory()
+            session.isConnected = false
+            session.status = redactedErrorDescription(error)
+            if selectedTab?.runtimeSessionID == sessionID { publishSelectedSession() }
             appendEvent("Initialization error: \(error.localizedDescription)")
-            showConfiguration = true
+            if selectedTab?.runtimeSessionID == sessionID { showConfiguration = true }
         }
     }
 
-    private func applyRuntimeInformation(_ result: RuntimeInitializationResult, fallbackWorkspace: String) {
-        agentName = result.agent.name.isEmpty ? result.agent.id : result.agent.name
-        agentId = result.agent.id
-        runtimeMode = result.runtimeMode
-        effectiveWorkspaceRoot = result.workspaceRoot.isEmpty ? fallbackWorkspace : result.workspaceRoot
-        shellCwd = result.shellCwd.isEmpty ? effectiveWorkspaceRoot : result.shellCwd
-        registeredToolNames = result.registeredToolNames
-        attachmentCapabilities = result.attachments
+    private func applyRuntimeInformation(_ result: RuntimeInitializationResult, fallbackWorkspace: String, sessionID: UUID) {
+        guard let session = sessions[sessionID] else { return }
+        session.agentName = result.agent.name.isEmpty ? result.agent.id : result.agent.name
+        session.agentId = result.agent.id
+        session.runtimeMode = result.runtimeMode
+        session.effectiveWorkspaceRoot = result.workspaceRoot.isEmpty ? fallbackWorkspace : result.workspaceRoot
+        session.shellCwd = result.shellCwd.isEmpty ? session.effectiveWorkspaceRoot : result.shellCwd
+        session.registeredToolNames = result.registeredToolNames
+        session.attachmentCapabilities = result.attachments
     }
 
-    private func loadRuntimeInfo() async {
+    private func loadRuntimeInfo(sessionID: UUID) async {
+        guard let session = sessions[sessionID] else { return }
         do {
-            let info = try await client.runtimeInfo()
-            runtimeInfoSnapshot = info
-            runtimeInfoError = nil
-            if !traceConnected { await startTraceHistory(using: info) }
+            let info = try await session.client.runtimeInfo()
+            session.runtimeInfo = info
+            session.runtimeInfoError = nil
+            if selectedTab?.runtimeSessionID == sessionID { publishSelectedSession() }
+            if !session.traceConnected { await startTraceHistory(using: info, sessionID: sessionID) }
         } catch {
-            runtimeInfoError = redactedErrorDescription(error)
+            session.runtimeInfoError = redactedErrorDescription(error)
+            if selectedTab?.runtimeSessionID == sessionID { publishSelectedSession() }
         }
     }
 
-    private func startTraceHistory(using info: RuntimeInfo) async {
+    private func startTraceHistory(using info: RuntimeInfo, sessionID: UUID) async {
+        guard let session = sessions[sessionID] else { return }
         let backend: TraceSessionBackend
         switch info.runtimeMode {
         case "sqlite":
@@ -1673,45 +1848,56 @@ final class AppModel: ObservableObject {
         }
 
         do {
-            _ = try await traceClient.start(
+            _ = try await session.traceClient.start(
                 backend: backend,
-                workingDirectoryURL: workspaceRootURL,
+                workingDirectoryURL: URL(
+                    fileURLWithPath: session.effectiveWorkspaceRoot.isEmpty
+                        ? session.configuration.workspacePath
+                        : session.effectiveWorkspaceRoot,
+                    isDirectory: true
+                ),
                 diagnosticsHandler: { [weak self] message in
                     await self?.recordTraceDiagnostic(message)
                 },
                 terminationHandler: { [weak self] status in
-                    await self?.traceTerminated(status: status)
+                    await self?.traceTerminated(status: status, sessionID: sessionID)
                 }
             )
-            traceConnected = true
-            await loadHistory(replacing: true)
+            session.traceConnected = true
+            await loadHistory(sessionID: sessionID, replacing: true)
         } catch {
             historyState = .failed(redactedErrorDescription(error))
         }
     }
 
-    private func stopTraceHistory() async {
+    private func stopTraceHistory(sessionID: UUID) async {
+        guard let session = sessions[sessionID] else { return }
         historySearchTask?.cancel()
         historySearchTask = nil
         historyRefreshTask?.cancel()
         historyRefreshTask = nil
-        await traceClient.shutdown()
-        traceClient = TraceSessionClient()
-        traceConnected = false
+        await session.traceClient.shutdown()
+        session.traceClient = traceClientFactory()
+        session.traceConnected = false
         loadingHistoryRunID = nil
         isSearchingHistory = false
         historySearchError = nil
     }
 
-    private func loadHistory(replacing: Bool, until: String? = nil) async {
+    private func loadHistory(sessionID: UUID, replacing: Bool, until: String? = nil) async {
+        guard let session = sessions[sessionID] else { return }
         historyState = .loading
         do {
-            let sessions = try await traceClient.listSessions(.init(limit: 100, until: until))
-            let loaded = flattenHistory(sessions)
+            let traceSessions = try await session.traceClient.listSessions(.init(limit: 100, until: until))
+            let loaded = flattenHistory(traceSessions, runtimeSessionID: sessionID)
             if replacing {
-                let openHistoryIDs = Set(tabs.compactMap(\.selectedHistoryRunID))
-                let openItems = historyItems.filter { openHistoryIDs.contains($0.rootRunId) }
-                historyItems = mergeHistory(openItems, loaded)
+                let openHistoryIDs = Set(
+                    tabs.filter { $0.runtimeSessionID == sessionID }.compactMap(\.selectedHistoryRunID)
+                )
+                let retained = historyItems.filter {
+                    $0.runtimeSessionID != sessionID || openHistoryIDs.contains($0.rootRunId)
+                }
+                historyItems = mergeHistory(retained, loaded)
             } else {
                 historyItems = mergeHistory(historyItems, loaded)
             }
@@ -1728,7 +1914,10 @@ final class AppModel: ObservableObject {
         historyReportErrors.removeValue(forKey: rootRunId)
         Task {
             do {
-                let report = try await traceClient.getTrace(rootRunId: rootRunId)
+                let sessionID = historyItem(rootRunId: rootRunId)?.runtimeSessionID
+                    ?? selectedTab?.runtimeSessionID
+                guard let sessionID, let session = sessions[sessionID] else { return }
+                let report = try await session.traceClient.getTrace(rootRunId: rootRunId)
                 historyReports[rootRunId] = report
             } catch {
                 historyReportErrors[rootRunId] = redactedErrorDescription(error)
@@ -1737,16 +1926,20 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func flattenHistory(_ sessions: [TraceSessionListItem]) -> [HistoryItem] {
-        sessions.flatMap { session in
-            session.goals.map { goal in
+    private func flattenHistory(
+        _ traceSessions: [TraceSessionListItem],
+        runtimeSessionID: UUID
+    ) -> [HistoryItem] {
+        traceSessions.flatMap { traceSession in
+            traceSession.goals.map { goal in
                 let goalTitle = goal.goal?.trimmingCharacters(in: .whitespacesAndNewlines)
                 let displayTitle = goalTitle.flatMap { $0.isEmpty ? nil : $0 }
                 return HistoryItem(
                     rootRunId: goal.rootRunId,
-                    sessionId: session.sessionId,
+                    runtimeSessionID: runtimeSessionID,
+                    sessionId: traceSession.sessionId,
                     title: displayTitle ?? "Run \(String(goal.rootRunId.prefix(12)))",
-                    status: goal.status ?? session.status ?? "unknown",
+                    status: goal.status ?? traceSession.status ?? "unknown",
                     startedAt: goal.startedAt ?? goal.linkedAt,
                     completedAt: goal.completedAt,
                     type: goal.type ?? "run"
@@ -1781,19 +1974,12 @@ final class AppModel: ObservableObject {
             loadingHistoryRunID = nil
         }
 
+        let removedSelectedDetail = selectedTab?.selectedRunID.map(deletedRecordIDs.contains) == true
+            || selectedTab?.selectedHistoryRunID == rootRunId
+            || selectedTab?.selectedHistoryRunID == requestedRunId
         runs.removeAll { deletedRecordIDs.contains($0.id) }
-        tabs.removeAll { tab in
-            let selectsDeletedRecord = tab.selectedRunID.map(deletedRecordIDs.contains) ?? false
-            return selectsDeletedRecord
-                || tab.selectedHistoryRunID == rootRunId
-                || tab.selectedHistoryRunID == requestedRunId
-        }
-        if tabs.isEmpty {
-            let replacement = RunTab()
-            tabs = [replacement]
-            selectedTabID = replacement.id
-        } else if !tabs.contains(where: { $0.id == selectedTabID }) {
-            selectedTabID = tabs[0].id
+        if removedSelectedDetail {
+            openDraft(kind: .run)
         }
 
         for recordID in deletedRecordIDs {
@@ -1816,13 +2002,14 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func scheduleHistoryRefresh() {
+    private func scheduleHistoryRefresh(sessionID: UUID?) {
+        guard let sessionID else { return }
         guard case .loaded = historyState else { return }
         historyRefreshTask?.cancel()
         historyRefreshTask = Task {
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled else { return }
-            await loadHistory(replacing: true)
+            await loadHistory(sessionID: sessionID, replacing: true)
         }
     }
 
@@ -1830,13 +2017,14 @@ final class AppModel: ObservableObject {
         appendEvent("Trace diagnostic: \(message)")
     }
 
-    private func traceTerminated(status: Int32) {
+    private func traceTerminated(status: Int32, sessionID: UUID) {
+        guard let session = sessions[sessionID] else { return }
         historyState = .failed("History helper exited with status \(status)")
         loadingHistoryRunID = nil
         isSearchingHistory = false
         historySearchError = nil
-        traceClient = TraceSessionClient()
-        traceConnected = false
+        session.traceClient = traceClientFactory()
+        session.traceConnected = false
     }
 
     private func redactedErrorDescription(_ error: Error) -> String {
@@ -1852,6 +2040,7 @@ final class AppModel: ObservableObject {
         }
         Task {
             do {
+                guard let client = client(for: recordID) else { return }
                 let result = try await client.send(method: method, params: fields, timeoutPolicy: .none)
                 acceptResult(result, for: recordID)
             } catch {
@@ -1870,7 +2059,9 @@ final class AppModel: ObservableObject {
     private func recordIndex(forRunId runId: String) -> Int? {
         let rootRunId = runToRoot[runId] ?? runId
         guard let recordID = recordByRoot[rootRunId] else { return nil }
-        return runs.firstIndex { $0.id == recordID }
+        return runs.firstIndex {
+            $0.id == recordID && (receivingSessionID == nil || $0.runtimeSessionID == receivingSessionID)
+        }
     }
 
     private func updateStatus(_ status: RunStatus, forRunId runId: String) {
@@ -2157,7 +2348,14 @@ final class AppModel: ObservableObject {
         sourceRunId: String,
         at index: Int
     ) {
-        let rootPath = workspaceRootURL.path
+        let session = runs[index].runtimeSessionID.flatMap { sessions[$0] }
+        let configuredRoot = session.map {
+            $0.effectiveWorkspaceRoot.isEmpty ? $0.configuration.workspacePath : $0.effectiveWorkspaceRoot
+        } ?? workspacePath
+        let rootPath = URL(
+            fileURLWithPath: configuredRoot,
+            isDirectory: true
+        ).standardizedFileURL.path
         guard let url = validatedWorkspaceFileURL(path: path, rootPath: rootPath) else { return }
         if let fileIndex = runs[index].files.firstIndex(where: { $0.path == url.path }) {
             runs[index].files[fileIndex].operation = operation
@@ -2173,13 +2371,6 @@ final class AppModel: ObservableObject {
             ))
         }
         runs[index].files.sort { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
-    }
-
-    private var workspaceRootURL: URL {
-        URL(
-            fileURLWithPath: effectiveWorkspaceRoot.isEmpty ? workspacePath : effectiveWorkspaceRoot,
-            isDirectory: true
-        ).standardizedFileURL
     }
 
     private func validatedWorkspaceFileURL(path: String, rootPath: String) -> URL? {
@@ -2298,17 +2489,19 @@ final class AppModel: ObservableObject {
         appendEvent("Runtime diagnostic: \(message)")
     }
 
-    private func runtimeTerminated(status: Int32) {
-        isConnected = false
-        self.status = "Runtime exited with status \(status)"
-        markActiveRunsInterrupted()
-        resetRuntimeMappings()
-        client = RuntimeClient()
-        Task { await stopTraceHistory() }
+    private func runtimeTerminated(status: Int32, sessionID: UUID) {
+        guard let session = sessions[sessionID] else { return }
+        session.isConnected = false
+        session.status = "Runtime exited with status \(status)"
+        markActiveRunsInterrupted(sessionID: sessionID)
+        resetRuntimeMappings(sessionID: sessionID)
+        session.client = runtimeClientFactory()
+        if selectedTab?.runtimeSessionID == sessionID { publishSelectedSession() }
+        Task { await session.traceClient.shutdown() }
     }
 
-    private func markActiveRunsInterrupted() {
-        for index in runs.indices {
+    private func markActiveRunsInterrupted(sessionID: UUID? = nil) {
+        for index in runs.indices where sessionID == nil || runs[index].runtimeSessionID == sessionID {
             if runs[index].status.isActive || runs[index].isRequestInFlight {
                 runs[index].status = .interrupted
                 finishActivityTimer(at: index)
@@ -2318,22 +2511,29 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func resetRuntimeMappings() {
-        pendingRootAssignments.removeAll()
-        runToRoot.removeAll()
-        recordByRoot.removeAll()
-        resolvedInteractions.removeAll()
-        eventGenerationByRunID.removeAll()
-        inspectionCacheMetadata.removeAll()
-        agentName = ""
-        agentId = ""
-        runtimeMode = ""
-        effectiveWorkspaceRoot = ""
-        shellCwd = ""
-        registeredToolNames = []
-        attachmentCapabilities = nil
-        runtimeInfoSnapshot = nil
-        runtimeInfoError = nil
+    private func resetRuntimeMappings(sessionID: UUID? = nil) {
+        let recordIDs = Set(runs.filter { sessionID == nil || $0.runtimeSessionID == sessionID }.map(\.id))
+        pendingRootAssignments.removeAll { recordIDs.contains($0) }
+        let roots = Set(recordByRoot.compactMap { recordIDs.contains($0.value) ? $0.key : nil })
+        let runIDs = Set(runToRoot.compactMap { roots.contains($0.value) ? $0.key : nil })
+        runToRoot = runToRoot.filter { !roots.contains($0.value) }
+        recordByRoot = recordByRoot.filter { !recordIDs.contains($0.value) }
+        resolvedInteractions.subtract(recordIDs)
+        for runID in runIDs { eventGenerationByRunID.removeValue(forKey: runID) }
+        for recordID in recordIDs { inspectionCacheMetadata.removeValue(forKey: recordID) }
+        let affectedSessions = sessionID.flatMap { sessions[$0].map { [$0] } } ?? Array(sessions.values)
+        for session in affectedSessions {
+            session.agentName = ""
+            session.agentId = ""
+            session.runtimeMode = ""
+            session.effectiveWorkspaceRoot = ""
+            session.shellCwd = ""
+            session.registeredToolNames = []
+            session.attachmentCapabilities = nil
+            session.runtimeInfo = nil
+            session.runtimeInfoError = nil
+        }
+        if sessionID == nil || selectedTab?.runtimeSessionID == sessionID { publishSelectedSession() }
     }
 
     private func quitAfterShutdown() {

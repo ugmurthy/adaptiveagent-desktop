@@ -65,7 +65,7 @@ struct ContentView: View {
 
     private var runSidebar: some View {
         VStack(spacing: 0) {
-            List(selection: sidebarSelection) {
+            List(selection: $sidebarSelections) {
                 if !activeRuns.isEmpty {
                     Section("Active") {
                         ForEach(activeRuns) { record in
@@ -114,6 +114,13 @@ struct ContentView: View {
                     }
                 }
             }
+            .onChange(of: sidebarSelections) { previous, selections in
+                guard let selection = selections.subtracting(previous).first else { return }
+                switch selection {
+                case .live(let recordID): model.selectRun(recordID)
+                case .history(let rootRunId): model.selectHistoryRun(rootRunId)
+                }
+            }
             Divider()
             HStack {
                 Menu {
@@ -144,32 +151,11 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var detail: some View {
-        VStack(spacing: 0) {
-            RunTabsBar()
+        if let tab = model.selectedTab {
+            SelectedTabDetail(tab: tab)
                 .environmentObject(model)
-            Divider()
-            Group {
-                if let tab = model.selectedTab,
-                   let recordID = tab.selectedRunID,
-                   let record = model.runs.first(where: { $0.id == recordID }) {
-                    RunDetailView(record: record, tabID: tab.id)
-                        .environmentObject(model)
-                } else if let tab = model.selectedTab,
-                          let rootRunId = tab.selectedHistoryRunID,
-                          let item = model.historyItem(rootRunId: rootRunId) {
-                    HistoricalRunDetailView(item: item, tabID: tab.id)
-                        .environmentObject(model)
-                } else if let tab = model.selectedTab, model.isConnected {
-                    NewRequestView(tabID: tab.id)
-                        .environmentObject(model)
-                        .id(tab.id)
-                } else {
-                    ConnectionStateView()
-                        .environmentObject(model)
-                }
-            }
-            .id(model.selectedTabID)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .id(tab.id)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -215,7 +201,10 @@ struct ContentView: View {
             } label: {
                 Label("Settings", systemImage: "gearshape")
             }
-            .help("Appearance and workspace settings")
+            .disabled(!model.canEditSelectedRuntimeConfiguration)
+            .help(model.canEditSelectedRuntimeConfiguration
+                ? "Appearance and workspace settings"
+                : "Runtime settings are locked after a run or chat starts")
 
             Button {
                 inspectorPresented.toggle()
@@ -293,21 +282,6 @@ struct ContentView: View {
                 }
             }
         }
-    }
-
-    private var sidebarSelection: Binding<Set<SidebarItemID>> {
-        Binding(
-            get: { sidebarSelections },
-            set: { selections in
-                let newlySelected = selections.subtracting(sidebarSelections)
-                sidebarSelections = selections
-                guard let selection = newlySelected.first else { return }
-                switch selection {
-                case .live(let recordID): model.openRunTab(recordID)
-                case .history(let rootRunId): model.openHistoryTab(rootRunId)
-                }
-            }
-        )
     }
 
     private var selectedDeletionRunIDs: Set<String> {
@@ -390,154 +364,21 @@ struct ContentView: View {
     }
 }
 
-private struct RunTabsBar: View {
+private struct SelectedTabDetail: View {
     @EnvironmentObject private var model: AppModel
-
-    var body: some View {
-        HStack(spacing: 0) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 6) {
-                    ForEach(model.tabs) { tab in
-                        RunTabCell(
-                            tab: tab,
-                            record: tab.selectedRunID.flatMap { recordID in
-                                model.runs.first { $0.id == recordID }
-                            },
-                            historyItem: tab.selectedHistoryRunID.flatMap { rootRunId in
-                                model.historyItem(rootRunId: rootRunId)
-                            },
-                            isSelected: model.selectedTabID == tab.id,
-                            select: { model.selectTab(tab.id) },
-                            close: { model.closeTab(tab.id) }
-                        )
-                    }
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-            }
-
-            Divider()
-                .frame(height: 22)
-
-            Button(action: model.newRun) {
-                Image(systemName: "plus")
-                    .frame(width: 28, height: 28)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.borderless)
-            .disabled(!model.isConnected)
-            .help("Open a new tab")
-            .accessibilityLabel("New tab")
-            .padding(.horizontal, 6)
-        }
-        .frame(height: 40)
-        .background(.bar)
-    }
-}
-
-private struct RunTabCell: View {
     let tab: AppModel.RunTab
-    let record: AppModel.RunRecord?
-    let historyItem: AppModel.HistoryItem?
-    let isSelected: Bool
-    let select: () -> Void
-    let close: () -> Void
 
-    var body: some View {
-        HStack(spacing: 4) {
-            Button(action: select) {
-                HStack(spacing: 7) {
-                    Image(systemName: record?.kind.systemImage ?? historyItem?.systemImage ?? tab.draftKind.systemImage)
-                        .font(.caption)
-                        .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
-                    Text(record?.title ?? historyItem?.title ?? "New \(tab.draftKind.rawValue)")
-                        .font(.caption.weight(isSelected ? .semibold : .regular))
-                        .lineLimit(1)
-                    if let record {
-                        RunTabStatusBadge(record: record)
-                    } else if let historyItem {
-                        Text(historyItem.status.capitalized)
-                            .font(.caption2.weight(.medium))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            Button(action: close) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 18, height: 18)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Close tab")
-            .accessibilityLabel("Close \(record?.title ?? historyItem?.title ?? "New \(tab.draftKind.rawValue)") tab")
-        }
-        .padding(.leading, 10)
-        .padding(.trailing, 4)
-        .frame(minWidth: 120, maxWidth: 280, minHeight: 28)
-        .background(
-            isSelected ? Color(nsColor: .controlBackgroundColor) : Color.clear,
-            in: RoundedRectangle(cornerRadius: 7)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 7)
-                .stroke(isSelected ? Color.primary.opacity(0.14) : Color.clear)
-        }
-    }
-}
-
-private struct RunTabStatusBadge: View {
-    let record: AppModel.RunRecord
-
-    var body: some View {
-        HStack(spacing: 4) {
-            if record.hasRequestInFlight, record.interaction == nil {
-                ProgressView()
-                    .controlSize(.mini)
-            } else {
-                Image(systemName: symbol)
-                    .font(.system(size: 8, weight: .bold))
-            }
-            Text(label)
-                .lineLimit(1)
-        }
-        .font(.caption2.weight(.medium))
-        .foregroundStyle(color)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
-        .background(color.opacity(0.11), in: Capsule())
-    }
-
-    private var label: String {
-        switch record.status {
-        case .waitingForApproval: return "Approval"
-        case .waitingForClarification: return "Question"
-        default: return record.status.rawValue
-        }
-    }
-
-    private var symbol: String {
-        switch record.status {
-        case .queued, .running: return "circle.fill"
-        case .waitingForApproval: return "hand.raised.fill"
-        case .waitingForClarification: return "questionmark.bubble.fill"
-        case .succeeded: return "checkmark"
-        case .failed: return "exclamationmark"
-        case .unknown, .interrupted: return "minus"
-        }
-    }
-
-    private var color: Color {
-        switch record.status {
-        case .queued, .running: return .accentColor
-        case .waitingForApproval, .waitingForClarification: return .orange
-        case .succeeded: return .green
-        case .failed: return .red
-        case .unknown, .interrupted: return .secondary
+    @ViewBuilder var body: some View {
+        if let recordID = tab.selectedRunID,
+           let record = model.runs.first(where: { $0.id == recordID }) {
+            RunDetailView(record: record, tabID: tab.id)
+        } else if let rootRunId = tab.selectedHistoryRunID,
+                  let item = model.historyItem(rootRunId: rootRunId) {
+            HistoricalRunDetailView(item: item, tabID: tab.id)
+        } else if model.isConnected {
+            NewRequestView(tabID: tab.id)
+        } else {
+            ConnectionStateView()
         }
     }
 }
@@ -945,6 +786,7 @@ private struct ConnectionStateView: View {
                 } actions: {
                     HStack {
                         Button("Configure") { model.showConfiguration = true }
+                            .disabled(!model.canEditSelectedRuntimeConfiguration)
                         Button("Try Again", action: model.connect)
                             .buttonStyle(.borderedProminent)
                     }
@@ -1137,14 +979,14 @@ private struct RunDetailView: View {
                             chatTranscript
                             RunActivityFeed(
                                 record: record,
-                                agentName: model.agentName,
+                                agentName: record.agentName,
                                 isExpanded: activityExpandedBinding
                             )
                                 .id("run-activity")
                         } else {
                             RunActivityFeed(
                                 record: record,
-                                agentName: model.agentName,
+                                agentName: record.agentName,
                                 isExpanded: activityExpandedBinding
                             )
                                 .id("run-activity")
@@ -1297,7 +1139,7 @@ private struct RunDetailView: View {
                 Text("INSPECTION").sectionLabel()
                 RunActivityFeed(
                     record: record,
-                    agentName: model.agentName,
+                    agentName: record.agentName,
                     isExpanded: activityExpandedBinding
                 )
                 InspectionOutputView(inspection: inspection, hasRelevantActivity: !record.activities.isEmpty)
@@ -1347,7 +1189,7 @@ private struct RunDetailView: View {
                     }
                 } else {
                     VStack(alignment: .leading, spacing: 7) {
-                        Text(model.agentName.isEmpty ? "AGENT" : model.agentName.uppercased())
+                        Text(record.agentName.isEmpty ? "AGENT" : record.agentName.uppercased())
                             .sectionLabel()
                         MarkdownText(content: message.content)
                     }
@@ -1359,7 +1201,7 @@ private struct RunDetailView: View {
 
     private var chatComposer: some View {
         ProminentRunComposer(
-            title: "Message \(model.agentName.isEmpty ? "agent" : model.agentName)",
+            title: "Message \(record.agentName.isEmpty ? "agent" : record.agentName)",
             placeholder: "Continue the conversation…",
             helper: "Send another message in this conversation.",
             actionTitle: "Send",
@@ -2676,6 +2518,7 @@ private struct RuntimeInspectorView: View {
                     }
                 }
                 Button("Edit Configuration") { model.showConfiguration = true }
+                    .disabled(!model.canEditSelectedRuntimeConfiguration)
             }
 
             if !model.registeredToolNames.isEmpty {
@@ -2741,8 +2584,8 @@ private struct ConfigurationView: View {
                         .foregroundStyle(.secondary)
                 }
                 Section("Configuration Overrides") {
-                    pathRow("Settings", text: $model.settingsConfigPath, action: model.chooseSettings)
-                    pathRow("Agent", text: $model.agentConfigPath, action: model.chooseAgent)
+                    pathRow("Runtime Settings", text: $model.settingsConfigPath, action: model.chooseSettings)
+                    pathRow("Agent Profile", text: $model.agentConfigPath, action: model.chooseAgent)
                     HStack {
                         Button("Reload Values", action: model.reloadSettingsConfiguration)
                             .disabled(model.settingsConfigPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -2840,7 +2683,7 @@ private struct ConfigurationView: View {
 
             Divider()
             HStack {
-                if model.hasActiveWork {
+                if model.selectedSessionHasActiveWork {
                     Label("Applying changes interrupts active runs.", systemImage: "exclamationmark.triangle")
                         .font(.caption)
                         .foregroundStyle(.orange)
