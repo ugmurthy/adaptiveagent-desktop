@@ -24,6 +24,7 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 980, minHeight: 680)
+        .tint(.teal)
         .toolbar { toolbar }
         .inspector(isPresented: $inspectorPresented) {
             RuntimeInspectorView()
@@ -198,10 +199,10 @@ struct ContentView: View {
                 Button("Workspace Configuration…", systemImage: "externaldrive") {
                     model.showConfiguration = true
                 }
+                .disabled(!model.canEditSelectedRuntimeConfiguration)
             } label: {
                 Label("Settings", systemImage: "gearshape")
             }
-            .disabled(!model.canEditSelectedRuntimeConfiguration)
             .help(model.canEditSelectedRuntimeConfiguration
                 ? "Appearance and workspace settings"
                 : "Runtime settings are locked after a run or chat starts")
@@ -212,11 +213,6 @@ struct ContentView: View {
                 Label("Inspector", systemImage: "sidebar.trailing")
             }
             .help("Show runtime inspector")
-
-            Button(action: model.requestQuit) {
-                Label("Quit", systemImage: "power")
-            }
-            .help("Quit AdaptiveAgent Desktop (⌘Q)")
         }
     }
 
@@ -534,78 +530,96 @@ private struct NewRequestView: View {
     @State private var existingRunID = ""
 
     var body: some View {
-        VStack(spacing: 26) {
-            Spacer()
-            VStack(spacing: 9) {
-                Image(systemName: draftKind == .run ? "sparkles" : "bubble.left.and.bubble.right")
-                    .font(.system(size: 34, weight: .light))
-                    .foregroundStyle(.tint)
-                Text(draftKind == .run ? "What should the agent do?" : "Start a conversation")
-                    .font(.title2.weight(.semibold))
-                Text(workspaceSummary)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Image(nsImage: NSApplication.shared.applicationIconImage)
+                        .resizable()
+                        .frame(width: 56, height: 56)
+                    Text(draftKind == .run ? "What should the agent do?" : "Start a conversation")
+                        .font(.system(size: 28, weight: .semibold))
+                    Text(
+                        draftKind == .run
+                            ? "Give your agent a goal. Follow its progress and shape the result."
+                            : "Work through an idea with your agent, one message at a time."
+                    )
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                }
+
+                WorkspaceContextView()
+
+                VStack(alignment: .leading, spacing: 14) {
+                    Picker("Request type", selection: draftKindBinding) {
+                        ForEach(AppModel.RunKind.allCases) { kind in
+                            Label(kind.rawValue, systemImage: kind.systemImage).tag(kind)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 260)
+
+                    ZStack(alignment: .topLeading) {
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(Color(nsColor: .textBackgroundColor))
+                            .stroke(.separator, lineWidth: 1)
+                        TextEditor(text: draftTextBinding)
+                            .font(.body)
+                            .accessibilityLabel(draftKind == .run ? "Run goal" : "Chat message")
+                            .scrollContentBackground(.hidden)
+                            .padding(10)
+                        if draftText.isEmpty {
+                            Text(draftKind == .run ? "Describe a goal…" : "Write a message…")
+                                .foregroundStyle(.tertiary)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 17)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                    .frame(height: 170)
+
+                    if draftKind == .run {
+                        AttachmentDraftView(tabID: tabID)
+                            .environmentObject(model)
+                            .frame(maxWidth: 700)
+                    }
+
+                    HStack {
+                        if model.isWaitingForRunIdentity {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Creating run…").foregroundStyle(.secondary)
+                        }
+                        if !model.isWaitingForRunIdentity {
+                            Text("⌘ Return to start")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                        Spacer()
+                        DictationButton(text: draftTextBinding, controller: dictation)
+                        Button(draftKind == .run ? "Start Run" : "Start Chat", action: submitDraft)
+                            .buttonStyle(.borderedProminent)
+                            .keyboardShortcut(.return, modifiers: [.command])
+                            .disabled(
+                                draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                    || model.isWaitingForRunIdentity
+                                    || (model.tab(withID: tabID)?.isImportingAttachments ?? false)
+                                    || (model.tab(withID: tabID)?.isSubmittingDraft ?? false)
+                            )
+                    }
+                    .frame(maxWidth: 700)
+                }
+
+                DisclosureGroup("Open an existing run") {
+                    existingRunActions.padding(.top, 10)
+                }
+                .font(.callout)
+                .foregroundStyle(.secondary)
             }
-
-            VStack(spacing: 14) {
-                Picker("Request type", selection: draftKindBinding) {
-                    ForEach(AppModel.RunKind.allCases) { kind in
-                        Label(kind.rawValue, systemImage: kind.systemImage).tag(kind)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 260)
-
-                ZStack(alignment: .topLeading) {
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(Color(nsColor: .textBackgroundColor))
-                        .stroke(.separator, lineWidth: 1)
-                    TextEditor(text: draftTextBinding)
-                        .font(.body)
-                        .scrollContentBackground(.hidden)
-                        .padding(10)
-                    if draftText.isEmpty {
-                        Text(draftKind == .run ? "Describe a goal…" : "Write a message…")
-                            .foregroundStyle(.tertiary)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 17)
-                            .allowsHitTesting(false)
-                    }
-                }
-                .frame(maxWidth: 700, minHeight: 150, maxHeight: 230)
-
-                if draftKind == .run {
-                    AttachmentDraftView(tabID: tabID)
-                        .environmentObject(model)
-                        .frame(maxWidth: 700)
-                }
-
-                HStack {
-                    if model.isWaitingForRunIdentity {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Creating run…").foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    DictationButton(text: draftTextBinding, controller: dictation)
-                    Button(draftKind == .run ? "Start Run" : "Start Chat", action: submitDraft)
-                        .buttonStyle(.borderedProminent)
-                        .keyboardShortcut(.return, modifiers: [.command])
-                        .disabled(
-                            draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                || model.isWaitingForRunIdentity
-                                || (model.tab(withID: tabID)?.isImportingAttachments ?? false)
-                                || (model.tab(withID: tabID)?.isSubmittingDraft ?? false)
-                        )
-                }
-                .frame(maxWidth: 700)
-            }
-
-            existingRunActions
-            Spacer()
+            .frame(maxWidth: 680)
+            .padding(.horizontal, 40)
+            .padding(.vertical, 44)
+            .frame(maxWidth: .infinity, minHeight: 600, alignment: .center)
         }
-        .padding(36)
     }
 
     private var existingRunActions: some View {
@@ -616,7 +630,7 @@ private struct NewRequestView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Existing Run")
                     .font(.callout.weight(.medium))
-                Text("Enter a run ID to inspect or manage a run available to this runtime.")
+                Text("Inspect or manage a run by ID.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -624,7 +638,7 @@ private struct NewRequestView: View {
             TextField("Run ID", text: $existingRunID)
                 .textFieldStyle(.roundedBorder)
                 .font(.body.monospaced())
-                .frame(width: 250)
+                .frame(minWidth: 120, maxWidth: 230)
             RunActionsMenu { method in
                 model.runCommand(method, runId: existingRunID)
             }
@@ -637,11 +651,6 @@ private struct NewRequestView: View {
             RoundedRectangle(cornerRadius: 11)
                 .stroke(.separator)
         }
-    }
-
-    private var workspaceSummary: String {
-        let path = model.effectiveWorkspaceRoot.isEmpty ? model.workspacePath : model.effectiveWorkspaceRoot
-        return URL(fileURLWithPath: path).lastPathComponent
     }
 
     private var draftKind: AppModel.RunKind {
@@ -765,34 +774,85 @@ private struct AttachmentDraftView: View {
     }
 }
 
+private struct WorkspaceContextView: View {
+    @EnvironmentObject private var model: AppModel
+
+    private var workspace: String {
+        model.effectiveWorkspaceRoot.isEmpty ? model.workspacePath : model.effectiveWorkspaceRoot
+    }
+
+    private var agent: String {
+        if !model.agentName.isEmpty { return model.agentName }
+        if !model.agentConfigPath.isEmpty {
+            return URL(fileURLWithPath: model.agentConfigPath).deletingPathExtension().lastPathComponent
+        }
+        return "Agent from settings"
+    }
+
+    var body: some View {
+        HStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 8) {
+                Label(agent, systemImage: "sparkles")
+                    .font(.callout.weight(.semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(model.agentConfigPath.isEmpty ? "Agent selected by runtime settings" : model.agentConfigPath)
+                Label(workspace.isEmpty ? "Choose a workspace" : URL(fileURLWithPath: workspace).lastPathComponent, systemImage: "folder")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(workspace)
+            }
+            Spacer(minLength: 8)
+            Button("Change…") { model.showConfiguration = true }
+                .disabled(!model.canEditSelectedRuntimeConfiguration || model.isBusy)
+                .help("Change agent, workspace, and runtime settings before starting")
+        }
+        .padding(16)
+        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
 private struct ConnectionStateView: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(alignment: .leading, spacing: 24) {
+            Image(nsImage: NSApplication.shared.applicationIconImage)
+                .resizable()
+                .frame(width: 64, height: 64)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("A workspace for your agent")
+                    .font(.system(size: 28, weight: .semibold))
+                Text("Choose where to work and which agent to use. Then turn a goal into a result.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            WorkspaceContextView()
             if model.isBusy {
-                ProgressView()
-                    .controlSize(.large)
-                Text(model.status).font(.headline)
-                Text(model.workspacePath)
-                    .font(.caption.monospaced())
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    Text(model.status)
+                }
+                .foregroundStyle(.secondary)
+            } else {
+                Label("Runtime needs attention", systemImage: "exclamationmark.circle")
+                    .font(.headline)
+                Text(model.status)
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
-            } else {
-                ContentUnavailableView {
-                    Label("Runtime Not Ready", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(model.status)
-                } actions: {
-                    HStack {
-                        Button("Configure") { model.showConfiguration = true }
-                            .disabled(!model.canEditSelectedRuntimeConfiguration)
-                        Button("Try Again", action: model.connect)
-                            .buttonStyle(.borderedProminent)
-                    }
+                HStack {
+                    Button("Configure…") { model.showConfiguration = true }
+                        .disabled(!model.canEditSelectedRuntimeConfiguration)
+                    Spacer()
+                    Button("Connect Runtime", action: model.connect)
+                        .buttonStyle(.borderedProminent)
                 }
             }
         }
+        .frame(maxWidth: 580)
         .padding(40)
     }
 }
@@ -1122,6 +1182,13 @@ private struct RunDetailView: View {
             }
             Spacer()
             if record.hasRequestInFlight { ProgressView().controlSize(.small) }
+            if record.status.isActive, record.latestRunId != nil {
+                Button("Interrupt", systemImage: "stop.fill", role: .destructive) {
+                    model.runCommand("run/interrupt", for: record.id)
+                }
+                .disabled(record.auxiliaryOperations.contains(.interrupt))
+                .help("Request that the runtime interrupt this run")
+            }
             RunActionsMenu(record: record, showResults: {
                 model.setDetailMode(.results, forTab: tabID)
             }) { method in
