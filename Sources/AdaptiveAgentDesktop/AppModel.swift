@@ -319,6 +319,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var historyReportErrors: [String: String] = [:]
     @Published private(set) var loadingHistoryRunID: String?
     @Published var expandedHistoryIDs: Set<String> = []
+    @Published var pinnedHistoryRunIDs: Set<String> = [] {
+        didSet { historyDefaults.set(pinnedHistoryRunIDs.sorted(), forKey: "pinnedHistoryRunIDs") }
+    }
+    @Published var historyFilters = HistoryFilters()
     @Published private(set) var historyUsage: [String: TraceUsageSummary] = [:]
     @Published private(set) var historyUsageErrors: [String: String] = [:]
     @Published private(set) var historyDetails: [String: HistoryDetail] = [:]
@@ -347,6 +351,7 @@ final class AppModel: ObservableObject {
     private var sessions: [UUID: RuntimeSession] = [:]
     private let runtimeClientFactory: () -> RuntimeClient
     private let traceClientFactory: () -> TraceSessionClient
+    private let historyDefaults: UserDefaults
     private var selectedSession: RuntimeSession? {
         guard let id = selectedTab?.runtimeSessionID else { return nil }
         return sessions[id]
@@ -388,7 +393,8 @@ final class AppModel: ObservableObject {
         workingDirectoryURL: URL? = nil,
         attachmentStoreRootURL: URL? = nil,
         runtimeClientFactory: @escaping () -> RuntimeClient = { RuntimeClient() },
-        traceClientFactory: @escaping () -> TraceSessionClient = { TraceSessionClient() }
+        traceClientFactory: @escaping () -> TraceSessionClient = { TraceSessionClient() },
+        historyDefaults: UserDefaults = .standard
     ) {
         let launchDirectory = (workingDirectoryURL
             ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true))
@@ -401,6 +407,8 @@ final class AppModel: ObservableObject {
         let initialTab = RunTab(runtimeSessionID: session.id)
         self.runtimeClientFactory = runtimeClientFactory
         self.traceClientFactory = traceClientFactory
+        self.historyDefaults = historyDefaults
+        pinnedHistoryRunIDs = Set(historyDefaults.stringArray(forKey: "pinnedHistoryRunIDs") ?? [])
         sessions[session.id] = session
         self.attachmentStoreRootURL = attachmentStoreRootURL
         tabs = [initialTab]
@@ -2080,6 +2088,7 @@ final class AppModel: ObservableObject {
             historyDetails.removeValue(forKey: id)
             historyDetailErrors.removeValue(forKey: id)
             expandedHistoryIDs.remove("run:\(id)")
+            pinnedHistoryRunIDs.remove(id)
         }
         if loadingHistoryRunID == rootRunId || loadingHistoryRunID == requestedRunId {
             loadingHistoryRunID = nil

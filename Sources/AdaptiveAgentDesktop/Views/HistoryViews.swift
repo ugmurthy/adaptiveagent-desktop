@@ -1,24 +1,30 @@
 import SwiftUI
+import AppKit
 import MarkdownUI
 
 struct HistoryTreeRow: View {
     @EnvironmentObject private var model: AppModel
     let node: AppModel.HistoryNode
+    var isThreadRoot = false
     let requestDeletion: (String) -> Void
+
+    @State private var isHovered = false
+
+    private var rowRunId: String? { node.item?.id ?? node.rootRunId }
 
     private var canExpand: Bool {
         !node.children.isEmpty || node.rootRunId.map { model.historyReports[$0] == nil } == true
     }
 
+    private var threadRunCount: Int {
+        guard isThreadRoot, let root = node.rootRunId else { return 0 }
+        return model.allHistoryItems.filter { $0.rootRunId == root }.count
+    }
+
     var body: some View {
-        if let runId = node.item?.id ?? node.rootRunId {
+        if let runId = rowRunId {
             row.tag(SidebarItemID.history(runId))
-                .contextMenu {
-                    if let root = model.deletableHistoryRoot(for: runId) {
-                        Button("Delete Run…", systemImage: "trash", role: .destructive) { requestDeletion(root) }
-                            .disabled(!model.isConnected || model.deletingRunIDs.contains(root))
-                    }
-                }
+                .contextMenu { actions(runId: runId) }
         } else {
             row
         }
@@ -45,32 +51,132 @@ struct HistoryTreeRow: View {
         }
     }
 
+    @ViewBuilder private func actions(runId: String) -> some View {
+        Button("Copy Goal", systemImage: "doc.on.doc") {
+            copyToPasteboard(node.item?.title ?? node.label)
+        }
+        Button("Copy Run ID", systemImage: "number") {
+            copyToPasteboard(runId)
+        }
+        Button("Copy Session ID", systemImage: "person.crop.circle") {
+            copyToPasteboard(node.item?.sessionId ?? "")
+        }
+        .disabled((node.item?.sessionId ?? "").isEmpty)
+        if isThreadRoot, let root = node.rootRunId {
+            if model.pinnedHistoryRunIDs.contains(root) {
+                Button("Unpin from Top", systemImage: "pin.slash") { model.togglePinnedHistoryRun(root) }
+            } else {
+                Button("Pin to Top", systemImage: "pin") { model.togglePinnedHistoryRun(root) }
+            }
+        }
+        if let root = model.deletableHistoryRoot(for: runId) {
+            Button("Delete Run…", systemImage: "trash", role: .destructive) { requestDeletion(root) }
+                .disabled(!model.isConnected || model.deletingRunIDs.contains(root))
+        }
+    }
+
     @ViewBuilder private var label: some View {
-        if let item = node.item {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(node.label).font(.callout.weight(.medium)).lineLimit(2)
-                    Text(item.id).font(.caption2.monospaced()).lineLimit(1).truncationMode(.middle)
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                if let item = node.item {
+                    Circle()
+                        .fill(Self.statusDotColor(item.status))
+                        .frame(width: 7, height: 7)
+                    Text(node.label)
+                        .font(.callout.weight(.medium))
+                        .lineLimit(1)
+                } else {
+                    Text(node.label)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 4)
+                if threadRunCount > 1 {
+                    Text("\(threadRunCount) runs")
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
-                    HStack {
-                        Text(item.status.capitalized)
-                        Spacer(minLength: 2)
-                        if AppModel.historyDate(item.startedAt) != .distantPast {
-                            Text(AppModel.historyDate(item.startedAt), format: .dateTime.month(.abbreviated).day().hour().minute())
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.secondary.opacity(0.14)))
+                }
+            }
+            if node.item != nil || rowRunId != nil {
+                HStack(spacing: 5) {
+                    if let item = node.item {
+                        Image(systemName: AppModel.historyDisplayStatus(item.status) == "Waiting" ? "hand.raised" : "circle.dotted")
+                            .font(.system(size: 8))
+                        Text(AppModel.historyDisplayStatus(item.status))
+                        let timeText = AppModel.historyTimeText(AppModel.historyDate(item.startedAt))
+                        if !timeText.isEmpty {
+                            Text("· \(timeText)")
                         }
                     }
-                    .font(.caption2).foregroundStyle(.secondary)
+                    Spacer(minLength: 2)
+                    if rowRunId != nil {
+                        Menu {
+                            actions(runId: rowRunId ?? "")
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                                .font(.system(size: 11))
+                        }
+                        .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
+                        .fixedSize()
+                        .opacity(isHovered ? 1 : 0)
+                        .allowsHitTesting(isHovered)
+                    }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 5)
-                .padding(.horizontal, 4)
-                .contentShape(Rectangle())
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("History run \(item.id), \(item.title), \(item.status), started \(item.startedAt)")
-            .help("\(item.id)\nStarted: \(item.startedAt)")
-        } else {
-            Text(node.label).font(.caption.weight(.semibold)).lineLimit(2)
-                .help(node.label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 5)
+        .padding(.horizontal, 4)
+        .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityText)
+        .help(tooltipText)
+    }
+
+    private var accessibilityText: String {
+        guard let item = node.item else { return node.label }
+        let timeText = AppModel.historyTimeText(AppModel.historyDate(item.startedAt))
+        var text = "History run \(item.title), \(AppModel.historyDisplayStatus(item.status))"
+        if !timeText.isEmpty { text += ", \(timeText)" }
+        return text
+    }
+
+    private var tooltipText: String {
+        guard let item = node.item else { return node.label }
+        var lines = [item.title, "Run \(item.id)"]
+        if let session = item.sessionId, !session.isEmpty { lines.append("Session \(session)") }
+        if AppModel.historyDate(item.startedAt) != .distantPast {
+            lines.append(AppModel.historyDate(item.startedAt).formatted(date: .abbreviated, time: .shortened))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func statusDotColor(_ status: String) -> Color {
+        switch status.lowercased() {
+        case "queued", "planning", "running", "awaiting_subagent":
+            return .accentColor
+        case "awaiting_approval", "approval required", "clarification_requested", "question pending":
+            return .orange
+        case "succeeded", "completed":
+            return .green
+        case "failed":
+            return .red
+        default:
+            return .secondary
+        }
+    }
+
+    private static func copyToPasteboard(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
     }
 }
 

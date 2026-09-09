@@ -77,25 +77,24 @@ struct ContentView: View {
                 }
 
                 Section {
-                    HistorySearchField(
-                        text: historySearchBinding,
-                        isSearching: model.isSearchingHistory
-                    )
-                    .listRowSeparator(.hidden)
-
-                    ForEach(model.historyTree) { node in
-                        HistoryTreeRow(node: node) { rootRunId in
-                            let selected = selectedDeletionRunIDs
-                            pendingDeletionRunIDs = selected.contains(rootRunId) ? selected : [rootRunId]
-                            deletionConfirmationPresented = true
-                        }
+                    HStack(spacing: 6) {
+                        HistorySearchField(
+                            text: historySearchBinding,
+                            isSearching: model.isSearchingHistory
+                        )
+                        historyFilterMenu
                     }
-
-                    historyStatusRow
+                    .listRowSeparator(.hidden)
                 } header: {
                     HStack {
                         Text("History")
                         Spacer()
+                        Button(action: model.collapseAllHistory) {
+                            Image(systemName: "rectangle.compress.vertical")
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(model.expandedHistoryIDs.isEmpty)
+                        .help("Collapse all expanded history")
                         Button(action: model.refreshHistory) {
                             Image(systemName: "arrow.clockwise")
                         }
@@ -103,12 +102,30 @@ struct ContentView: View {
                         .help("Refresh run history")
                     }
                 }
+
+                ForEach(model.historySections) { section in
+                    Section(section.title) {
+                        ForEach(section.nodes) { node in
+                            HistoryTreeRow(node: node, isThreadRoot: true) { rootRunId in
+                                let selected = selectedDeletionRunIDs
+                                pendingDeletionRunIDs = selected.contains(rootRunId) ? selected : [rootRunId]
+                                deletionConfirmationPresented = true
+                            }
+                        }
+                    }
+                }
+
+                Section {
+                    historyStatusRow
+                }
             }
             .onChange(of: sidebarSelections) { previous, selections in
                 guard let selection = selections.subtracting(previous).first else { return }
                 switch selection {
                 case .live(let recordID): model.selectRun(recordID)
-                case .history(let rootRunId): model.selectHistoryRun(rootRunId)
+                case .history(let rootRunId):
+                    model.selectHistoryRun(rootRunId)
+                    model.expandHistoryThread(containing: rootRunId)
                 }
             }
             Divider()
@@ -131,7 +148,7 @@ struct ContentView: View {
                 .buttonStyle(.borderless)
                 .disabled(selectedDeletionRunIDs.isEmpty || !model.isConnected)
                 .help("Delete selected runs")
-                Text("\(activeRuns.count + model.allHistoryItems.count)")
+                Text("\(activeRuns.count + model.allHistoryItems.count) runs")
                     .foregroundStyle(.tertiary)
                     .monospacedDigit()
             }
@@ -331,6 +348,60 @@ struct ContentView: View {
         Binding(
             get: { model.historySearchQuery },
             set: { query in model.updateHistorySearch(query) }
+        )
+    }
+
+    @ViewBuilder private var historyFilterMenu: some View {
+        Menu {
+            Toggle("Running", isOn: historyStatusFilterBinding(.running))
+            Toggle("Waiting", isOn: historyStatusFilterBinding(.waiting))
+            Toggle("Failed", isOn: historyStatusFilterBinding(.failed))
+            Divider()
+            Toggle("Runs", isOn: historyKindFilterBinding(.run))
+            Toggle("Chats", isOn: historyKindFilterBinding(.chat))
+            Divider()
+            Toggle("Has session", isOn: Binding(
+                get: { model.historyFilters.hasSession == true },
+                set: { isOn in model.historyFilters.hasSession = isOn ? true : nil }
+            ))
+            Divider()
+            Button("Clear Filters") { model.historyFilters = AppModel.HistoryFilters() }
+                .disabled(!model.historyFilters.isActive)
+        } label: {
+            Image(systemName: model.historyFilters.isActive
+                  ? "line.3.horizontal.decrease.circle.fill"
+                  : "line.3.horizontal.decrease.circle")
+                .font(.system(size: 13))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Filter history")
+    }
+
+    private func historyStatusFilterBinding(_ filter: AppModel.HistoryStatusFilter) -> Binding<Bool> {
+        Binding(
+            get: { model.historyFilters.statuses.contains(filter) },
+            set: { isOn in
+                if isOn {
+                    model.historyFilters.statuses.insert(filter)
+                } else {
+                    model.historyFilters.statuses.remove(filter)
+                }
+            }
+        )
+    }
+
+    private func historyKindFilterBinding(_ kind: AppModel.RunKind) -> Binding<Bool> {
+        Binding(
+            get: { model.historyFilters.kinds.contains(kind) },
+            set: { isOn in
+                if isOn {
+                    model.historyFilters.kinds.insert(kind)
+                } else {
+                    model.historyFilters.kinds.remove(kind)
+                }
+            }
         )
     }
 }

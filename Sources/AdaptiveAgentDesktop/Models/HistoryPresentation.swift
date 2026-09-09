@@ -35,6 +35,26 @@ extension AppModel {
         var children: [HistoryNode]
     }
 
+    struct HistorySection: Identifiable {
+        let id: String
+        let title: String
+        let nodes: [HistoryNode]
+    }
+
+    enum HistoryStatusFilter: String, CaseIterable, Identifiable {
+        case running, waiting, failed
+
+        var id: String { rawValue }
+    }
+
+    struct HistoryFilters: Equatable {
+        var statuses: Set<HistoryStatusFilter> = []
+        var kinds: Set<RunKind> = []
+        var hasSession: Bool? = nil
+
+        var isActive: Bool { !statuses.isEmpty || !kinds.isEmpty || hasSession != nil }
+    }
+
     static func historyDate(_ value: String) -> Date {
         historyDateFormatterWithFractionalSeconds.date(from: value)
             ?? historyDateFormatter.date(from: value)
@@ -101,8 +121,7 @@ extension AppModel {
             nodes.sorted { $0.newest == $1.newest ? $0.id < $1.id : $0.newest > $1.newest }
         }
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        var groups: [String: [HistoryNode]] = [:]
-        var sessionNames: [String: String] = [:]
+        var threads: [HistoryNode] = []
         for (rootID, runs) in Dictionary(grouping: items, by: \.rootRunId) {
             guard query.isEmpty || runs.contains(where: { item in
                 [item.title, item.id, rootID, item.sessionId ?? "", item.status, item.type]
@@ -141,32 +160,16 @@ extension AppModel {
                 guard let lhs = $0.item, let rhs = $1.item else { return $0.id < $1.id }
                 return historyNewestFirst(lhs, rhs)
             }
-            let owner = runs.first { $0.id == rootID } ?? runs[0]
             let newest = roots.map(\.newest).max() ?? .distantPast
-            let root: HistoryNode
             if roots.count == 1, roots[0].item?.id == rootID {
-                root = roots[0]
+                threads.append(roots[0])
             } else {
-                root = HistoryNode(id: "root:\(rootID)", label: "Root \(rootID)", item: nil,
-                                   rootRunId: rootID, newest: newest, children: roots)
-            }
-            if let session = owner.sessionId, !session.isEmpty {
-                let key = "session:\(session)"
-                groups[key, default: []].append(root)
-                sessionNames[key] = session
-            } else {
-                // A missing session is not an artificial shared session joining unrelated roots.
-                groups["no-session:\(rootID)"] = [HistoryNode(
-                    id: root.id, label: "No session · \(root.label)", item: root.item,
-                    rootRunId: rootID, newest: newest, children: root.children
-                )]
+                // Multiple or missing in-group root evidence: keep a wrapper rather than dropping runs.
+                threads.append(HistoryNode(id: "root:\(rootID)", label: "Root \(rootID)", item: nil,
+                                           rootRunId: rootID, newest: newest, children: roots))
             }
         }
-        return sorted(groups.flatMap { key, roots -> [HistoryNode] in
-            guard let session = sessionNames[key] else { return roots }
-            return [HistoryNode(id: key, label: "Session \(session)", item: nil, rootRunId: nil,
-                                newest: roots.map(\.newest).max() ?? .distantPast, children: sorted(roots))]
-        })
+        return sorted(threads)
     }
 
     func deletableHistoryRoot(for runId: String) -> String? {
@@ -183,6 +186,127 @@ extension AppModel {
         } else {
             expandedHistoryIDs.remove(node.id)
         }
+    }
+
+    func collapseAllHistory() {
+        expandedHistoryIDs.removeAll()
+    }
+
+    func expandHistoryThread(containing runId: String) {
+        func containsRun(_ node: HistoryNode) -> Bool {
+            node.item?.id == runId || node.rootRunId == runId || node.children.contains(where: containsRun)
+        }
+        guard let thread = historyTree.first(where: containsRun) else { return }
+        setHistoryExpanded(true, node: thread)
+    }
+
+    func togglePinnedHistoryRun(_ rootRunId: String) {
+        if pinnedHistoryRunIDs.contains(rootRunId) {
+            pinnedHistoryRunIDs.remove(rootRunId)
+        } else {
+            pinnedHistoryRunIDs.insert(rootRunId)
+        }
+    }
+
+    static func historyStatusCategory(_ status: String) -> HistoryStatusFilter? {
+        switch status.lowercased() {
+        case "queued", "planning", "running", "awaiting_subagent": return .running
+        case "awaiting_approval", "approval required", "clarification_requested", "question pending": return .waiting
+        case "failed": return .failed
+        default: return nil
+        }
+    }
+
+    static func historyDisplayStatus(_ status: String) -> String {
+        switch status.lowercased() {
+        case "succeeded", "completed": return "Completed"
+        case "failed": return "Failed"
+        case "running", "awaiting_subagent": return "Running"
+        case "queued": return "Queued"
+        case "planning": return "Planning"
+        case "awaiting_approval", "approval required", "clarification_requested", "question pending": return "Waiting"
+        case "interrupted": return "Interrupted"
+        default: return "Unknown"
+        }
+    }
+
+    static func historyTimeText(_ date: Date, calendar: Calendar = .current, now: Date = Date()) -> String {
+        guard date != .distantPast else { return "" }
+        if calendar.isDate(date, equalTo: now, toGranularity: .day) {
+            guard now.timeIntervalSince(date) >= 60 else { return "now" }
+            return date.formatted(.relative(presentation: .named))
+        }
+        if let yesterday = calendar.date(byAdding: .day, value: -1, to: now),
+           calendar.isDate(date, equalTo: yesterday, toGranularity: .day) {
+            return date.formatted(date: .omitted, time: .shortened)
+        }
+        if calendar.isDate(date, equalTo: now, toGranularity: .year) {
+            return date.formatted(.dateTime.month(.abbreviated).day())
+        }
+        return date.formatted(.dateTime.month(.abbreviated).day().year())
+    }
+
+    static func historyFiltersAccept(_ node: HistoryNode, filters: HistoryFilters) -> Bool {
+        if !filters.statuses.isEmpty {
+            guard let item = node.item,
+                  let category = historyStatusCategory(item.status),
+                  filters.statuses.contains(category) else { return false }
+        }
+        if !filters.kinds.isEmpty {
+            let kind: RunKind = node.item?.type.lowercased() == "chat" ? .chat : .run
+            guard filters.kinds.contains(kind) else { return false }
+        }
+        switch filters.hasSession {
+        case .some(true):
+            guard !(node.item?.sessionId ?? "").isEmpty else { return false }
+        case .some(false):
+            guard (node.item?.sessionId ?? "").isEmpty else { return false }
+        case .none:
+            break
+        }
+        return true
+    }
+
+    static func historySections(roots: [HistoryNode], pinnedRunIDs: Set<String>,
+                                filters: HistoryFilters = HistoryFilters(),
+                                calendar: Calendar = .current, now: Date = Date()) -> [HistorySection] {
+        let visible = roots.filter { historyFiltersAccept($0, filters: filters) }
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: now)
+        let weekStart = calendar.dateInterval(of: .weekOfYear, for: now)?.start
+        var nowNodes: [HistoryNode] = []
+        var pinnedNodes: [HistoryNode] = []
+        var todayNodes: [HistoryNode] = []
+        var yesterdayNodes: [HistoryNode] = []
+        var weekNodes: [HistoryNode] = []
+        var earlierNodes: [HistoryNode] = []
+        for node in visible {
+            let key = node.rootRunId ?? node.item?.id ?? ""
+            let category = node.item.flatMap { historyStatusCategory($0.status) }
+            if category != nil, category != .failed {
+                nowNodes.append(node)
+            } else if pinnedRunIDs.contains(key) {
+                pinnedNodes.append(node)
+            } else if calendar.isDate(node.newest, equalTo: now, toGranularity: .day) {
+                todayNodes.append(node)
+            } else if let yesterday, calendar.isDate(node.newest, equalTo: yesterday, toGranularity: .day) {
+                yesterdayNodes.append(node)
+            } else if let weekStart, node.newest >= weekStart {
+                weekNodes.append(node)
+            } else {
+                earlierNodes.append(node)
+            }
+        }
+        let buckets: [(title: String, nodes: [HistoryNode])] = [
+            ("Pinned", pinnedNodes), ("Now", nowNodes), ("Today", todayNodes),
+            ("Yesterday", yesterdayNodes), ("This Week", weekNodes),
+            (earlierNodes.count > 1 ? "Earlier · \(earlierNodes.count)" : "Earlier", earlierNodes),
+        ]
+        return buckets.filter { !$0.nodes.isEmpty }
+            .map { HistorySection(id: $0.title, title: $0.title, nodes: $0.nodes) }
+    }
+
+    var historySections: [HistorySection] {
+        Self.historySections(roots: historyTree, pinnedRunIDs: pinnedHistoryRunIDs, filters: historyFilters)
     }
 
     static func historyRunSnapshots(_ runs: [RunRecord]) -> [HistoryRunSnapshot] {

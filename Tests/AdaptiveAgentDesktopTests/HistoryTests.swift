@@ -163,14 +163,15 @@ final class HistoryTests: XCTestCase {
         let merged = model.mergeHistory([root, child], [root, child, sibling, grandchild, noSession, other])
         XCTAssertEqual(merged.map(\.id), ["grandchild", "other", "solo", "sibling", "child", "root"])
         let tree = AppModel.historyTree(items: merged)
-        XCTAssertEqual(tree.map(\.id), ["session:s", "session:new-session", "run:solo"])
-        XCTAssertEqual(tree[0].children.count, 1, "No redundant root/run identity row")
-        XCTAssertEqual(tree[0].children[0].children.map(\.item?.id), ["sibling", "child"], "Run siblings use their own start time")
-        XCTAssertEqual(tree[0].children[0].children[1].children[0].item?.id, "grandchild")
-        XCTAssertTrue(tree[2].label.hasPrefix("No session"))
+        XCTAssertEqual(tree.map(\.id), ["run:root", "run:other", "run:solo"])
+        XCTAssertEqual(tree[0].item?.id, "root")
+        XCTAssertEqual(tree[0].label, "root")
+        XCTAssertEqual(tree[0].children.map(\.item?.id), ["sibling", "child"], "Run siblings use their own start time")
+        XCTAssertEqual(tree[0].children[1].children[0].item?.id, "grandchild")
+        XCTAssertFalse(tree.map(\.label).contains { $0.contains("Session") })
         let ties = [item("b", time: "2026-09-08T01:00:00-07:00"), item("a", time: "2026-09-08T08:00:00.000Z")]
         XCTAssertEqual(model.mergeHistory([], ties).map(\.id), ["a", "b"])
-        XCTAssertEqual(AppModel.historyTree(items: merged, query: "grandchild").first?.children.first?.item?.id, "root")
+        XCTAssertEqual(AppModel.historyTree(items: merged, query: "grandchild").first?.item?.id, "root")
     }
 
     @MainActor
@@ -185,10 +186,13 @@ final class HistoryTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(300))
             XCTAssertEqual(try fixture.requests("trace").count, traceRequestCount,
                            "Typing a run goal must not query the trace helper")
-            let session = try XCTUnwrap(model.historyTree.first)
-            model.setHistoryExpanded(true, node: session)
-            XCTAssertTrue(model.historyReports.isEmpty)
-            model.setHistoryExpanded(true, node: try XCTUnwrap(session.children.first))
+            let thread = try XCTUnwrap(model.historyTree.first)
+            XCTAssertEqual(thread.id, "run:root-a")
+            XCTAssertEqual(thread.label, "Research report")
+            model.setHistoryExpanded(true, node: thread)
+            try await fixture.wait { model.historyReports["root-a"] != nil }
+            let expanded = try XCTUnwrap(model.historyTree.first)
+            model.setHistoryExpanded(true, node: try XCTUnwrap(expanded.children.first))
             try await fixture.wait { model.historyUsage["root-a"] != nil }
             XCTAssertEqual(model.historyItem(rootRunId: "grandchild-a")?.parentRunId, "child-a")
             model.selectHistoryRun("child-a")
@@ -215,6 +219,10 @@ final class HistoryTests: XCTestCase {
             try await fixture.wait { model.historyDetails["child-a"] != nil && model.historyUsageErrors["root-a"] == nil }
             XCTAssertNil(model.historyReportErrors["root-a"])
             XCTAssertNil(model.historyDetailErrors["child-a"])
+            model.collapseAllHistory()
+            model.expandHistoryThread(containing: "run-b")
+            XCTAssertTrue(model.expandedHistoryIDs.contains("root:root-b"))
+            XCTAssertFalse(model.expandedHistoryIDs.contains("run:root-a"))
             let requests = try fixture.requests("runtime")
             XCTAssertEqual(requests.filter { $0.objectValue?["method"] == .string("run/inspect") }.count, 3)
             XCTAssertTrue(requests.allSatisfy { !$0.objectValue!["method"]!.stringValue!.hasPrefix("agent/") })
@@ -280,5 +288,115 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(try AppModel.historyDetail(incompleteUsage, runId: "child", workspace: "/tmp/work").output, .string("Still visible"))
         XCTAssertNil(try AppModel.historyDetail(incompleteUsage, runId: "child", workspace: "/tmp/work").usage)
         XCTAssertThrowsError(try AppModel.historyDetail(inspection, runId: "root", workspace: "/tmp/work"))
+    }
+
+    @MainActor
+    func testHistorySectionsBucketByRecencyPinsAndFilters() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "UTC"))
+        calendar.firstWeekday = 1
+        let now = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 9, day: 8, hour: 12)))
+
+        func node(
+            _ id: String,
+            status: String = "succeeded",
+            type: String = "run",
+            session: String? = "s",
+            offset: TimeInterval? = nil
+        ) -> AppModel.HistoryNode {
+            let item = AppModel.HistoryItem(
+                rootRunId: id, runId: id, parentRunId: nil, sessionId: session,
+                title: id, status: status, startedAt: "", completedAt: nil, type: type
+            )
+            return .init(
+                id: "run:\(id)", label: id, item: item, rootRunId: id,
+                newest: offset.map { now.addingTimeInterval(-$0) } ?? .distantPast, children: []
+            )
+        }
+
+        let roots = [
+            node("active", status: "running", offset: 3600),
+            node("pinned-active", status: "running", offset: 7200),
+            node("today", offset: 10800),
+            node("yesterday", offset: 93600),
+            node("week", offset: 172800),
+            node("pinned-old", offset: 864000),
+            node("failed", status: "failed", offset: 180000),
+            node("chat", type: "Chat", offset: 14400),
+            node("sessionless", session: nil, offset: 18000),
+            node("undated"),
+        ]
+        let pinned: Set<String> = ["pinned-active", "pinned-old"]
+        let sections = AppModel.historySections(roots: roots, pinnedRunIDs: pinned, calendar: calendar, now: now)
+        XCTAssertEqual(sections.map(\.title), ["Pinned", "Now", "Today", "Yesterday", "This Week", "Earlier"])
+        XCTAssertEqual(sections[0].nodes.map { $0.item?.id }, ["pinned-old"])
+        XCTAssertEqual(sections[1].nodes.map { $0.item?.id }, ["active", "pinned-active"])
+        XCTAssertEqual(sections[2].nodes.map { $0.item?.id }, ["today", "chat", "sessionless"])
+        XCTAssertEqual(sections[3].nodes.map { $0.item?.id }, ["yesterday"])
+        XCTAssertEqual(sections[4].nodes.map { $0.item?.id }, ["week", "failed"])
+        XCTAssertEqual(sections[5].nodes.map { $0.item?.id }, ["undated"])
+
+        func ids(_ filters: AppModel.HistoryFilters) -> [String] {
+            AppModel.historySections(roots: roots, pinnedRunIDs: pinned, filters: filters, calendar: calendar, now: now)
+                .flatMap { $0.nodes.compactMap { $0.item?.id } }
+        }
+        XCTAssertEqual(ids(.init(statuses: [.failed])), ["failed"])
+        XCTAssertEqual(ids(.init(kinds: [.chat])), ["chat"])
+        XCTAssertEqual(ids(.init(hasSession: false)), ["sessionless"])
+        XCTAssertEqual(ids(.init(statuses: [.running, .waiting])), ["active", "pinned-active"])
+
+        let wrapper = AppModel.HistoryNode(
+            id: "root:x", label: "Root x", item: nil, rootRunId: "x", newest: now, children: []
+        )
+        XCTAssertEqual(AppModel.historySections(roots: [wrapper], pinnedRunIDs: []).map(\.title), ["Today"])
+        XCTAssertTrue(AppModel.historySections(
+            roots: [wrapper], pinnedRunIDs: [], filters: .init(statuses: [.failed])
+        ).isEmpty)
+    }
+
+    @MainActor
+    func testHistoryDisplayStatusAndRelativeTime() {
+        XCTAssertEqual(AppModel.historyDisplayStatus("succeeded"), "Completed")
+        XCTAssertEqual(AppModel.historyDisplayStatus("Completed"), "Completed")
+        XCTAssertEqual(AppModel.historyDisplayStatus("awaiting_approval"), "Waiting")
+        XCTAssertEqual(AppModel.historyDisplayStatus("Approval required"), "Waiting")
+        XCTAssertEqual(AppModel.historyDisplayStatus("Question pending"), "Waiting")
+        XCTAssertEqual(AppModel.historyDisplayStatus("awaiting_subagent"), "Running")
+        XCTAssertEqual(AppModel.historyDisplayStatus("planning"), "Planning")
+        XCTAssertEqual(AppModel.historyDisplayStatus("interrupted"), "Interrupted")
+        XCTAssertEqual(AppModel.historyDisplayStatus("mystery"), "Unknown")
+        XCTAssertEqual(AppModel.historyTimeText(.distantPast), "")
+        XCTAssertEqual(AppModel.historyTimeText(Date()), "now")
+        XCTAssertFalse(AppModel.historyTimeText(Date().addingTimeInterval(-7200)).isEmpty)
+        XCTAssertFalse(AppModel.historyTimeText(Date().addingTimeInterval(-172800)).isEmpty)
+        XCTAssertFalse(AppModel.historyTimeText(Date().addingTimeInterval(-34560000)).isEmpty)
+    }
+
+    @MainActor
+    func testPinnedHistoryRunsPersistAcrossModels() throws {
+        let suiteName = "HistoryTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let first = AppModel(workingDirectoryURL: URL(fileURLWithPath: "/tmp"), historyDefaults: defaults)
+        first.togglePinnedHistoryRun("root-a")
+        first.togglePinnedHistoryRun("root-b")
+        XCTAssertEqual(first.pinnedHistoryRunIDs, ["root-a", "root-b"])
+        XCTAssertEqual(defaults.stringArray(forKey: "pinnedHistoryRunIDs"), ["root-a", "root-b"])
+        first.togglePinnedHistoryRun("root-a")
+        XCTAssertEqual(defaults.stringArray(forKey: "pinnedHistoryRunIDs"), ["root-b"])
+        let second = AppModel(workingDirectoryURL: URL(fileURLWithPath: "/tmp"), historyDefaults: defaults)
+        XCTAssertEqual(second.pinnedHistoryRunIDs, ["root-b"])
+    }
+
+    @MainActor
+    func testCollapseAllHistoryClearsExpansion() {
+        let model = AppModel(workingDirectoryURL: URL(fileURLWithPath: "/tmp"))
+        let node = AppModel.HistoryNode(
+            id: "run:x", label: "x", item: nil, rootRunId: nil, newest: .distantPast, children: []
+        )
+        model.setHistoryExpanded(true, node: node)
+        XCTAssertEqual(model.expandedHistoryIDs, ["run:x"])
+        model.collapseAllHistory()
+        XCTAssertTrue(model.expandedHistoryIDs.isEmpty)
     }
 }
