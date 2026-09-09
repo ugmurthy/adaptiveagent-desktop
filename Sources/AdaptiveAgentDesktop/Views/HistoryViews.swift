@@ -53,13 +53,13 @@ struct HistoryTreeRow: View {
 
     @ViewBuilder private func actions(runId: String) -> some View {
         Button("Copy Goal", systemImage: "doc.on.doc") {
-            copyToPasteboard(node.item?.title ?? node.label)
+            Self.copyToPasteboard(node.item?.title ?? node.label)
         }
         Button("Copy Run ID", systemImage: "number") {
-            copyToPasteboard(runId)
+            Self.copyToPasteboard(runId)
         }
         Button("Copy Session ID", systemImage: "person.crop.circle") {
-            copyToPasteboard(node.item?.sessionId ?? "")
+            Self.copyToPasteboard(node.item?.sessionId ?? "")
         }
         .disabled((node.item?.sessionId ?? "").isEmpty)
         if isThreadRoot, let root = node.rootRunId {
