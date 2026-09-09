@@ -297,15 +297,25 @@ final class AppModel: ObservableObject {
     @Published private(set) var accessTokenUpdateFailed = false
     @Published private(set) var isUpdatingAccessToken = false
 
-    @Published var runs: [RunRecord] = []
+    @Published var runs: [RunRecord] = [] {
+        didSet {
+            if Self.historyRunSnapshots(runs) != Self.historyRunSnapshots(oldValue) {
+                invalidateHistoryPresentation()
+            }
+        }
+    }
     @Published private(set) var tabs: [RunTab] = []
     @Published private(set) var selectedTabID: UUID? {
         didSet {
             if oldValue != selectedTabID { publishSelectedSession() }
         }
     }
-    @Published private(set) var historyItems: [HistoryItem] = []
-    @Published private(set) var historyReports: [String: TraceReport] = [:]
+    @Published private(set) var historyItems: [HistoryItem] = [] {
+        didSet { invalidateHistoryPresentation() }
+    }
+    @Published private(set) var historyReports: [String: TraceReport] = [:] {
+        didSet { invalidateHistoryPresentation() }
+    }
     @Published private(set) var historyReportErrors: [String: String] = [:]
     @Published private(set) var loadingHistoryRunID: String?
     @Published var expandedHistoryIDs: Set<String> = []
@@ -325,7 +335,9 @@ final class AppModel: ObservableObject {
         var after: TraceSessionCursor?
     }
     @Published private(set) var historyState: HistoryLoadState = .unavailable("Connect to load history")
-    @Published private(set) var historySearchResults: [HistoryItem] = []
+    @Published private(set) var historySearchResults: [HistoryItem] = [] {
+        didSet { invalidateHistoryPresentation() }
+    }
     @Published private(set) var isSearchingHistory = false
     @Published private(set) var historySearchError: String?
     @Published var historySearchQuery = ""
@@ -350,7 +362,9 @@ final class AppModel: ObservableObject {
     private var didBootstrap = false
     private var isQuitting = false
     private var pendingRootAssignments: [UUID] = []
-    private var runToRoot: [String: String] = [:]
+    private var runToRoot: [String: String] = [:] {
+        didSet { invalidateHistoryPresentation() }
+    }
     private var recordByRoot: [String: UUID] = [:]
     private var resolvedInteractions: Set<UUID> = []
     private var loadedSettingsConfigPath: String?
@@ -358,6 +372,12 @@ final class AppModel: ObservableObject {
     private var inspectionCacheMetadata: [UUID: InspectionCacheMetadata] = [:]
     private var historySearchTask: Task<Void, Never>?
     private var historyRefreshTask: Task<Void, Never>?
+    var historyPresentationRevision = 0
+    var cachedHistoryItemsRevision = -1
+    var cachedAllHistoryItems: [HistoryItem] = []
+    var cachedHistoryTreeRevision = -1
+    var cachedHistoryTreeQuery = ""
+    var cachedHistoryTree: [HistoryNode] = []
     private var receivingSessionID: UUID?
     private let inspectionClock = ContinuousClock()
     var applicationQuitHandler: ((AppModel, Bool) -> Void)?
@@ -2029,7 +2049,13 @@ final class AppModel: ObservableObject {
             item.runtimeSessionID = byID[item.id]?.runtimeSessionID ?? item.runtimeSessionID
             byID[item.id] = item
         }
-        return byID.values.sorted(by: Self.historyNewestFirst)
+        let datedItems: [(item: HistoryItem, date: Date)] = byID.values.map { item in
+            (item: item, date: Self.historyDate(item.startedAt))
+        }
+        let sortedItems = datedItems.sorted { left, right in
+            left.date == right.date ? left.item.id < right.item.id : left.date > right.date
+        }
+        return sortedItems.map(\.item)
     }
 
     private func removeDeletedRun(rootRunId: String, requestedRunId: String) {

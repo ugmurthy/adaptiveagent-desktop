@@ -1,6 +1,25 @@
 import Foundation
 
 extension AppModel {
+    private static let historyDateFormatterWithFractionalSeconds: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let historyDateFormatter = ISO8601DateFormatter()
+
+    struct HistoryRunSnapshot: Equatable {
+        let id: UUID
+        let runtimeSessionID: UUID?
+        let kind: RunKind
+        let title: String
+        let sessionId: String?
+        let runIds: [String]
+        let status: RunStatus
+        let activityStartedAt: Date?
+    }
+
     struct HistoryDetail: Equatable {
         let output: JSONValue?
         let usage: TraceUsageTotals?
@@ -17,11 +36,9 @@ extension AppModel {
     }
 
     static func historyDate(_ value: String) -> Date {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: value) { return date }
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: value) ?? .distantPast
+        historyDateFormatterWithFractionalSeconds.date(from: value)
+            ?? historyDateFormatter.date(from: value)
+            ?? .distantPast
     }
 
     static func historyNewestFirst(_ lhs: HistoryItem, _ rhs: HistoryItem) -> Bool {
@@ -30,6 +47,9 @@ extension AppModel {
     }
 
     var allHistoryItems: [HistoryItem] {
+        if cachedHistoryItemsRevision == historyPresentationRevision {
+            return cachedAllHistoryItems
+        }
         let local = runs.filter { !$0.status.isActive }.flatMap { record in
             record.runIds.map { runId in
                 HistoryItem(
@@ -42,11 +62,13 @@ extension AppModel {
             }
         }
         let known = mergeHistory(local, historyItems + historySearchResults)
+        let knownByID = Dictionary(uniqueKeysWithValues: known.map { ($0.id, $0) })
+        let ownerByRoot = Dictionary(grouping: known, by: \.rootRunId).compactMapValues(\.first)
         var items = known
         for (root, report) in historyReports {
-            guard let owner = known.first(where: { $0.rootRunId == root }) else { continue }
+            guard let owner = ownerByRoot[root] else { continue }
             for run in report.runTree ?? [] {
-                let existing = known.first { $0.id == run.runId }
+                let existing = knownByID[run.runId]
                 items.append(HistoryItem(
                     rootRunId: root, runId: run.runId, parentRunId: run.parentRunId,
                     runtimeSessionID: owner.runtimeSessionID, sessionId: owner.sessionId,
@@ -58,11 +80,20 @@ extension AppModel {
             }
         }
         let active = Set(runs.filter { $0.status.isActive }.flatMap(\.runIds))
-        return mergeHistory([], items).filter { !active.contains($0.id) && !active.contains($0.rootRunId) }
+        cachedAllHistoryItems = mergeHistory([], items)
+            .filter { !active.contains($0.id) && !active.contains($0.rootRunId) }
+        cachedHistoryItemsRevision = historyPresentationRevision
+        return cachedAllHistoryItems
     }
 
     var historyTree: [HistoryNode] {
-        Self.historyTree(items: allHistoryItems, query: historySearchQuery)
+        let query = historySearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cachedHistoryTreeRevision != historyPresentationRevision || cachedHistoryTreeQuery != query {
+            cachedHistoryTree = Self.historyTree(items: allHistoryItems, query: query)
+            cachedHistoryTreeRevision = historyPresentationRevision
+            cachedHistoryTreeQuery = query
+        }
+        return cachedHistoryTree
     }
 
     static func historyTree(items: [HistoryItem], query: String = "") -> [HistoryNode] {
@@ -78,14 +109,28 @@ extension AppModel {
                     .contains { $0.localizedCaseInsensitiveContains(query) }
             }) else { continue }
             let ids = Set(runs.map(\.id))
+            let dates = Dictionary(uniqueKeysWithValues: runs.map { ($0.id, historyDate($0.startedAt)) })
+            var childrenByParent: [String: [HistoryItem]] = [:]
+            for item in runs {
+                if let parent = item.parentRunId, ids.contains(parent) {
+                    childrenByParent[parent, default: []].append(item)
+                }
+            }
+            for parent in childrenByParent.keys {
+                childrenByParent[parent]?.sort {
+                    let left = dates[$0.id] ?? .distantPast
+                    let right = dates[$1.id] ?? .distantPast
+                    return left == right ? $0.id < $1.id : left > right
+                }
+            }
             var visited: Set<String> = []
             func node(_ item: HistoryItem) -> HistoryNode {
                 visited.insert(item.id)
-                let children = runs.filter { $0.parentRunId == item.id && !visited.contains($0.id) }
-                    .sorted(by: historyNewestFirst).map(node)
+                let children = (childrenByParent[item.id] ?? [])
+                    .filter { !visited.contains($0.id) }.map(node)
                 return HistoryNode(
                     id: "run:\(item.id)", label: item.title, item: item, rootRunId: rootID,
-                    newest: max(historyDate(item.startedAt), children.map(\.newest).max() ?? .distantPast),
+                    newest: max(dates[item.id] ?? .distantPast, children.map(\.newest).max() ?? .distantPast),
                     children: children
                 )
             }
@@ -138,6 +183,25 @@ extension AppModel {
         } else {
             expandedHistoryIDs.remove(node.id)
         }
+    }
+
+    static func historyRunSnapshots(_ runs: [RunRecord]) -> [HistoryRunSnapshot] {
+        runs.map {
+            HistoryRunSnapshot(
+                id: $0.id,
+                runtimeSessionID: $0.runtimeSessionID,
+                kind: $0.kind,
+                title: $0.title,
+                sessionId: $0.sessionId,
+                runIds: $0.runIds,
+                status: $0.status,
+                activityStartedAt: $0.activityStartedAt
+            )
+        }
+    }
+
+    func invalidateHistoryPresentation() {
+        historyPresentationRevision &+= 1
     }
 
     static func historyDetail(_ inspection: JSONValue, runId: String, workspace: String) throws -> HistoryDetail {

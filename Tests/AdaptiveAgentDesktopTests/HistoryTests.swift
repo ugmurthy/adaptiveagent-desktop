@@ -133,6 +133,21 @@ for line in sys.stdin:
 
 final class HistoryTests: XCTestCase {
     @MainActor
+    func testDraftTypingDoesNotRebuildHistoryPresentation() throws {
+        let model = AppModel(workingDirectoryURL: URL(fileURLWithPath: "/tmp"))
+        _ = model.historyTree
+        let revision = model.historyPresentationRevision
+        let cachedRevision = model.cachedHistoryTreeRevision
+        let tabID = try XCTUnwrap(model.selectedTabID)
+
+        model.setDraftText("a", forTab: tabID)
+
+        XCTAssertEqual(model.historyPresentationRevision, revision)
+        XCTAssertEqual(model.cachedHistoryTreeRevision, cachedRevision)
+        XCTAssertEqual(model.tab(withID: tabID)?.draftText, "a")
+    }
+
+    @MainActor
     func testParsedDatesDedupAndRecursiveHierarchy() throws {
         let model = AppModel(workingDirectoryURL: URL(fileURLWithPath: "/tmp"))
         func item(_ id: String, root: String? = nil, parent: String? = nil, session: String? = "s", time: String) -> AppModel.HistoryItem {
@@ -165,6 +180,11 @@ final class HistoryTests: XCTestCase {
             try await fixture.start()
             let model = fixture.model
             XCTAssertTrue(model.historyReports.isEmpty, "Trace children load lazily")
+            let traceRequestCount = try fixture.requests("trace").count
+            model.setDraftText("a", forTab: try XCTUnwrap(model.selectedTabID))
+            try await Task.sleep(for: .milliseconds(300))
+            XCTAssertEqual(try fixture.requests("trace").count, traceRequestCount,
+                           "Typing a run goal must not query the trace helper")
             let session = try XCTUnwrap(model.historyTree.first)
             model.setHistoryExpanded(true, node: session)
             XCTAssertTrue(model.historyReports.isEmpty)
