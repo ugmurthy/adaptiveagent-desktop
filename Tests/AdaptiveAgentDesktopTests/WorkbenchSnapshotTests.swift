@@ -82,4 +82,48 @@ final class WorkbenchSnapshotTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testHistorySnapshots() async throws {
+        guard let directory = ProcessInfo.processInfo.environment["WORKBENCH_SNAPSHOT_DIRECTORY"] else {
+            throw XCTSkip("Set WORKBENCH_SNAPSHOT_DIRECTORY to render history fixtures")
+        }
+        for state in ["normal", "unavailable", "error"] {
+            let fixture = try HistoryFixture(mode: state)
+            do {
+                try await fixture.start()
+                let model = fixture.model
+                model.selectHistoryRun("root-a")
+                try await fixture.wait { model.historyUsage["root-a"] != nil && model.historyDetails["root-a"] != nil }
+                model.expandedHistoryIDs = ["session:session-research", "run:root-a", "run:child-a", "root:root-b"]
+                model.loadHistoryReport("root-b")
+                try await fixture.wait { model.historyReports["root-b"] != nil }
+                model.selectHistoryRun("child-a")
+                try await fixture.wait { model.historyDetails["child-a"] != nil }
+                if state == "error" {
+                    try "fail".write(to: fixture.directory.appendingPathComponent("fail"), atomically: true, encoding: .utf8)
+                    model.retryHistoryReport("child-a")
+                    try await fixture.wait { model.historyDetailErrors["child-a"] != nil && model.historyUsageErrors["root-a"] != nil }
+                }
+                let view = NSHostingView(rootView: ContentView().environmentObject(model).background(Color(nsColor: .windowBackgroundColor)))
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 1060),
+                                      styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+                window.appearance = NSAppearance(named: .aqua)
+                window.contentView = view
+                window.makeKeyAndOrderFront(nil)
+                try await Task.sleep(for: .milliseconds(400))
+                view.layoutSubtreeIfNeeded()
+                let description = view.debugDescription + view.subviews.map(\.debugDescription).joined(separator: "\n")
+                XCTAssertFalse(description.contains("Open in Runtime"))
+                XCTAssertFalse(description.contains("Run Actions"))
+                XCTAssertFalse(description.contains("Steer"))
+                let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent("native-history-\(state).png"))
+                window.orderOut(nil)
+            } catch { await fixture.close(); throw error }
+            await fixture.close()
+        }
+    }
+
 }

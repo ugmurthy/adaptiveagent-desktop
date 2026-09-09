@@ -254,7 +254,7 @@ enum ProtocolRedactor {
         var result = text
         let patterns = [
             #"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"#,
-            #"(?i)(\"?(?:access[_-]?token|api[_-]?key|authorization)\"?\s*[:=]\s*\"?)[^\"\s,}]+"#
+            #"(?i)(\"?(?:access[_-]?token|token|api[_-]?key|authorization)\"?\s*[:=]\s*\"?)[^\"\s,}]+"#
         ]
         for pattern in patterns {
             result = result.replacingOccurrences(

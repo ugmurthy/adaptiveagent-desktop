@@ -196,6 +196,8 @@ final class AppModel: ObservableObject {
 
     struct HistoryItem: Identifiable, Equatable {
         let rootRunId: String
+        var runId: String? = nil
+        var parentRunId: String? = nil
         var runtimeSessionID: UUID? = nil
         let sessionId: String?
         let title: String
@@ -204,7 +206,7 @@ final class AppModel: ObservableObject {
         let completedAt: String?
         let type: String
 
-        var id: String { rootRunId }
+        var id: String { runId ?? rootRunId }
     }
 
     enum HistoryLoadState: Equatable {
@@ -306,6 +308,22 @@ final class AppModel: ObservableObject {
     @Published private(set) var historyReports: [String: TraceReport] = [:]
     @Published private(set) var historyReportErrors: [String: String] = [:]
     @Published private(set) var loadingHistoryRunID: String?
+    @Published var expandedHistoryIDs: Set<String> = []
+    @Published private(set) var historyUsage: [String: TraceUsageSummary] = [:]
+    @Published private(set) var historyUsageErrors: [String: String] = [:]
+    @Published private(set) var historyDetails: [String: HistoryDetail] = [:]
+    @Published private(set) var historyDetailErrors: [String: String] = [:]
+    private var loadingHistoryRoots: Set<String> = []
+    private var loadingHistoryDetails: Set<String> = []
+    private var historyPages: [UUID: HistoryPage] = [:]
+    private var loadingHistoryPages: Set<UUID> = []
+    @Published private(set) var historyPagingMessage: String?
+    @Published private(set) var hasOlderHistory = false
+
+    struct HistoryPage {
+        var until: String
+        var after: TraceSessionCursor?
+    }
     @Published private(set) var historyState: HistoryLoadState = .unavailable("Connect to load history")
     @Published private(set) var historySearchResults: [HistoryItem] = []
     @Published private(set) var isSearchingHistory = false
@@ -649,7 +667,7 @@ final class AppModel: ObservableObject {
 
     func selectHistoryRun(_ rootRunId: String) {
         guard let selectedItem = historyItem(rootRunId: rootRunId) else { return }
-        if !historyItems.contains(where: { $0.rootRunId == rootRunId }) {
+        if !historyItems.contains(where: { $0.id == rootRunId }) {
             historyItems = mergeHistory(historyItems, [selectedItem])
         }
         replaceDetail(with: RunTab(
@@ -657,12 +675,13 @@ final class AppModel: ObservableObject {
             selectedHistoryRunID: rootRunId,
             followLive: false
         ))
-        loadHistoryReport(rootRunId)
+        loadHistoryReport(selectedItem.rootRunId)
+        loadHistoryDetail(selectedItem)
     }
 
     func historyItem(rootRunId: String) -> HistoryItem? {
-        historyItems.first { $0.rootRunId == rootRunId }
-            ?? historySearchResults.first { $0.rootRunId == rootRunId }
+        allHistoryItems.first { $0.id == rootRunId }
+            ?? allHistoryItems.first { $0.rootRunId == rootRunId }
     }
 
     func deletableRootRunID(for recordID: UUID) -> String? {
@@ -717,14 +736,6 @@ final class AppModel: ObservableObject {
 
     func clearRunDeletionError() {
         runDeletionError = nil
-    }
-
-    func openHistoryInRuntime(_ rootRunId: String) {
-        runCommand(
-            "run/inspect",
-            runId: rootRunId,
-            displayTitle: historyItem(rootRunId: rootRunId)?.title
-        )
     }
 
     func newRun() {
@@ -1350,8 +1361,8 @@ final class AppModel: ObservableObject {
     func loadOlderHistory() {
         guard case .loaded = historyState,
               let sessionID = selectedTab?.runtimeSessionID,
-              let oldest = historyItems.filter({ $0.runtimeSessionID == sessionID }).last?.startedAt else { return }
-        Task { await loadHistory(sessionID: sessionID, replacing: false, until: oldest) }
+              hasOlderHistory, historyPages[sessionID]?.after != nil else { return }
+        Task { await loadHistory(sessionID: sessionID, replacing: false) }
     }
 
     func updateHistorySearch(_ query: String) {
@@ -1375,13 +1386,20 @@ final class AppModel: ObservableObject {
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled else { return }
             do {
-                let sessions = try await traceClient.listSessions(.init(goals: [normalized], limit: 100))
-                guard !Task.isCancelled,
-                      historySearchQuery.trimmingCharacters(in: .whitespacesAndNewlines) == normalized else { return }
-                historySearchResults = mergeHistory(
-                    localHistoryMatches(normalized),
-                    flattenHistory(sessions, runtimeSessionID: sessionID)
-                )
+                let until = ISO8601DateFormatter().string(from: Date())
+                var after: TraceSessionCursor?
+                repeat {
+                    let sessions = try await traceClient.listSessions(.init(goals: [normalized], limit: 100, until: until, after: after))
+                    guard !Task.isCancelled,
+                          historySearchQuery.trimmingCharacters(in: .whitespacesAndNewlines) == normalized else { return }
+                    historySearchResults = mergeHistory(historySearchResults, flattenHistory(sessions, runtimeSessionID: sessionID))
+                    guard sessions.count == 100 else { break }
+                    guard let cursor = sessions.last?.cursor, cursor != after else {
+                        historySearchError = "More matches may exist. Upgrade the trace helper for cursor-based history search."
+                        break
+                    }
+                    after = cursor
+                } while !Task.isCancelled
                 isSearchingHistory = false
             } catch {
                 guard !Task.isCancelled else { return }
@@ -1393,8 +1411,11 @@ final class AppModel: ObservableObject {
     }
 
     func retryHistoryReport(_ rootRunId: String) {
-        historyReports.removeValue(forKey: rootRunId)
-        loadHistoryReport(rootRunId)
+        guard let item = historyItem(rootRunId: rootRunId) else { return }
+        historyUsage.removeValue(forKey: item.rootRunId)
+        historyDetails.removeValue(forKey: item.id)
+        loadHistoryReport(item.rootRunId, force: true)
+        loadHistoryDetail(item)
     }
 
     func updateAccessToken() {
@@ -1884,18 +1905,28 @@ final class AppModel: ObservableObject {
         historySearchError = nil
     }
 
-    private func loadHistory(sessionID: UUID, replacing: Bool, until: String? = nil) async {
-        guard let session = sessions[sessionID] else { return }
+    private func loadHistory(sessionID: UUID, replacing: Bool) async {
+        guard let session = sessions[sessionID], !loadingHistoryPages.contains(sessionID) else { return }
+        loadingHistoryPages.insert(sessionID)
+        defer { loadingHistoryPages.remove(sessionID) }
         historyState = .loading
+        let page = replacing
+            ? HistoryPage(until: ISO8601DateFormatter().string(from: Date()), after: nil)
+            : historyPages[sessionID] ?? HistoryPage(until: ISO8601DateFormatter().string(from: Date()), after: nil)
         do {
-            let traceSessions = try await session.traceClient.listSessions(.init(limit: 100, until: until))
+            let traceSessions = try await session.traceClient.listSessions(.init(limit: 100, until: page.until, after: page.after))
+            historyPages[sessionID] = HistoryPage(until: page.until, after: traceSessions.last?.cursor)
+            hasOlderHistory = traceSessions.count == 100 && traceSessions.last?.cursor != nil
+            historyPagingMessage = traceSessions.count == 100 && traceSessions.last?.cursor == nil
+                ? "More history may exist. Upgrade the trace helper for correctly ordered, cursor-based history."
+                : nil
             let loaded = flattenHistory(traceSessions, runtimeSessionID: sessionID)
             if replacing {
                 let openHistoryIDs = Set(
                     tabs.filter { $0.runtimeSessionID == sessionID }.compactMap(\.selectedHistoryRunID)
                 )
                 let retained = historyItems.filter {
-                    $0.runtimeSessionID != sessionID || openHistoryIDs.contains($0.rootRunId)
+                    $0.runtimeSessionID != sessionID || openHistoryIDs.contains($0.id)
                 }
                 historyItems = mergeHistory(retained, loaded)
             } else {
@@ -1908,25 +1939,61 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func loadHistoryReport(_ rootRunId: String) {
-        guard historyReports[rootRunId] == nil, loadingHistoryRunID != rootRunId else { return }
+    func loadHistoryReport(_ rootRunId: String, force: Bool = false) {
+        guard (force || historyReports[rootRunId] == nil), !loadingHistoryRoots.contains(rootRunId) else { return }
+        loadingHistoryRoots.insert(rootRunId)
         loadingHistoryRunID = rootRunId
         historyReportErrors.removeValue(forKey: rootRunId)
         Task {
+            defer {
+                loadingHistoryRoots.remove(rootRunId)
+                if loadingHistoryRunID == rootRunId { loadingHistoryRunID = nil }
+            }
+            let sessionID = historyItem(rootRunId: rootRunId)?.runtimeSessionID
+                ?? selectedTab?.runtimeSessionID
+            guard let sessionID, let session = sessions[sessionID] else { return }
             do {
-                let sessionID = historyItem(rootRunId: rootRunId)?.runtimeSessionID
-                    ?? selectedTab?.runtimeSessionID
-                guard let sessionID, let session = sessions[sessionID] else { return }
                 let report = try await session.traceClient.getTrace(rootRunId: rootRunId)
                 historyReports[rootRunId] = report
             } catch {
                 historyReportErrors[rootRunId] = redactedErrorDescription(error)
             }
-            if loadingHistoryRunID == rootRunId { loadingHistoryRunID = nil }
+            do {
+                historyUsage[rootRunId] = try await session.traceClient.usage(rootRunId: rootRunId)
+                historyUsageErrors.removeValue(forKey: rootRunId)
+            } catch {
+                historyUsageErrors[rootRunId] = redactedErrorDescription(error)
+            }
         }
     }
 
-    private func flattenHistory(
+    private func loadHistoryDetail(_ item: HistoryItem) {
+        guard historyDetails[item.id] == nil, !loadingHistoryDetails.contains(item.id) else { return }
+        // Local terminal runs remain inspectable when persistence or the helper is unavailable.
+        if let record = runs.first(where: { $0.runIds.contains(item.id) }), !record.status.isActive {
+            historyDetails[item.id] = HistoryDetail(
+                output: record.latestRunId == item.id ? record.output.map(ProtocolRedactor.redact) : nil,
+                usage: nil, files: record.files.filter { $0.sourceRunId == item.id }
+            )
+        }
+        loadingHistoryDetails.insert(item.id)
+        historyDetailErrors.removeValue(forKey: item.id)
+        let sessionID = item.runtimeSessionID ?? selectedTab?.runtimeSessionID
+        Task {
+            defer { loadingHistoryDetails.remove(item.id) }
+            guard let sessionID, let session = sessions[sessionID] else { return }
+            do {
+                let inspection = try await session.client.send(method: "run/inspect", params: ["runId": .string(item.id)])
+                let workspace = session.effectiveWorkspaceRoot.isEmpty
+                    ? session.configuration.workspacePath : session.effectiveWorkspaceRoot
+                historyDetails[item.id] = try Self.historyDetail(inspection, runId: item.id, workspace: workspace)
+            } catch {
+                historyDetailErrors[item.id] = redactedErrorDescription(error)
+            }
+        }
+    }
+
+    func flattenHistory(
         _ traceSessions: [TraceSessionListItem],
         runtimeSessionID: UUID
     ) -> [HistoryItem] {
@@ -1936,6 +2003,7 @@ final class AppModel: ObservableObject {
                 let displayTitle = goalTitle.flatMap { $0.isEmpty ? nil : $0 }
                 return HistoryItem(
                     rootRunId: goal.rootRunId,
+                    runId: goal.runId,
                     runtimeSessionID: runtimeSessionID,
                     sessionId: traceSession.sessionId,
                     title: displayTitle ?? "Run \(String(goal.rootRunId.prefix(12)))",
@@ -1946,18 +2014,28 @@ final class AppModel: ObservableObject {
                 )
             }
         }
-        .sorted { $0.startedAt > $1.startedAt }
+        .sorted(by: Self.historyNewestFirst)
     }
 
-    private func mergeHistory(_ first: [HistoryItem], _ second: [HistoryItem]) -> [HistoryItem] {
-        var byID = Dictionary(uniqueKeysWithValues: first.map { ($0.rootRunId, $0) })
-        for item in second { byID[item.rootRunId] = item }
-        return byID.values.sorted { $0.startedAt > $1.startedAt }
+    func historyRootRunId(for runId: String) -> String {
+        runToRoot[runId] ?? runId
+    }
+
+    func mergeHistory(_ first: [HistoryItem], _ second: [HistoryItem]) -> [HistoryItem] {
+        var byID: [String: HistoryItem] = [:]
+        for var item in first + second {
+            // The same persisted UUID can be visible through several connections to one DB.
+            // Refresh metadata without silently changing the connection/workspace that owns it.
+            item.runtimeSessionID = byID[item.id]?.runtimeSessionID ?? item.runtimeSessionID
+            byID[item.id] = item
+        }
+        return byID.values.sorted(by: Self.historyNewestFirst)
     }
 
     private func removeDeletedRun(rootRunId: String, requestedRunId: String) {
         let deletedRunIDs = Set(
             runToRoot.compactMap { runId, mappedRoot in mappedRoot == rootRunId ? runId : nil }
+                + allHistoryItems.filter { $0.rootRunId == rootRunId }.map(\.id)
                 + [rootRunId, requestedRunId]
         )
         let deletedRecordIDs = Set(runs.compactMap { record in
@@ -1970,13 +2048,19 @@ final class AppModel: ObservableObject {
         historyReports.removeValue(forKey: requestedRunId)
         historyReportErrors.removeValue(forKey: rootRunId)
         historyReportErrors.removeValue(forKey: requestedRunId)
+        historyUsage.removeValue(forKey: rootRunId)
+        historyUsageErrors.removeValue(forKey: rootRunId)
+        for id in deletedRunIDs {
+            historyDetails.removeValue(forKey: id)
+            historyDetailErrors.removeValue(forKey: id)
+            expandedHistoryIDs.remove("run:\(id)")
+        }
         if loadingHistoryRunID == rootRunId || loadingHistoryRunID == requestedRunId {
             loadingHistoryRunID = nil
         }
 
         let removedSelectedDetail = selectedTab?.selectedRunID.map(deletedRecordIDs.contains) == true
-            || selectedTab?.selectedHistoryRunID == rootRunId
-            || selectedTab?.selectedHistoryRunID == requestedRunId
+            || selectedTab?.selectedHistoryRunID.map(deletedRunIDs.contains) == true
         runs.removeAll { deletedRecordIDs.contains($0.id) }
         if removedSelectedDetail {
             openDraft(kind: .run)

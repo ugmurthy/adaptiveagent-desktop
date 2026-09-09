@@ -2,7 +2,7 @@ import AppKit
 import MarkdownUI
 import SwiftUI
 
-private enum SidebarItemID: Hashable {
+enum SidebarItemID: Hashable {
     case live(UUID)
     case history(String)
 }
@@ -61,6 +61,7 @@ struct ContentView: View {
             Text(model.runDeletionError ?? "The selected runs could not be deleted.")
         }
         .task { model.bootstrap() }
+        .onAppear { synchronizeSidebarSelection() }
         .onChange(of: model.selectedTabID) { _, _ in synchronizeSidebarSelection() }
     }
 
@@ -82,24 +83,12 @@ struct ContentView: View {
                     )
                     .listRowSeparator(.hidden)
 
-                    ForEach(recentRuns) { record in
-                        RunRow(record: record)
-                            .tag(SidebarItemID.live(record.id))
-                            .contextMenu {
-                                if let rootRunId = model.deletableRootRunID(for: record.id) {
-                                    deleteRunButton(rootRunId: rootRunId)
-                                }
-                            }
-                    }
-
-                    ForEach(visibleTraceHistory) { item in
-                        HistoryRunRow(item: item, isDeleting: model.deletingRunIDs.contains(item.rootRunId))
-                            .tag(SidebarItemID.history(item.rootRunId))
-                            .contextMenu {
-                                if item.allowsDeletion {
-                                    deleteRunButton(rootRunId: item.rootRunId)
-                                }
-                            }
+                    ForEach(model.historyTree) { node in
+                        HistoryTreeRow(node: node) { rootRunId in
+                            let selected = selectedDeletionRunIDs
+                            pendingDeletionRunIDs = selected.contains(rootRunId) ? selected : [rootRunId]
+                            deletionConfirmationPresented = true
+                        }
                     }
 
                     historyStatusRow
@@ -142,7 +131,7 @@ struct ContentView: View {
                 .buttonStyle(.borderless)
                 .disabled(selectedDeletionRunIDs.isEmpty || !model.isConnected)
                 .help("Delete selected runs")
-                Text("\(activeRuns.count + recentRuns.count + visibleTraceHistory.count)")
+                Text("\(activeRuns.count + model.allHistoryItems.count)")
                     .foregroundStyle(.tertiary)
                     .monospacedDigit()
             }
@@ -217,22 +206,6 @@ struct ContentView: View {
     }
 
     private var activeRuns: [AppModel.RunRecord] { model.runs.filter { $0.status.isActive } }
-    private var recentRuns: [AppModel.RunRecord] {
-        let query = model.historySearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        return model.runs.filter { record in
-            guard !record.status.isActive else { return false }
-            guard !query.isEmpty else { return true }
-            return [record.title, record.latestRunId ?? "", record.status.rawValue, record.kind.rawValue]
-                .contains { $0.localizedCaseInsensitiveContains(query) }
-        }
-    }
-
-    private var visibleTraceHistory: [AppModel.HistoryItem] {
-        let liveIDs = Set(model.runs.flatMap(\.runIds))
-        let source = historySearchIsEmpty ? model.historyItems : model.historySearchResults
-        return source.filter { !liveIDs.contains($0.rootRunId) }
-    }
-
     private var historySearchIsEmpty: Bool {
         model.historySearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -247,7 +220,7 @@ struct ContentView: View {
                 Button("Retry") { model.updateHistorySearch(model.historySearchQuery) }
                     .buttonStyle(.borderless)
             }
-        } else if !historySearchIsEmpty, recentRuns.isEmpty, visibleTraceHistory.isEmpty, !model.isSearchingHistory {
+        } else if !historySearchIsEmpty, model.historyTree.isEmpty, !model.isSearchingHistory {
             VStack(spacing: 8) {
                 Text("No historical runs match “\(model.historySearchQuery)”")
                     .font(.caption)
@@ -271,7 +244,10 @@ struct ContentView: View {
             case .unavailable(let message):
                 Text(message).font(.caption).foregroundStyle(.secondary)
             case .loaded:
-                if historySearchIsEmpty, !model.historyItems.isEmpty {
+                if let message = model.historyPagingMessage {
+                    Text(message).font(.caption).foregroundStyle(.secondary)
+                }
+                if historySearchIsEmpty, model.hasOlderHistory {
                     Button("Load Older", action: model.loadOlderHistory)
                         .buttonStyle(.borderless)
                         .frame(maxWidth: .infinity)
@@ -285,9 +261,8 @@ struct ContentView: View {
             switch item {
             case .live(let recordID):
                 return model.deletableRootRunID(for: recordID)
-            case .history(let rootRunId):
-                guard model.historyItem(rootRunId: rootRunId)?.allowsDeletion != false else { return nil }
-                return rootRunId
+            case .history(let runId):
+                return model.deletableHistoryRoot(for: runId)
             }
         })
     }
@@ -463,54 +438,7 @@ private struct HistorySearchField: View {
     }
 }
 
-private struct HistoryRunRow: View {
-    let item: AppModel.HistoryItem
-    let isDeleting: Bool
-
-    var body: some View {
-        HStack(spacing: 10) {
-            if isDeleting {
-                ProgressView()
-                    .controlSize(.small)
-                    .frame(width: 18)
-            } else {
-                Image(systemName: item.systemImage)
-                    .foregroundStyle(statusColor)
-                    .frame(width: 18)
-            }
-            VStack(alignment: .leading, spacing: 3) {
-                Text(item.title).lineLimit(2)
-                HStack(spacing: 5) {
-                    Text(item.status.capitalized)
-                    Text("·")
-                    Text(Self.relativeDate(item.startedAt))
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-        }
-        .padding(.vertical, 3)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(item.title), \(item.status), started \(item.startedAt)")
-    }
-
-    private var statusColor: Color {
-        switch item.status {
-        case "queued", "planning", "running", "awaiting_subagent": .accentColor
-        case "awaiting_approval", "clarification_requested": .orange
-        case "succeeded": .green
-        case "failed": .red
-        default: .secondary
-        }
-    }
-
-    private static func relativeDate(_ value: String) -> String {
-        guard let date = ISO8601DateFormatter().date(from: value) else { return value }
-        return RelativeDateTimeFormatter().localizedString(for: date, relativeTo: .now)
-    }
-}
-
-private extension AppModel.HistoryItem {
+extension AppModel.HistoryItem {
     var systemImage: String {
         type == "chat" ? "bubble.left.and.bubble.right.fill" : "play.fill"
     }
@@ -874,26 +802,33 @@ private struct HistoricalRunDetailView: View {
                         Text(item.status.capitalized)
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
-                        Text(item.rootRunId)
+                        Text(item.id)
                             .font(.caption.monospaced())
                             .foregroundStyle(.tertiary)
                             .textSelection(.enabled)
                     }
                 }
                 Spacer()
-                Button("Open in Runtime", systemImage: "arrow.up.forward.app") {
-                    model.openHistoryInRuntime(item.rootRunId)
+                Button("Refresh", systemImage: "arrow.clockwise") {
+                    model.retryHistoryReport(item.id)
                 }
-                .disabled(!model.isConnected)
             }
             .padding(.horizontal, 22)
             .frame(height: 66)
 
             Divider()
 
-            if let report = model.historyReports[item.rootRunId] {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    HistoricalOutputView(item: item)
+                    if let usage = model.historyUsage[item.rootRunId] ?? model.historyReports[item.rootRunId]?.usage {
+                        HistoryUsageView(usage: usage, rootRunId: item.rootRunId)
+                    }
+                    if let error = model.historyUsageErrors[item.rootRunId] {
+                        Text("Provider accounting could not refresh: \(error)")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if let report = model.historyReports[item.rootRunId] {
                         summary(report)
                         if !toolActivities(report).isEmpty {
                             VStack(alignment: .leading, spacing: 8) {
@@ -902,19 +837,6 @@ private struct HistoricalRunDetailView: View {
                                     activities: toolActivities(report),
                                     isExpanded: activityExpandedBinding
                                 )
-                            }
-                        }
-                        if let runTree = report.runTree, !runTree.isEmpty {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text("RUN TREE").sectionLabel()
-                                ForEach(runTree) { run in
-                                    HStack {
-                                        Text(String(repeating: "  ", count: run.depth) + (run.delegateName ?? "Root run"))
-                                        Spacer()
-                                        Text(run.status ?? "unknown").foregroundStyle(.secondary)
-                                    }
-                                    .font(.callout)
-                                }
                             }
                         }
                         if !report.warnings.isEmpty {
@@ -927,46 +849,29 @@ private struct HistoricalRunDetailView: View {
                                 }
                             }
                         }
+                    } else if let error = model.historyReportErrors[item.rootRunId] {
+                        Label("Trace unavailable: \(error)", systemImage: "exclamationmark.triangle")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        ProgressView("Loading root trace…")
                     }
-                    .frame(maxWidth: 820, alignment: .leading)
-                    .padding(34)
-                    .frame(maxWidth: .infinity, alignment: .top)
                 }
-            } else if let error = model.historyReportErrors[item.rootRunId] {
-                ContentUnavailableView {
-                    Label("Unable to Load History", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(error)
-                } actions: {
-                    Button("Retry") { model.retryHistoryReport(item.rootRunId) }
-                }
-            } else {
-                VStack(spacing: 10) {
-                    ProgressView()
-                    Text("Loading historical trace…").foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(maxWidth: 820, alignment: .leading)
+                .padding(28)
+                .frame(maxWidth: .infinity, alignment: .top)
             }
         }
     }
 
     private func summary(_ report: TraceReport) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("SUMMARY").sectionLabel()
+            Text("ROOT TRACE SUMMARY").sectionLabel()
             Text(report.summary.status.capitalized).font(.title3.weight(.semibold))
             Text(report.summary.reason).foregroundStyle(.secondary)
             Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 6) {
                 GridRow {
                     Text("Started").foregroundStyle(.secondary)
                     Text(item.startedAt).textSelection(.enabled)
-                }
-                GridRow {
-                    Text("Tokens").foregroundStyle(.secondary)
-                    Text("\(report.usage.total.totalTokens)").monospacedDigit()
-                }
-                GridRow {
-                    Text("Estimated cost").foregroundStyle(.secondary)
-                    Text(report.usage.total.estimatedCostUSD, format: .currency(code: "USD"))
                 }
                 if let performance = report.performance {
                     GridRow {
@@ -981,7 +886,7 @@ private struct HistoricalRunDetailView: View {
 
     private func toolActivities(_ report: TraceReport) -> [AppModel.RunActivity] {
         report.timeline.compactMap { entry in
-            guard let toolName = entry.toolName else { return nil }
+            guard entry.runId == item.id, let toolName = entry.toolName else { return nil }
             let state: AppModel.RunActivity.ToolState
             if entry.outcome.hasPrefix("failed") {
                 state = .failed

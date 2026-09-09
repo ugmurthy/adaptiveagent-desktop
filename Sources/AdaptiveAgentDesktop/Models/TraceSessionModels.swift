@@ -40,7 +40,7 @@ struct TraceHistoryGoal: Codable, Equatable, Identifiable, Sendable {
     let type: String?
     let swarmRole: String?
 
-    var id: String { rootRunId }
+    var id: String { runId }
 }
 
 struct TraceSessionListItem: Codable, Equatable, Identifiable, Sendable {
@@ -48,6 +48,7 @@ struct TraceSessionListItem: Codable, Equatable, Identifiable, Sendable {
     let startedAt: String
     let status: String?
     let goals: [TraceHistoryGoal]
+    var cursor: TraceSessionCursor? = nil
 
     var id: String { sessionId ?? goals.first?.rootRunId ?? startedAt }
 }
@@ -56,6 +57,20 @@ struct TraceSessionListParameters: Codable, Equatable, Sendable {
     var goals: [String]? = nil
     var limit: Int? = nil
     var until: String? = nil
+    var after: TraceSessionCursor? = nil
+}
+
+struct TraceSessionCursor: Codable, Equatable, Sendable {
+    let startedAt: String?
+    let key: String
+
+    private enum CodingKeys: String, CodingKey { case startedAt, key }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(startedAt, forKey: .startedAt)
+        try container.encode(key, forKey: .key)
+    }
 }
 
 struct TraceTargetSummary: Codable, Equatable, Sendable {
@@ -97,6 +112,43 @@ struct TraceUsageTotals: Codable, Equatable, Sendable {
 
 struct TraceUsageSummary: Codable, Equatable, Sendable {
     let total: TraceUsageTotals
+    var byRootRun: [RootUsage]? = nil
+    var byProviderModel: [ProviderModelUsage]? = nil
+    var toolOutputByProviderModel: [ProviderModelUsage]? = nil
+    var toolAccounting: ToolAccounting? = nil
+
+    struct RootUsage: Codable, Equatable, Sendable {
+        let rootRunId: String
+        let usage: TraceUsageTotals
+    }
+
+    struct ProviderModelUsage: Codable, Equatable, Sendable {
+        let provider: String
+        let model: String
+        let usage: TraceUsageTotals
+        var runCount: Int? = nil
+        var toolCallCount: Int? = nil
+    }
+
+    struct ToolAccounting: Codable, Equatable, Sendable {
+        let totalRequests: Int
+        let billableRequests: Int
+        let cachedToolCalls: Int
+        let unpricedRequests: Int
+        let estimatedCostUSD: Double
+        let byProviderOperation: [ProviderOperation]
+
+        struct ProviderOperation: Codable, Equatable, Sendable {
+            let provider: String
+            let operation: String
+            let toolCalls: Int
+            let requests: Int
+            let billableRequests: Int
+            let cachedToolCalls: Int
+            let unpricedRequests: Int
+            let estimatedCostUSD: Double
+        }
+    }
 }
 
 struct TracePerformanceBucket: Codable, Equatable, Sendable {

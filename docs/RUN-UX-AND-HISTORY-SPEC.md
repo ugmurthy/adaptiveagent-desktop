@@ -186,18 +186,30 @@ HISTORY
 Rules:
 
 - Active live records always appear in **Active**.
-- Flatten each `trace/listSessions` session into one history row per root goal.
-- Use `rootRunId` as the stable identity for deduplication.
+- Preserve the expandable hierarchy: session → root run → run → recursive child
+  runs. A missing/null session is valid; show its root without a synthetic
+  shared session. Combine redundant root/run rows when their IDs are equal.
+- Preserve distinct run IDs within each root. Use stable, scoped identities for
+  tree selection so selecting a child does not select its root instead.
 - If a root run exists in both `AppModel.runs` and trace history, show one row.
   Live state wins while active; persisted trace metadata fills missing start
   time, goal, type, and terminal status.
+- Merge completed in-memory and persisted records before sorting. Compare
+  parsed timestamps, not timestamp strings, newest first with an ID tie-breaker.
+  Sort siblings newest first and groups by their newest descendant start time.
+  Apply the same ordering to search results and refreshed pages.
 - Preserve run/chat icons using trace `type`; use a generic run icon when old
   persisted data cannot identify invocation type.
 - Each history row shows goal/title, status, and relative start time. The
   accessibility label includes the full status and absolute timestamp.
-- Request the newest 100 sessions after trace initialization, then flatten their
-  roots. (`trace/listSessions.limit` is a session limit, not a root limit.)
-  Provide **Load Older** rather than unbounded startup loading.
+- Request the newest 100 session groups after trace initialization, ordered by
+  matching run times before applying the limit. (`trace/listSessions.limit` is
+  a session limit, not a root limit.) Provide **Load Older** using the returned
+  cursor, not an `until` derived from the oldest displayed goal. An old sibling
+  inside a returned session is not a chronology-complete cutoff. Older helpers
+  without cursors must not silently skip history through timestamp pagination.
+- Load recursive run trees lazily when a root is expanded or selected, retaining
+  the owning session and root identities for every child.
 - Add a small refresh button and refresh automatically after a live root reaches
   a terminal state. Debounce automatic refreshes so a burst of terminal events
   produces one query.
@@ -222,13 +234,14 @@ purpose without depending on a separate “Search” or “History” label:
   sidebar is visible; Escape clears a non-empty query, then releases focus.
 - Give the control the accessibility label **Search run history** even though no
   external visible label is rendered.
-- Match goal/title, root run ID, session ID, status, and type case-insensitively
-  against already loaded history rows.
+- Match goal/title, run ID, root run ID, session ID, status, and type
+  case-insensitively against already loaded history rows. Preserve ancestors
+  when a child matches so its hierarchy remains understandable.
 - After a 250 ms debounce, query `trace/listSessions` with
   `{ "goals": ["<query>"], "limit": 100 }`. The server applies goal filtering
   before its session limit, so goal matches are not restricted to the currently
   loaded page. Merge those results with local ID/status/type matches and
-  deduplicate by root run ID.
+  deduplicate by scoped run identity without losing distinct runs under a root.
 - A query that exactly matches a known root or session ID must surface that row
   even when its goal does not match.
 - While a remote search is pending, retain local matches and show a small
@@ -243,16 +256,10 @@ purpose without depending on a separate “Search” or “History” label:
 
 Do not coerce a historical trace into `RunRecord`. A live record is mutable and
 owns execution controls; a historical item is a read-only persisted projection.
-Introduce a separate sidebar selection enum:
+Keep history selection separate from live selection and include the selected
+run ID as well as its owning root/session identity.
 
-```swift
-enum SidebarItemID: Hashable {
-    case live(UUID)
-    case history(rootRunId: String)
-}
-```
-
-Selecting a history row opens a read-only tab and lazily calls:
+Expanding or selecting a root lazily loads its trace:
 
 ```json
 {
@@ -271,19 +278,34 @@ Selecting a history row opens a read-only tab and lazily calls:
 }
 ```
 
-The initial historical detail displays:
+Historical detail displays:
 
-- identity: goal, root run ID, session ID when present, type, start/end time;
+- identity: goal, selected run ID, root run ID, session ID when present, type,
+  start/end time;
 - verdict/status and trace warnings;
-- usage: tokens and estimated model/tool-output cost;
+- usage: prompt/completion/reasoning tokens where recorded and estimated cost,
+  with model-provider/model and tool-output model breakdowns;
+- search/tool-provider accounting by provider and operation where available:
+  requests, billable requests, cached calls, unpriced requests, and estimated
+  cost. Fetch `trace/usage` separately; `trace/get` alone may omit this summary.
+  Request-priced tools do not have token counts. Distinguish unavailable or
+  unpriced accounting from explicit zero-cost usage and label partial totals;
+- explicit usage scope: root-wide/subtree totals must not be presented as a
+  selected child's own usage or added to child totals a second time;
+- persisted final output from `run/inspect` for the selected run;
+- known generated/edited files from persisted successful tool events, retaining
+  producing run and workspace identity. Label this event-derived coverage
+  rather than claiming a complete artifact inventory. Keep missing files listed
+  as unavailable and retain workspace path validation for open/reveal actions;
 - performance durations when available;
 - safe chronological timeline with the same compact/expandable tool treatment;
 - run tree/delegates when present.
 
 Historical tabs must not show steering, approvals, clarification, interrupt, or
-recovery controls. An explicit **Open in Runtime** action may attach the root ID
-through the existing protocol-1.17 flow and invoke `run/inspect`; only then may
-runtime-owned actions appear.
+recovery controls. There is no **Open in Runtime** button. Fetching persisted
+output through the initialized agent runtime does not create a live record or
+switch to an execution view. Output/file retrieval failure must not hide an
+otherwise available trace or usage summary; each section supports retry.
 
 Important contract: the current trace-session projection intentionally removes
 `RootRun.result`, detailed root errors, raw tool payloads, diagnostics, and
@@ -293,9 +315,13 @@ messages by default. Therefore:
 - `run/inspect` on the agent runtime remains authoritative for a final result,
   detailed execution error, and executable run state;
 - the desktop must not infer a final answer from trace events;
-- a future product requirement to show historical final answers without
-  attaching to the runtime requires an explicit privacy-reviewed trace protocol
-  addition, not renderer SQL or accidental use of raw payloads.
+- use protocol `1.17` inspection internally for read-only output/file retrieval;
+  do not query persistence directly from Swift or enable raw trace messages and
+  reasoning to work around the projection;
+- SQLite provider accounting can be recovered from existing persisted terminal
+  events when present. The trace reader must expose the safe aggregate through
+  `trace/usage`. Missing historical instrumentation cannot be reconstructed as
+  actual usage, and retrospective pricing must not be presented as original cost.
 
 ## 4. Architecture
 
@@ -446,14 +472,15 @@ This phase is independent of trace-session and should ship first.
 
 ### Phase 4 — Sidebar history and historical detail
 
-1. Add `TraceHistoryModel` and load/flatten `trace/listSessions`.
-2. Merge/deduplicate live and persisted rows in the two sidebar sections.
+1. Load `trace/listSessions` while preserving session/root/run identities.
+2. Merge/deduplicate completed local and persisted records into a sorted tree,
+   keeping active live records in their own section.
 3. Add the self-identifying history search field, local matching, debounced
    server goal search, cancellation, and empty/error states.
-4. Add lazy `trace/get`, read-only tabs, loading, retry, and stale-response
-   protection.
+4. Add lazy `trace/get`, `trace/usage`, and read-only `run/inspect` detail loading,
+   retry, and stale-response protection.
 5. Reuse compact timeline presentation.
-6. Add **Open in Runtime** for users who need runtime-owned inspection/actions.
+6. Show persisted output and known artifacts directly, without **Open in Runtime**.
 
 ## 7. Tests and acceptance criteria
 
@@ -504,10 +531,14 @@ This phase is independent of trace-session and should ship first.
 ### History
 
 - SQLite and Postgres list persisted roots from earlier app launches.
-- Session goals flatten to distinct rows and sessionless roots are included.
+- Session/root/run/child relationships remain distinct and sessionless roots
+  are included. Root/run identity equality does not produce redundant rows.
 - A live/persisted duplicate appears once and live active state wins.
-- Newest 100 sessions load initially; their roots are flattened and **Load
-  Older** merges without duplicates.
+- Mixed local/persisted records, timestamp offsets and ties, search results, and
+  refreshed groups all maintain newest-first sibling ordering.
+- Newest 100 session groups load initially; **Load Older** uses a stable cursor
+  and merges without duplicate or skipped groups, including timestamp ties and
+  old-created sessions with new runs.
 - The field visibly says **Search run history…** with an embedded search icon and
   no external visible label.
 - `⌘F`, Escape, clear, no-results, loading, and trace-error states behave as
@@ -519,8 +550,12 @@ This phase is independent of trace-session and should ship first.
 - Selection changes do not display a stale detail response.
 - Terminal live runs become visible in History after the debounced refresh.
 - Memory mode and trace failure leave execution and current-run UI functional.
-- Historical tabs expose no execution controls until **Open in Runtime**
-  successfully attaches through agent-runtime.
+- Historical tabs expose no execution controls or **Open in Runtime** button.
+- Child selection retrieves the child's final output, not its root's result.
+- Usage clearly identifies its scope, with model/provider breakdowns and no
+  duplicate parent/child accounting. Unpriced/missing accounting is not zero.
+- Available and missing generated files retain producing-run identity; output
+  or artifact retrieval failures do not obscure available usage/trace sections.
 - Default requests do not include messages, reasoning, plans, or raw tool
   payloads.
 

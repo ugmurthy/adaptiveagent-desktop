@@ -72,6 +72,8 @@ Each native macOS window tab owns its own runtime process and workspace configur
 
 Select one historical run, or Command-click multiple rows, then use the trash button or a row's **Delete Run…** context-menu action to permanently delete terminal run data through the typed protocol `1.17` `run/delete` method. The app confirms destructive deletion, closes tabs for successful deletions, refreshes persisted history, and reports any runs the runtime could not delete.
 
+History combines completed local and persisted runs in a newest-first session/root/run tree. Expanding a root loads recursive child runs; selecting any run shows its persisted output, recorded file evidence, selected-run usage, and separately scoped root/subtree model and tool-provider accounting without attaching the run to the active execution UI. Correct pagination and tool-provider accounting require a trace-session helper that supports list cursors and `trace/usage`; older helpers stop safely at the first page rather than risking skipped history.
+
 When no run is selected, use the **Existing Run** field on the new-request screen to enter a run ID and invoke the same actions. The app attaches that ID as a tracked sidebar record so status changes, inspection output, and errors remain visible in the normal run detail. The ID must be available to the initialized runtime: runs from previous launches generally require Postgres, while memory-mode runs are available only for the lifetime of their runtime process.
 
 The standard **About AdaptiveAgent Desktop** panel displays the marketing version and build number configured in `project.yml`.

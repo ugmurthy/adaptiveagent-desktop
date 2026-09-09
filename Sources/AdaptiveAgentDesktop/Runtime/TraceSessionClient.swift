@@ -169,6 +169,16 @@ actor TraceSessionClient {
         )
     }
 
+    func usage(rootRunId: String) async throws -> TraceUsageSummary {
+        try requireInitialized()
+        return try decode(
+            try await request(method: "trace/usage", params: [
+                "target": .object(["kind": .string("root-run"), "rootRunId": .string(rootRunId)])
+            ]),
+            method: "trace/usage"
+        )
+    }
+
     func shutdown() async {
         guard process.isRunning else {
             cleanUp()
