@@ -348,9 +348,11 @@ final class HistoryTests: XCTestCase {
         let wrapper = AppModel.HistoryNode(
             id: "root:x", label: "Root x", item: nil, rootRunId: "x", newest: now, children: []
         )
-        XCTAssertEqual(AppModel.historySections(roots: [wrapper], pinnedRunIDs: []).map(\.title), ["Today"])
+        XCTAssertEqual(AppModel.historySections(
+            roots: [wrapper], pinnedRunIDs: [], calendar: calendar, now: now
+        ).map(\.title), ["Today"])
         XCTAssertTrue(AppModel.historySections(
-            roots: [wrapper], pinnedRunIDs: [], filters: .init(statuses: [.failed])
+            roots: [wrapper], pinnedRunIDs: [], filters: .init(statuses: [.failed]), calendar: calendar, now: now
         ).isEmpty)
     }
 
