@@ -94,7 +94,7 @@ final class WorkbenchSnapshotTests: XCTestCase {
                 let model = fixture.model
                 model.selectHistoryRun("root-a")
                 try await fixture.wait { model.historyUsage["root-a"] != nil && model.historyDetails["root-a"] != nil }
-                model.expandedHistoryIDs = ["run:root-a", "run:child-a", "root:root-b"]
+                model.expandedHistoryIDs = ["session:session-research", "run:root-a", "run:child-a", "root:root-b"]
                 model.loadHistoryReport("root-b")
                 try await fixture.wait { model.historyReports["root-b"] != nil }
                 model.selectHistoryRun("child-a")

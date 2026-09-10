@@ -17,8 +17,8 @@ struct HistoryTreeRow: View {
     }
 
     private var threadRunCount: Int {
-        guard isThreadRoot, let root = node.rootRunId else { return 0 }
-        return model.allHistoryItems.filter { $0.rootRunId == root }.count
+        guard isThreadRoot else { return 0 }
+        return node.runCount
     }
 
     var body: some View {
@@ -59,10 +59,10 @@ struct HistoryTreeRow: View {
             Self.copyToPasteboard(runId)
         }
         Button("Copy Session ID", systemImage: "person.crop.circle") {
-            Self.copyToPasteboard(node.item?.sessionId ?? "")
+            Self.copyToPasteboard(node.sessionId ?? "")
         }
-        .disabled((node.item?.sessionId ?? "").isEmpty)
-        if isThreadRoot, let root = node.rootRunId {
+        .disabled((node.sessionId ?? "").isEmpty)
+        if let root = node.rootRunId {
             if model.pinnedHistoryRunIDs.contains(root) {
                 Button("Unpin from Top", systemImage: "pin.slash") { model.togglePinnedHistoryRun(root) }
             } else {

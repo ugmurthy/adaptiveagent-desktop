@@ -77,7 +77,8 @@ def goal(root, run, title, started="2026-09-08T10:00:00Z"):
 def group(session, goals):
     return dict(sessionId=session, startedAt="2020-01-01T00:00:00Z", status="succeeded", goals=goals,
                 cursor=dict(startedAt=goals[0]["startedAt"], key=session or goals[0]["rootRunId"]))
-groups = [group("session-research", [goal("root-a", "root-a", "Research report")]),
+groups = [group("session-research", [goal("root-a", "root-a", "Research report"),
+                                     goal("root-c", "root-c", "Follow-up report", "2026-09-08T08:00:00Z")]),
           group(None, [goal("root-b", "run-b", "Review without a session", "2026-09-08T09:00:00Z")])]
 tree = [dict(rootRunId="root-a", runId=run, parentRunId=parent, delegateName=title, depth=depth,
              createdAt=f"2026-09-08T10:0{depth}:00Z", status="succeeded") for run,parent,title,depth in [
@@ -163,15 +164,17 @@ final class HistoryTests: XCTestCase {
         let merged = model.mergeHistory([root, child], [root, child, sibling, grandchild, noSession, other])
         XCTAssertEqual(merged.map(\.id), ["grandchild", "other", "solo", "sibling", "child", "root"])
         let tree = AppModel.historyTree(items: merged)
-        XCTAssertEqual(tree.map(\.id), ["run:root", "run:other", "run:solo"])
-        XCTAssertEqual(tree[0].item?.id, "root")
-        XCTAssertEqual(tree[0].label, "root")
-        XCTAssertEqual(tree[0].children.map(\.item?.id), ["sibling", "child"], "Run siblings use their own start time")
-        XCTAssertEqual(tree[0].children[1].children[0].item?.id, "grandchild")
-        XCTAssertFalse(tree.map(\.label).contains { $0.contains("Session") })
+        XCTAssertEqual(tree.map(\.id), ["session:s", "session:new-session", "run:solo"])
+        XCTAssertEqual(tree[0].label, "Session s")
+        XCTAssertEqual(tree[0].runCount, 4)
+        XCTAssertEqual(tree[0].sessionId, "s")
+        XCTAssertEqual(tree[0].children[0].item?.id, "root")
+        XCTAssertEqual(tree[0].children[0].children.map(\.item?.id), ["sibling", "child"], "Run siblings use their own start time")
+        XCTAssertEqual(tree[0].children[0].children[1].children[0].item?.id, "grandchild")
+        XCTAssertEqual(tree[2].label, "solo")
         let ties = [item("b", time: "2026-09-08T01:00:00-07:00"), item("a", time: "2026-09-08T08:00:00.000Z")]
         XCTAssertEqual(model.mergeHistory([], ties).map(\.id), ["a", "b"])
-        XCTAssertEqual(AppModel.historyTree(items: merged, query: "grandchild").first?.item?.id, "root")
+        XCTAssertEqual(AppModel.historyTree(items: merged, query: "grandchild").first?.children.first?.item?.id, "root")
     }
 
     @MainActor
@@ -186,12 +189,16 @@ final class HistoryTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(300))
             XCTAssertEqual(try fixture.requests("trace").count, traceRequestCount,
                            "Typing a run goal must not query the trace helper")
-            let thread = try XCTUnwrap(model.historyTree.first)
-            XCTAssertEqual(thread.id, "run:root-a")
-            XCTAssertEqual(thread.label, "Research report")
-            model.setHistoryExpanded(true, node: thread)
+            let session = try XCTUnwrap(model.historyTree.first)
+            XCTAssertEqual(session.id, "session:session-research")
+            XCTAssertEqual(session.label, "Session session-research")
+            XCTAssertEqual(session.runCount, 2, "Runs with the same non-empty session ID share one collapsed row")
+            XCTAssertEqual(session.children.map(\.item?.id), ["root-a", "root-c"])
+            model.setHistoryExpanded(true, node: session)
+            XCTAssertTrue(model.historyReports.isEmpty, "Expanding a session must not load every root")
+            model.setHistoryExpanded(true, node: try XCTUnwrap(session.children.first))
             try await fixture.wait { model.historyReports["root-a"] != nil }
-            let expanded = try XCTUnwrap(model.historyTree.first)
+            let expanded = try XCTUnwrap(model.historyTree.first?.children.first)
             model.setHistoryExpanded(true, node: try XCTUnwrap(expanded.children.first))
             try await fixture.wait { model.historyUsage["root-a"] != nil }
             XCTAssertEqual(model.historyItem(rootRunId: "grandchild-a")?.parentRunId, "child-a")
@@ -222,7 +229,9 @@ final class HistoryTests: XCTestCase {
             model.collapseAllHistory()
             model.expandHistoryThread(containing: "run-b")
             XCTAssertTrue(model.expandedHistoryIDs.contains("root:root-b"))
-            XCTAssertFalse(model.expandedHistoryIDs.contains("run:root-a"))
+            model.expandHistoryThread(containing: "root-a")
+            XCTAssertTrue(model.expandedHistoryIDs.contains("session:session-research"))
+            XCTAssertTrue(model.expandedHistoryIDs.contains("run:root-a"))
             let requests = try fixture.requests("runtime")
             XCTAssertEqual(requests.filter { $0.objectValue?["method"] == .string("run/inspect") }.count, 3)
             XCTAssertTrue(requests.allSatisfy { !$0.objectValue!["method"]!.stringValue!.hasPrefix("agent/") })

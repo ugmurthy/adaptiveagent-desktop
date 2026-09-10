@@ -33,6 +33,20 @@ extension AppModel {
         let rootRunId: String?
         let newest: Date
         var children: [HistoryNode]
+
+        var runCount: Int {
+            (item == nil ? 0 : 1) + children.reduce(0) { $0 + $1.runCount }
+        }
+
+        var sessionId: String? {
+            item?.sessionId ?? children.lazy.compactMap(\.sessionId).first
+        }
+
+        var representedRootRunIds: Set<String> {
+            children.reduce(into: rootRunId.map { Set([$0]) } ?? []) {
+                $0.formUnion($1.representedRootRunIds)
+            }
+        }
     }
 
     struct HistorySection: Identifiable {
@@ -121,7 +135,8 @@ extension AppModel {
             nodes.sorted { $0.newest == $1.newest ? $0.id < $1.id : $0.newest > $1.newest }
         }
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        var threads: [HistoryNode] = []
+        var groups: [String: [HistoryNode]] = [:]
+        var sessionNames: [String: String] = [:]
         for (rootID, runs) in Dictionary(grouping: items, by: \.rootRunId) {
             guard query.isEmpty || runs.contains(where: { item in
                 [item.title, item.id, rootID, item.sessionId ?? "", item.status, item.type]
@@ -161,15 +176,31 @@ extension AppModel {
                 return historyNewestFirst(lhs, rhs)
             }
             let newest = roots.map(\.newest).max() ?? .distantPast
+            let root: HistoryNode
             if roots.count == 1, roots[0].item?.id == rootID {
-                threads.append(roots[0])
+                root = roots[0]
             } else {
                 // Multiple or missing in-group root evidence: keep a wrapper rather than dropping runs.
-                threads.append(HistoryNode(id: "root:\(rootID)", label: "Root \(rootID)", item: nil,
-                                           rootRunId: rootID, newest: newest, children: roots))
+                root = HistoryNode(id: "root:\(rootID)", label: "Root \(rootID)", item: nil,
+                                   rootRunId: rootID, newest: newest, children: roots)
+            }
+            let owner = runs.first { $0.id == rootID } ?? runs[0]
+            if let session = owner.sessionId, !session.isEmpty {
+                let key = "session:\(session)"
+                groups[key, default: []].append(root)
+                sessionNames[key] = session
+            } else {
+                // A missing session is not an artificial shared session joining unrelated roots.
+                groups["no-session:\(rootID)"] = [root]
             }
         }
-        return sorted(threads)
+        return sorted(groups.flatMap { key, roots -> [HistoryNode] in
+            guard let session = sessionNames[key] else { return roots }
+            return [HistoryNode(
+                id: key, label: "Session \(session)", item: nil, rootRunId: nil,
+                newest: roots.map(\.newest).max() ?? .distantPast, children: sorted(roots)
+            )]
+        })
     }
 
     func deletableHistoryRoot(for runId: String) -> String? {
@@ -193,11 +224,13 @@ extension AppModel {
     }
 
     func expandHistoryThread(containing runId: String) {
-        func containsRun(_ node: HistoryNode) -> Bool {
-            node.item?.id == runId || node.rootRunId == runId || node.children.contains(where: containsRun)
+        func expandPath(_ node: HistoryNode) -> Bool {
+            let containsRun = node.item?.id == runId || node.rootRunId == runId
+                || node.children.contains(where: expandPath)
+            if containsRun { setHistoryExpanded(true, node: node) }
+            return containsRun
         }
-        guard let thread = historyTree.first(where: containsRun) else { return }
-        setHistoryExpanded(true, node: thread)
+        _ = historyTree.contains(where: expandPath)
     }
 
     func togglePinnedHistoryRun(_ rootRunId: String) {
@@ -247,24 +280,30 @@ extension AppModel {
     }
 
     static func historyFiltersAccept(_ node: HistoryNode, filters: HistoryFilters) -> Bool {
+        let items = historyItems(in: node)
         if !filters.statuses.isEmpty {
-            guard let item = node.item,
-                  let category = historyStatusCategory(item.status),
-                  filters.statuses.contains(category) else { return false }
+            guard items.contains(where: {
+                historyStatusCategory($0.status).map(filters.statuses.contains) == true
+            }) else { return false }
         }
         if !filters.kinds.isEmpty {
-            let kind: RunKind = node.item?.type.lowercased() == "chat" ? .chat : .run
-            guard filters.kinds.contains(kind) else { return false }
+            guard items.contains(where: {
+                filters.kinds.contains($0.type.lowercased() == "chat" ? .chat : .run)
+            }) else { return false }
         }
         switch filters.hasSession {
         case .some(true):
-            guard !(node.item?.sessionId ?? "").isEmpty else { return false }
+            guard items.contains(where: { !($0.sessionId ?? "").isEmpty }) else { return false }
         case .some(false):
-            guard (node.item?.sessionId ?? "").isEmpty else { return false }
+            guard items.contains(where: { ($0.sessionId ?? "").isEmpty }) else { return false }
         case .none:
             break
         }
         return true
+    }
+
+    private static func historyItems(in node: HistoryNode) -> [HistoryItem] {
+        (node.item.map { [$0] } ?? []) + node.children.flatMap(historyItems)
     }
 
     static func historySections(roots: [HistoryNode], pinnedRunIDs: Set<String>,
@@ -280,11 +319,10 @@ extension AppModel {
         var weekNodes: [HistoryNode] = []
         var earlierNodes: [HistoryNode] = []
         for node in visible {
-            let key = node.rootRunId ?? node.item?.id ?? ""
-            let category = node.item.flatMap { historyStatusCategory($0.status) }
-            if category != nil, category != .failed {
+            let categories = historyItems(in: node).compactMap { historyStatusCategory($0.status) }
+            if categories.contains(where: { $0 != .failed }) {
                 nowNodes.append(node)
-            } else if pinnedRunIDs.contains(key) {
+            } else if !pinnedRunIDs.isDisjoint(with: node.representedRootRunIds) {
                 pinnedNodes.append(node)
             } else if calendar.isDate(node.newest, equalTo: now, toGranularity: .day) {
                 todayNodes.append(node)
