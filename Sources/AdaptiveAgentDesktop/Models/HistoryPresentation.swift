@@ -43,7 +43,8 @@ extension AppModel {
         }
 
         var representedRootRunIds: Set<String> {
-            children.reduce(into: rootRunId.map { Set([$0]) } ?? []) {
+            let representedRoot = rootRunId ?? item?.rootRunId
+            return children.reduce(into: representedRoot.map { Set([$0]) } ?? []) {
                 $0.formUnion($1.representedRootRunIds)
             }
         }
@@ -136,7 +137,7 @@ extension AppModel {
         }
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         var groups: [String: [HistoryNode]] = [:]
-        var sessionNames: [String: String] = [:]
+        var sessionTitles: [String: (date: Date, id: String, rootID: String, title: String)] = [:]
         for (rootID, runs) in Dictionary(grouping: items, by: \.rootRunId) {
             guard query.isEmpty || runs.contains(where: { item in
                 [item.title, item.id, rootID, item.sessionId ?? "", item.status, item.type]
@@ -177,10 +178,10 @@ extension AppModel {
             }
             let newest = roots.map(\.newest).max() ?? .distantPast
             let root: HistoryNode
-            if roots.count == 1, roots[0].item?.id == rootID {
+            if roots.count == 1 {
                 root = roots[0]
             } else {
-                // Multiple or missing in-group root evidence: keep a wrapper rather than dropping runs.
+                // Multiple in-group roots need a wrapper so no persisted run is dropped.
                 root = HistoryNode(id: "root:\(rootID)", label: "Root \(rootID)", item: nil,
                                    rootRunId: rootID, newest: newest, children: roots)
             }
@@ -188,17 +189,35 @@ extension AppModel {
             if let session = owner.sessionId, !session.isEmpty {
                 let key = "session:\(session)"
                 groups[key, default: []].append(root)
-                sessionNames[key] = session
+                let candidate = (date: historyDate(owner.startedAt), id: owner.id,
+                                 rootID: rootID, title: owner.title)
+                if let current = sessionTitles[key] {
+                    if candidate.date < current.date || (candidate.date == current.date && candidate.id < current.id) {
+                        sessionTitles[key] = candidate
+                    }
+                } else {
+                    sessionTitles[key] = candidate
+                }
             } else {
                 // A missing session is not an artificial shared session joining unrelated roots.
                 groups["no-session:\(rootID)"] = [root]
             }
         }
         return sorted(groups.flatMap { key, roots -> [HistoryNode] in
-            guard let session = sessionNames[key] else { return roots }
+            guard let sessionTitle = sessionTitles[key], roots.count > 1 else { return roots }
+            var children = sorted(roots)
+            guard let firstIndex = children.firstIndex(where: { $0.rootRunId == sessionTitle.rootID }),
+                  let firstItem = children[firstIndex].item else {
+                return [HistoryNode(
+                    id: key, label: sessionTitle.title, item: nil, rootRunId: nil,
+                    newest: roots.map(\.newest).max() ?? .distantPast, children: children
+                )]
+            }
+            let firstRoot = children.remove(at: firstIndex)
+            children.append(contentsOf: firstRoot.children)
             return [HistoryNode(
-                id: key, label: "Session \(session)", item: nil, rootRunId: nil,
-                newest: roots.map(\.newest).max() ?? .distantPast, children: sorted(roots)
+                id: key, label: sessionTitle.title, item: firstItem, rootRunId: nil,
+                newest: roots.map(\.newest).max() ?? .distantPast, children: sorted(children)
             )]
         })
     }

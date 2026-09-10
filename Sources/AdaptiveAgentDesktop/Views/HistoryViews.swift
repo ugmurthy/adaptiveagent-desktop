@@ -13,7 +13,7 @@ struct HistoryTreeRow: View {
     private var rowRunId: String? { node.item?.id ?? node.rootRunId }
 
     private var canExpand: Bool {
-        !node.children.isEmpty || node.rootRunId.map { model.historyReports[$0] == nil } == true
+        !node.children.isEmpty
     }
 
     private var threadRunCount: Int {
@@ -62,7 +62,7 @@ struct HistoryTreeRow: View {
             Self.copyToPasteboard(node.sessionId ?? "")
         }
         .disabled((node.sessionId ?? "").isEmpty)
-        if let root = node.rootRunId {
+        if let root = node.rootRunId ?? node.item?.rootRunId {
             if model.pinnedHistoryRunIDs.contains(root) {
                 Button("Unpin from Top", systemImage: "pin.slash") { model.togglePinnedHistoryRun(root) }
             } else {
@@ -87,8 +87,8 @@ struct HistoryTreeRow: View {
                         .lineLimit(1)
                 } else {
                     Text(node.label)
-                        .font(.caption.weight(.semibold))
-                        .lineLimit(2)
+                        .font(.callout.weight(.medium))
+                        .lineLimit(1)
                 }
                 Spacer(minLength: 4)
                 if threadRunCount > 1 {
@@ -149,7 +149,10 @@ struct HistoryTreeRow: View {
     }
 
     private var tooltipText: String {
-        guard let item = node.item else { return node.label }
+        guard let item = node.item else {
+            guard let session = node.sessionId, !session.isEmpty else { return node.label }
+            return "\(node.label)\nSession \(session)"
+        }
         var lines = [item.title, "Run \(item.id)"]
         if let session = item.sessionId, !session.isEmpty { lines.append("Session \(session)") }
         if AppModel.historyDate(item.startedAt) != .distantPast {
