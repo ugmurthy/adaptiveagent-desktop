@@ -187,15 +187,21 @@ struct ContentView: View {
         }
 
         ToolbarItemGroup(placement: .primaryAction) {
-            Menu {
-                Button("New Run", systemImage: "play.fill", action: model.newRun)
-                    .keyboardShortcut("n")
-                Button("New Chat", systemImage: "bubble.left.and.bubble.right.fill", action: model.newChat)
-                    .keyboardShortcut("n", modifiers: [.command, .shift])
-            } label: {
-                Label("New", systemImage: "plus")
+            Button(action: model.newRun) {
+                Label("New Run", systemImage: "play.fill")
+                    .labelStyle(.iconOnly)
             }
+            .keyboardShortcut("n")
             .disabled(!model.isConnected)
+            .help("New Run")
+
+            Button(action: model.newChat) {
+                Label("New Chat", systemImage: "bubble.left.and.bubble.right.fill")
+                    .labelStyle(.iconOnly)
+            }
+            .keyboardShortcut("n", modifiers: [.command, .shift])
+            .disabled(!model.isConnected)
+            .help("New Chat")
 
             Menu {
                 Button("Markdown Appearance…", systemImage: "textformat") {
@@ -530,95 +536,147 @@ private struct NewRequestView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Image(nsImage: NSApplication.shared.applicationIconImage)
-                        .resizable()
-                        .frame(width: 56, height: 56)
-                    Text(draftKind == .run ? "What should the agent do?" : "Start a conversation")
-                        .font(.system(size: 28, weight: .semibold))
-                    Text(
-                        draftKind == .run
-                            ? "Give your agent a goal. Follow its progress and shape the result."
-                            : "Work through an idea with your agent, one message at a time."
-                    )
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                }
+            VStack(alignment: .leading, spacing: 18) {
+                Text("What should the agent do?")
+                    .font(.system(size: 26, weight: .semibold))
 
-                WorkspaceContextView()
-
-                VStack(alignment: .leading, spacing: 14) {
-                    Picker("Request type", selection: draftKindBinding) {
-                        ForEach(AppModel.RunKind.allCases) { kind in
-                            Label(kind.rawValue, systemImage: kind.systemImage).tag(kind)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 260)
+                VStack(alignment: .leading, spacing: 0) {
+                    WorkspaceContextView(compact: true)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 14)
 
                     ZStack(alignment: .topLeading) {
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(Color(nsColor: .textBackgroundColor))
-                            .stroke(.separator, lineWidth: 1)
                         TextEditor(text: draftTextBinding)
                             .font(.body)
                             .accessibilityLabel(draftKind == .run ? "Run goal" : "Chat message")
                             .scrollContentBackground(.hidden)
-                            .padding(10)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
                         if draftText.isEmpty {
                             Text(draftKind == .run ? "Describe a goal…" : "Write a message…")
-                                .foregroundStyle(.tertiary)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 17)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 20)
+                                .padding(.vertical, 18)
                                 .allowsHitTesting(false)
                         }
                     }
-                    .frame(height: 170)
+                    .frame(height: 150)
+                    .padding(.horizontal, 4)
 
                     if draftKind == .run {
                         AttachmentDraftView(tabID: tabID)
                             .environmentObject(model)
-                            .frame(maxWidth: 700)
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 12)
                     }
 
-                    HStack {
+                    Divider()
+                        .padding(.horizontal, 16)
+
+                    HStack(spacing: 10) {
+                        if draftKind == .run {
+                            attachmentMenu
+                        }
+
+                        Picker("Request type", selection: draftKindBinding) {
+                            ForEach(AppModel.RunKind.allCases) { kind in
+                                Image(systemName: kind.systemImage)
+                                    .accessibilityLabel(kind.rawValue)
+                                    .tag(kind)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(width: 92)
+                        .help(draftKind == .run ? "Run" : "Chat")
+
                         if model.isWaitingForRunIdentity {
                             ProgressView()
                                 .controlSize(.small)
-                            Text("Creating run…").foregroundStyle(.secondary)
-                        }
-                        if !model.isWaitingForRunIdentity {
-                            Text("⌘ Return to start")
+                            Text("Creating run…")
                                 .font(.caption)
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(.secondary)
                         }
-                        Spacer()
-                        DictationButton(text: draftTextBinding, controller: dictation)
-                        Button(draftKind == .run ? "Start Run" : "Start Chat", action: submitDraft)
-                            .buttonStyle(.borderedProminent)
-                            .keyboardShortcut(.return, modifiers: [.command])
-                            .disabled(
-                                draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                    || model.isWaitingForRunIdentity
-                                    || (model.tab(withID: tabID)?.isImportingAttachments ?? false)
-                                    || (model.tab(withID: tabID)?.isSubmittingDraft ?? false)
-                            )
-                    }
-                    .frame(maxWidth: 700)
-                }
 
-                DisclosureGroup("Open an existing run") {
+                        Spacer()
+
+                        DictationButton(text: draftTextBinding, controller: dictation)
+
+                        Button(action: submitDraft) {
+                            Image(systemName: "arrow.up")
+                                .font(.system(size: 14, weight: .bold))
+                                .frame(width: 30, height: 30)
+                        }
+                            .buttonStyle(.borderedProminent)
+                            .buttonBorderShape(.circle)
+                            .keyboardShortcut(.return, modifiers: [.command])
+                            .disabled(submissionDisabled)
+                            .help(draftKind == .run ? "Start Run (⌘↩)" : "Start Chat (⌘↩)")
+                            .accessibilityLabel(draftKind == .run ? "Start Run" : "Start Chat")
+                    }
+                    .padding(16)
+                }
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                }
+                .shadow(color: .black.opacity(0.06), radius: 8, y: 3)
+
+                HStack(alignment: .firstTextBaseline) {
+                    if draftKind == .run {
+                        Text(AttachmentDraftView.limitSummary(for: model))
+                    }
+                    Spacer()
+                    Text("⌘↩ to \(draftKind == .run ? "start" : "send")")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                DisclosureGroup {
                     existingRunActions.padding(.top, 10)
+                } label: {
+                    Label("Open an existing run…", systemImage: "clock.arrow.circlepath")
                 }
                 .font(.callout)
                 .foregroundStyle(.secondary)
             }
-            .frame(maxWidth: 680)
+            .frame(maxWidth: 760)
             .padding(.horizontal, 40)
             .padding(.vertical, 44)
             .frame(maxWidth: .infinity, minHeight: 600, alignment: .center)
         }
+    }
+
+    private var attachmentMenu: some View {
+        Menu {
+            ForEach(AttachmentKind.allCases, id: \.self) { kind in
+                Button("\(kind.displayName)…", systemImage: kind.systemImage) {
+                    model.chooseAttachments(kind: kind, forTab: tabID)
+                }
+                .disabled(!attachmentAvailable(kind))
+                .help(model.attachmentUnavailableReason(for: kind) ?? "Add \(kind.displayName.lowercased()) attachments")
+            }
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "paperclip")
+                    .frame(width: 30, height: 30)
+                if attachmentCount > 0 {
+                    Text("\(attachmentCount)")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 5)
+                        .frame(minWidth: 17, minHeight: 17)
+                        .background(Color.accentColor, in: Capsule())
+                        .offset(x: 7, y: -6)
+                }
+            }
+        }
+        .menuIndicator(.hidden)
+        .menuStyle(.borderlessButton)
+        .frame(width: 36, height: 32)
+        .help("Attach a file, image, or audio recording")
+        .accessibilityLabel("Attach")
     }
 
     private var existingRunActions: some View {
@@ -660,6 +718,23 @@ private struct NewRequestView: View {
         model.tab(withID: tabID)?.draftText ?? ""
     }
 
+    private var attachmentCount: Int {
+        model.tab(withID: tabID)?.draftAttachments.count ?? 0
+    }
+
+    private var submissionDisabled: Bool {
+        draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || model.isWaitingForRunIdentity
+            || (model.tab(withID: tabID)?.isImportingAttachments ?? false)
+            || (model.tab(withID: tabID)?.isSubmittingDraft ?? false)
+    }
+
+    private func attachmentAvailable(_ kind: AttachmentKind) -> Bool {
+        model.attachmentEnabled(for: kind)
+            && !(model.tab(withID: tabID)?.isImportingAttachments ?? false)
+            && attachmentCount < AttachmentDraftView.maximumAttachmentCount(for: model)
+    }
+
     private var draftKindBinding: Binding<AppModel.RunKind> {
         Binding(
             get: { model.tab(withID: tabID)?.draftKind ?? .run },
@@ -688,35 +763,6 @@ private struct AttachmentDraftView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                ForEach(AttachmentKind.allCases, id: \.self) { kind in
-                    Button("Add \(kind.displayName)", systemImage: kind.systemImage) {
-                        model.chooseAttachments(kind: kind, forTab: tabID)
-                    }
-                    .disabled(
-                        !model.attachmentEnabled(for: kind)
-                            || (tab?.isImportingAttachments ?? false)
-                            || (tab?.draftAttachments.count ?? 0) >= maximumAttachmentCount
-                    )
-                    .help(
-                        model.attachmentUnavailableReason(for: kind)
-                            ?? "Add \(kind.displayName.lowercased()) attachments to this run"
-                    )
-                }
-
-                if tab?.isImportingAttachments == true {
-                    ProgressView().controlSize(.small)
-                    Text("Importing secure snapshots…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text(limitSummary)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
-
             if let attachments = tab?.draftAttachments, !attachments.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 7) {
@@ -746,6 +792,15 @@ private struct AttachmentDraftView: View {
                 }
             }
 
+            if tab?.isImportingAttachments == true {
+                HStack(spacing: 7) {
+                    ProgressView().controlSize(.small)
+                    Text("Importing secure snapshots…")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
             if let error = tab?.attachmentErrorMessage {
                 Text(error)
                     .font(.caption)
@@ -758,23 +813,24 @@ private struct AttachmentDraftView: View {
         ByteCountFormatter.string(fromByteCount: sizeBytes, countStyle: .file)
     }
 
-    private var maximumAttachmentCount: Int {
+    static func maximumAttachmentCount(for model: AppModel) -> Int {
         min(model.attachmentCapabilities?.maxAttachmentCount ?? AttachmentStore.maximumAttachmentCount,
             AttachmentStore.maximumAttachmentCount)
     }
 
-    private var limitSummary: String {
+    static func limitSummary(for model: AppModel) -> String {
         guard let capabilities = model.attachmentCapabilities else {
             return "Connect to see attachment availability"
         }
         let fileSize = Self.formattedSize(min(capabilities.maxFileBytes, AttachmentStore.maximumFileBytes))
         let totalSize = Self.formattedSize(min(capabilities.maxSubmissionBytes, AttachmentStore.maximumSubmissionBytes))
-        return "\(fileSize) each · \(maximumAttachmentCount) attachments · \(totalSize) total"
+        return "\(fileSize) each · \(maximumAttachmentCount(for: model)) attachments · \(totalSize) total"
     }
 }
 
 private struct WorkspaceContextView: View {
     @EnvironmentObject private var model: AppModel
+    var compact = false
 
     private var workspace: String {
         model.effectiveWorkspaceRoot.isEmpty ? model.workspacePath : model.effectiveWorkspaceRoot
@@ -788,7 +844,79 @@ private struct WorkspaceContextView: View {
         return "Agent from settings"
     }
 
-    var body: some View {
+    @ViewBuilder var body: some View {
+        if compact {
+            compactContent
+        } else {
+            standardContent
+        }
+    }
+
+    private var compactContent: some View {
+        HStack(spacing: 8) {
+            Menu {
+                Button("Agent Settings…", systemImage: "sparkles") { model.showConfiguration = true }
+                Button("Choose Agent…", systemImage: "person.crop.circle") { model.showConfiguration = true }
+                Divider()
+                Button("Runtime Settings…", systemImage: "gearshape.2") { model.showConfiguration = true }
+            } label: {
+                Label(agent, systemImage: "sparkles")
+            }
+            .help(model.agentConfigPath.isEmpty ? "Agent selected by runtime settings" : model.agentConfigPath)
+
+            Menu {
+                Button("Change Workspace…", systemImage: "folder") { model.showConfiguration = true }
+                Button("Workspace Settings…", systemImage: "gearshape") { model.showConfiguration = true }
+            } label: {
+                Label(workspace.isEmpty ? "Choose workspace" : URL(fileURLWithPath: workspace).lastPathComponent,
+                      systemImage: "folder")
+            }
+            .help(workspace)
+
+            Spacer(minLength: 0)
+
+            Menu {
+                ForEach(AppModel.supportedClarificationModes, id: \.self) { mode in
+                    Button {
+                        model.configuredClarificationMode = mode
+                    } label: {
+                        if model.configuredClarificationMode == mode {
+                            Label(mode.capitalized, systemImage: "checkmark")
+                        } else {
+                            Text(mode.capitalized)
+                        }
+                    }
+                }
+            } label: {
+                Text("Prep: \(model.configuredClarificationMode.capitalized)")
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            .help("Preparation: \(model.configuredClarificationMode.capitalized)")
+
+            Menu {
+                ForEach(AppModel.supportedApprovalModes, id: \.self) { mode in
+                    Button {
+                        model.configuredApprovalMode = mode
+                    } label: {
+                        if model.configuredApprovalMode == mode {
+                            Label(mode.capitalized, systemImage: "checkmark")
+                        } else {
+                            Text(mode.capitalized)
+                        }
+                    }
+                }
+            } label: {
+                Text("Approval: \(model.configuredApprovalMode.capitalized)")
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            .help("Approval: \(model.configuredApprovalMode.capitalized)")
+        }
+        .font(.caption)
+        .controlSize(.small)
+        .disabled(!model.canEditSelectedRuntimeConfiguration || model.isBusy)
+    }
+
+    private var standardContent: some View {
         HStack(spacing: 16) {
             VStack(alignment: .leading, spacing: 8) {
                 Label(agent, systemImage: "sparkles")
@@ -796,7 +924,8 @@ private struct WorkspaceContextView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .help(model.agentConfigPath.isEmpty ? "Agent selected by runtime settings" : model.agentConfigPath)
-                Label(workspace.isEmpty ? "Choose a workspace" : URL(fileURLWithPath: workspace).lastPathComponent, systemImage: "folder")
+                Label(workspace.isEmpty ? "Choose a workspace" : URL(fileURLWithPath: workspace).lastPathComponent,
+                      systemImage: "folder")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
