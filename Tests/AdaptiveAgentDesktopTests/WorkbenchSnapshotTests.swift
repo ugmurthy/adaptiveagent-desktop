@@ -14,7 +14,7 @@ final class WorkbenchSnapshotTests: XCTestCase {
         if let icon = Bundle.main.url(forResource: "AppIcon", withExtension: "icns") {
             NSApplication.shared.applicationIconImage = NSImage(contentsOf: icon)
         }
-        for state in ["ready", "chat", "disconnected", "active", "attention", "dark", "expanded"] {
+        for state in ["ready", "chat", "disconnected", "active", "attention", "timeline", "dark", "expanded"] {
             let model = AppModel(
                 client: RuntimeClient(executableURL: URL(fileURLWithPath: "/nonexistent/development-preview-runtime")),
                 workingDirectoryURL: URL(fileURLWithPath: "/tmp/Workbench Preview")
@@ -33,18 +33,55 @@ final class WorkbenchSnapshotTests: XCTestCase {
                 model.agentName = "Research Assistant with a deliberately long profile name for narrow windows"
                 model.setDraftText("Review this workspace and suggest three useful next steps.", forTab: tabID)
             }
-            if state == "active" || state == "attention" {
+            if state == "active" || state == "attention" || state == "timeline" {
                 var record = AppModel.RunRecord(
-                    id: UUID(), agentName: "Research Assistant", kind: .run,
+                    id: UUID(), agentName: "Research Assistant", modelName: "claude-sonnet-4.5", kind: .run,
                     title: "Review the workspace and recommend next steps")
                 record.runIds = ["development-preview"]
-                record.status = state == "active" ? .running : .waitingForApproval
+                record.status = state == "active" ? .running : state == "timeline" ? .succeeded : .waitingForApproval
                 if state == "attention" {
                     record.interaction = .init(
                         runId: "development-preview", approvalId: "preview-approval",
                         message: "The agent would like to save its findings in your workspace.",
                         kind: .approval(
                             toolName: "write_file", input: .object(["path": .string("notes.md")]), assistantContent: nil))
+                } else if state == "timeline" {
+                    let start = AppModel.historyDate("2026-09-11T20:00:00.000Z")
+                    let resultURL = URL(fileURLWithPath: "/tmp/Workbench Preview/notes.md")
+                    try FileManager.default.createDirectory(
+                        at: resultURL.deletingLastPathComponent(),
+                        withIntermediateDirectories: true
+                    )
+                    try "# Findings".write(to: resultURL, atomically: true, encoding: .utf8)
+                    record.activityStartedAt = start
+                    record.activityFinishedAt = start.addingTimeInterval(100)
+                    record.activities = [
+                        .init(id: "assistant:1", kind: .assistant, sourceRunId: "development-preview",
+                              content: "I’ll inspect the workspace before making the change.",
+                              createdAt: start.addingTimeInterval(2), eventSeq: 2),
+                        .init(id: "tool:shell-1", kind: .tool, sourceRunId: "development-preview",
+                              toolName: "shell_exec", detail: "swift test", toolState: .failed,
+                              createdAt: start.addingTimeInterval(5), completedAt: start.addingTimeInterval(8), eventSeq: 3,
+                              input: .object(["command": .string("swift test")]), errorMessage: "One test failed"),
+                        .init(id: "assistant:2", kind: .assistant, sourceRunId: "development-preview",
+                              content: "The first test exposed a stale expectation. I’ll update it and verify again.",
+                              createdAt: start.addingTimeInterval(10), eventSeq: 4),
+                        .init(id: "tool:edit-1", kind: .tool, sourceRunId: "development-preview",
+                              toolName: "edit_file", detail: "notes.md", toolState: .succeeded,
+                              createdAt: start.addingTimeInterval(30), completedAt: start.addingTimeInterval(32), eventSeq: 5,
+                              input: .object(["path": .string(resultURL.path)]), output: .object(["changed": .bool(true)])),
+                        .init(id: "tool:shell-2", kind: .tool, sourceRunId: "development-preview",
+                              toolName: "shell_exec", detail: "swift test", toolState: .succeeded,
+                              createdAt: start.addingTimeInterval(35), completedAt: start.addingTimeInterval(40), eventSeq: 6,
+                              input: .object(["command": .string("swift test")]), output: .string("All tests passed")),
+                        .init(id: "assistant:final", kind: .assistant, sourceRunId: "development-preview",
+                              content: "Updated the notes and verified the test suite.", isFinalAssistantMessage: true,
+                              createdAt: start.addingTimeInterval(42), eventSeq: 7)
+                    ]
+                    record.files = [
+                        .init(path: resultURL.path, workspaceRoot: "/tmp/Workbench Preview", operation: .edited,
+                              isSupportFile: false, sourceRunId: "development-preview", sourceActivityID: "tool:edit-1")
+                    ]
                 }
                 model.runs = [record]
                 model.selectRun(record.id)

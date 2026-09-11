@@ -1222,8 +1222,10 @@ done
 
         XCTAssertEqual(model.runs[0].files.map(\.path), [generatedFile.path, editedFile.path].sorted())
         XCTAssertEqual(model.runs[0].files.first { $0.path == generatedFile.path }?.operation, .written)
+        XCTAssertEqual(model.runs[0].files.first { $0.path == generatedFile.path }?.sourceActivityID, "tool:write_file-call")
         XCTAssertEqual(model.runs[0].files.first { $0.path == editedFile.path }?.operation, .edited)
         XCTAssertEqual(model.runs[0].files.first { $0.path == editedFile.path }?.sourceRunId, "child-run")
+        XCTAssertEqual(model.runs[0].files.first { $0.path == editedFile.path }?.sourceActivityID, "tool:edit_file-call")
     }
 
     @MainActor
@@ -1241,6 +1243,8 @@ done
         let assistantContent = "I’ll check the documentation and then inspect the local file."
         model.receive(method: "agent/event", params: .object([
             "id": .string("event-1"),
+            "seq": .number(2),
+            "createdAt": .string("2026-09-11T20:00:01.000Z"),
             "type": .string("tool.started"),
             "runId": .string("root-run"),
             "stepId": .string("step-1"),
@@ -1257,9 +1261,16 @@ done
         XCTAssertEqual(model.runs[0].activities[1].toolName, "web_search")
         XCTAssertEqual(model.runs[0].activities[1].detail, "SwiftUI TimelineView macOS")
         XCTAssertEqual(model.runs[0].activities[1].toolState, .running)
+        XCTAssertEqual(model.runs[0].activities[1].eventSeq, 2)
+        XCTAssertEqual(
+            model.runs[0].activities[1].createdAt,
+            AppModel.historyDate("2026-09-11T20:00:01.000Z")
+        )
 
         model.receive(method: "agent/event", params: .object([
             "id": .string("event-2"),
+            "seq": .number(3),
+            "createdAt": .string("2026-09-11T20:00:04.000Z"),
             "type": .string("tool.completed"),
             "runId": .string("root-run"),
             "stepId": .string("step-1"),
@@ -1324,7 +1335,21 @@ done
         ]))
 
         XCTAssertEqual(model.runs[0].activities.filter { $0.kind == .assistant }.count, 1)
+        XCTAssertEqual(model.runs[0].activities.count, 5)
         XCTAssertEqual(model.runs[0].activities.first { $0.id == "tool:search-call" }?.toolState, .succeeded)
+        XCTAssertEqual(model.runs[0].activities.first { $0.id == "tool:search-call" }?.eventSeq, 2)
+        XCTAssertEqual(
+            model.runs[0].activities.first { $0.id == "tool:search-call" }?.createdAt,
+            AppModel.historyDate("2026-09-11T20:00:01.000Z")
+        )
+        XCTAssertEqual(
+            model.runs[0].activities.first { $0.id == "tool:search-call" }?.completedAt,
+            AppModel.historyDate("2026-09-11T20:00:04.000Z")
+        )
+        XCTAssertEqual(
+            model.runs[0].activities.first { $0.id == "tool:search-call" }?.output,
+            .object(["resultCount": .number(4)])
+        )
         XCTAssertEqual(model.runs[0].activities.first { $0.id == "tool:search-call" }?.detail, "SwiftUI TimelineView macOS")
         XCTAssertEqual(model.runs[0].activities.first { $0.id == "tool:page-call" }?.detail, "example.com")
         XCTAssertEqual(model.runs[0].activities.first { $0.id == "tool:file-call" }?.detail, "AppModel.swift")
@@ -2271,6 +2296,7 @@ exit 9
             "schemaVersion": .number(1),
             "type": .string("tool.completed"),
             "runId": .string(runId),
+            "toolCallId": .string("\(toolName)-call"),
             "payload": .object(["toolName": .string(toolName), "output": .object(output)])
         ])
     }

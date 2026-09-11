@@ -1020,7 +1020,15 @@ private struct HistoricalRunDetailView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    HistoricalOutputView(item: item)
+                    if let report = model.historyReports[item.rootRunId] {
+                        historicalTimeline(report)
+                        selectedRunAccounting
+                    } else if let error = model.historyReportErrors[item.rootRunId] {
+                        Label("Trace unavailable: \(error)", systemImage: "exclamationmark.triangle")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        ProgressView("Loading root trace…")
+                    }
                     if let usage = model.historyUsage[item.rootRunId] ?? model.historyReports[item.rootRunId]?.usage {
                         HistoryUsageView(usage: usage, rootRunId: item.rootRunId)
                     }
@@ -1030,15 +1038,6 @@ private struct HistoricalRunDetailView: View {
                     }
                     if let report = model.historyReports[item.rootRunId] {
                         summary(report)
-                        if !toolActivities(report).isEmpty {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text("TIMELINE").sectionLabel()
-                                CompactToolActivityView(
-                                    activities: toolActivities(report),
-                                    isExpanded: activityExpandedBinding
-                                )
-                            }
-                        }
                         if !report.warnings.isEmpty {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("DATA WARNINGS").sectionLabel()
@@ -1049,14 +1048,9 @@ private struct HistoricalRunDetailView: View {
                                 }
                             }
                         }
-                    } else if let error = model.historyReportErrors[item.rootRunId] {
-                        Label("Trace unavailable: \(error)", systemImage: "exclamationmark.triangle")
-                            .font(.caption).foregroundStyle(.secondary)
-                    } else {
-                        ProgressView("Loading root trace…")
                     }
                 }
-                .frame(maxWidth: 820, alignment: .leading)
+                .frame(maxWidth: 1120, alignment: .leading)
                 .padding(28)
                 .frame(maxWidth: .infinity, alignment: .top)
             }
@@ -1101,16 +1095,95 @@ private struct HistoricalRunDetailView: View {
                 sourceRunId: entry.runId,
                 toolName: toolName,
                 detail: entry.durationMs.map(Self.duration),
-                toolState: state
+                toolState: state,
+                createdAt: entry.startedAt.map(AppModel.historyDate),
+                completedAt: entry.completedAt.map(AppModel.historyDate),
+                eventSeq: entry.eventSeq
             )
+        }
+        .sorted { left, right in
+            if let leftSequence = left.eventSeq, let rightSequence = right.eventSeq,
+               leftSequence != rightSequence { return leftSequence < rightSequence }
+            return (left.createdAt ?? .distantPast) < (right.createdAt ?? .distantPast)
         }
     }
 
-    private var activityExpandedBinding: Binding<Bool> {
-        Binding(
-            get: { model.tab(withID: tabID)?.activityExpanded ?? false },
-            set: { model.setActivityExpanded($0, forTab: tabID) }
-        )
+    private func historicalTimeline(_ report: TraceReport) -> some View {
+        let activities = toolActivities(report)
+        let detail = model.historyDetails[item.id]
+        let startedAt = AppModel.historyDate(item.startedAt)
+        let completedAt = item.completedAt.map(AppModel.historyDate)
+        return LazyVStack(alignment: .leading, spacing: 0) {
+            TimelineRow(date: startedAt == .distantPast ? nil : startedAt, symbol: "person", accessibilityLabel: "Goal") {
+                Text(item.title).textSelection(.enabled).padding(.vertical, 5)
+            }
+            ForEach(activities) { activity in
+                ToolActivityRow(activity: activity, files: historyFiles(for: activity, activities: activities))
+            }
+            ForEach(unattachedHistoryFiles(activities: activities)) { file in
+                TimelineRow(date: nil, symbol: "doc", accessibilityLabel: "File artifact") {
+                    FileRow(file: file).environmentObject(model)
+                }
+            }
+            if let output = detail?.output, output != .null {
+                RunActivityRow(
+                    activity: AppModel.RunActivity(
+                        id: "history-result:\(item.id)",
+                        kind: .assistant,
+                        sourceRunId: item.id,
+                        content: output.stringValue ?? output.prettyPrinted,
+                        isFinalAssistantMessage: true,
+                        createdAt: completedAt
+                    ),
+                    agentName: "Agent",
+                    modelName: report.rootRuns.first(where: { $0.runId == item.id })?.modelName ?? "",
+                    files: []
+                )
+            }
+            if let completedAt {
+                FinishedActivityRow(
+                    status: item.status.lowercased().contains("fail") ? .failed : .succeeded,
+                    duration: max(0, completedAt.timeIntervalSince(startedAt)),
+                    toolCount: activities.count,
+                    fileCount: detail?.files.count ?? 0,
+                    finishedAt: completedAt
+                )
+            }
+        }
+    }
+
+    @ViewBuilder private var selectedRunAccounting: some View {
+        if let detail = model.historyDetails[item.id], let usage = detail.usage {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("SELECTED RUN USAGE").sectionLabel()
+                HistoryTokenLine(usage: usage)
+            }
+        } else if model.historyDetails[item.id] == nil && model.historyDetailErrors[item.id] == nil {
+            ProgressView("Loading selected run…")
+        }
+        if let error = model.historyDetailErrors[item.id] {
+            Label("Output/files could not refresh: \(error)", systemImage: "exclamationmark.triangle")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private func historyFiles(
+        for activity: AppModel.RunActivity,
+        activities: [AppModel.RunActivity]
+    ) -> [AppModel.RunFile] {
+        guard activity.toolName == "write_file" || activity.toolName == "edit_file" else { return [] }
+        return (model.historyDetails[item.id]?.files ?? []).filter { file in
+            guard file.sourceRunId == activity.sourceRunId else { return false }
+            return activities.last(where: {
+                $0.sourceRunId == file.sourceRunId
+                    && ($0.toolName == "write_file" || $0.toolName == "edit_file")
+            })?.id == activity.id
+        }
+    }
+
+    private func unattachedHistoryFiles(activities: [AppModel.RunActivity]) -> [AppModel.RunFile] {
+        let attached = Set(activities.flatMap { historyFiles(for: $0, activities: activities).map(\.id) })
+        return (model.historyDetails[item.id]?.files ?? []).filter { !attached.contains($0.id) }
     }
 
     private static func duration(_ milliseconds: Double) -> String {
@@ -1140,45 +1213,15 @@ private struct RunDetailView: View {
                         if detailMode == .inspection {
                             inspectionOutput
                                 .id("run-inspection")
-                        } else if record.kind == .chat {
-                            chatTranscript
-                            RunActivityFeed(
-                                record: record,
-                                agentName: record.agentName,
-                                isExpanded: activityExpandedBinding
-                            )
-                                .id("run-activity")
                         } else {
                             RunActivityFeed(
                                 record: record,
                                 agentName: record.agentName,
-                                isExpanded: activityExpandedBinding
+                                modelName: record.modelName
                             )
                                 .id("run-activity")
                             runOutput
                                 .id("run-output")
-                        }
-
-                        if let interaction = record.interaction {
-                            InteractionCard(recordID: record.id, interaction: interaction)
-                                .environmentObject(model)
-                                .id("interaction-\(record.id.uuidString)")
-                        }
-
-                        if let error = record.errorMessage {
-                            ErrorCard(message: error)
-                                .id("error")
-                        }
-
-                        if let error = record.auxiliaryErrorMessage {
-                            ErrorCard(message: error)
-                                .id("auxiliary-error")
-                        }
-
-                        if !record.files.isEmpty {
-                            FilesChangedView(record: record)
-                                .environmentObject(model)
-                                .id("files")
                         }
 
                         Color.clear
@@ -1186,7 +1229,7 @@ private struct RunDetailView: View {
                             .id("run-bottom")
                     }
                     .scrollTargetLayout()
-                    .frame(maxWidth: 820, alignment: .leading)
+                    .frame(maxWidth: 1120, alignment: .leading)
                     .padding(.horizontal, 34)
                     .padding(.vertical, 20)
                     .frame(maxWidth: .infinity, alignment: .top)
@@ -1196,9 +1239,17 @@ private struct RunDetailView: View {
                     model.setFollowLive(false, forTab: tabID)
                 })
                 .onChange(of: record.activities) { oldActivities, activities in
-                    let oldNarrativeCount = oldActivities.filter { $0.kind == .assistant }.count
-                    let newNarrativeCount = activities.filter { $0.kind == .assistant }.count
-                    guard detailMode == .results, newNarrativeCount > oldNarrativeCount else { return }
+                    guard detailMode == .results, activities != oldActivities else { return }
+                    if followLive {
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            proxy.scrollTo("run-bottom", anchor: .bottom)
+                        }
+                    } else {
+                        hasNewerContent = true
+                    }
+                }
+                .onChange(of: record.chatMessages) { oldMessages, messages in
+                    guard detailMode == .results, messages != oldMessages else { return }
                     if followLive {
                         withAnimation(.easeOut(duration: 0.2)) {
                             proxy.scrollTo("run-bottom", anchor: .bottom)
@@ -1276,6 +1327,28 @@ private struct RunDetailView: View {
                     .lineLimit(1)
                 HStack(spacing: 6) {
                     StatusBadge(status: record.status)
+                    if let startedAt = record.activityStartedAt {
+                        summaryChip(
+                            ThinkingActivityRow.durationText(max(0, (record.activityFinishedAt ?? .now).timeIntervalSince(startedAt))),
+                            symbol: "clock",
+                            accessibilityLabel: "Run duration",
+                            target: "run-goal"
+                        )
+                    }
+                    let toolCount = record.activities.filter { $0.kind == .tool }.count
+                    if toolCount > 0, let firstTool = record.activities.first(where: { $0.kind == .tool }) {
+                        summaryChip(
+                            "\(toolCount)", symbol: "wrench.and.screwdriver",
+                            accessibilityLabel: "\(toolCount) tool calls", target: firstTool.id
+                        )
+                    }
+                    if !record.files.isEmpty {
+                        summaryChip(
+                            "\(record.files.count)", symbol: "doc",
+                            accessibilityLabel: "\(record.files.count) files changed",
+                            target: record.files.first?.sourceActivityID ?? "run-activity"
+                        )
+                    }
                     if let runId = record.latestRunId {
                         Text(runId)
                             .font(.caption.monospaced())
@@ -1305,6 +1378,26 @@ private struct RunDetailView: View {
         .frame(height: 66)
     }
 
+    private func summaryChip(
+        _ text: String,
+        symbol: String,
+        accessibilityLabel: String,
+        target: String
+    ) -> some View {
+        Button {
+            model.setScrollPosition(target, forTab: tabID)
+        } label: {
+            Label(text, systemImage: symbol)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(.quaternary.opacity(0.35), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
     @ViewBuilder private var inspectionOutput: some View {
         if let inspection = record.inspection {
             VStack(alignment: .leading, spacing: 12) {
@@ -1312,7 +1405,7 @@ private struct RunDetailView: View {
                 RunActivityFeed(
                     record: record,
                     agentName: record.agentName,
-                    isExpanded: activityExpandedBinding
+                    modelName: record.modelName
                 )
                 InspectionOutputView(inspection: inspection, hasRelevantActivity: !record.activities.isEmpty)
             }
@@ -1347,30 +1440,6 @@ private struct RunDetailView: View {
         }
     }
 
-    @ViewBuilder private var chatTranscript: some View {
-        ForEach(record.chatMessages) { message in
-            Group {
-                if message.role == .user {
-                    HStack {
-                        Spacer(minLength: 80)
-                        Text(message.content)
-                            .textSelection(.enabled)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 10)
-                            .background(Color.accentColor.opacity(0.13), in: RoundedRectangle(cornerRadius: 12))
-                    }
-                } else {
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text(record.agentName.isEmpty ? "AGENT" : record.agentName.uppercased())
-                            .sectionLabel()
-                        MarkdownText(content: message.content)
-                    }
-                }
-            }
-            .id("message-\(message.id.uuidString)")
-        }
-    }
-
     private var chatComposer: some View {
         ProminentRunComposer(
             title: "Message \(record.agentName.isEmpty ? "agent" : record.agentName)",
@@ -1382,6 +1451,7 @@ private struct RunDetailView: View {
             isPending: record.isRequestInFlight,
             errorMessage: record.errorMessage,
             accessory: AnyView(DictationButton(text: chatMessageBinding, controller: dictation)),
+            collapsesWhenIdle: !record.status.isActive,
             action: sendChatMessage
         )
     }
@@ -1437,13 +1507,6 @@ private struct RunDetailView: View {
         )
     }
 
-    private var activityExpandedBinding: Binding<Bool> {
-        Binding(
-            get: { model.tab(withID: tabID)?.activityExpanded ?? false },
-            set: { model.setActivityExpanded($0, forTab: tabID) }
-        )
-    }
-
     private func sendChatMessage() {
         dictation.cancel()
         model.sendChatMessage(in: tabID)
@@ -1487,10 +1550,37 @@ private struct ProminentRunComposer: View {
     let isPending: Bool
     let errorMessage: String?
     var accessory: AnyView? = nil
+    var collapsesWhenIdle = false
     let action: () -> Void
     @FocusState private var isFocused: Bool
+    @State private var isExpanded = false
 
     var body: some View {
+        if collapsesWhenIdle && !isExpanded && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            Button {
+                isExpanded = true
+                Task { @MainActor in isFocused = true }
+            } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: systemImage)
+                    Text(placeholder).foregroundStyle(.secondary)
+                    Spacer()
+                    Text(actionTitle).fontWeight(.semibold)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16)
+            .frame(height: 44)
+            .background(.bar)
+            .overlay(alignment: .top) { Divider() }
+            .accessibilityLabel("\(title). \(placeholder)")
+        } else {
+            expandedComposer
+        }
+    }
+
+    private var expandedComposer: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 7) {
                 Image(systemName: systemImage)
@@ -1544,6 +1634,12 @@ private struct ProminentRunComposer: View {
         .padding(.vertical, 12)
         .background(.bar)
         .overlay(alignment: .top) { Divider() }
+        .onChange(of: isFocused) { _, focused in
+            if collapsesWhenIdle && !focused
+                && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                isExpanded = false
+            }
+        }
     }
 }
 
@@ -1667,140 +1763,277 @@ private struct RunActionsMenu: View {
     }
 }
 
+private struct TimelineRow<Content: View>: View {
+    let date: Date?
+    let symbol: String
+    var showsProgress = false
+    let accessibilityLabel: String
+    var help: String? = nil
+    let content: Content
+
+    init(
+        date: Date?,
+        symbol: String,
+        showsProgress: Bool = false,
+        accessibilityLabel: String,
+        help: String? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.date = date
+        self.symbol = symbol
+        self.showsProgress = showsProgress
+        self.accessibilityLabel = accessibilityLabel
+        self.help = help
+        self.content = content()
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            Group {
+                if let date {
+                    Text(date, format: .dateTime.hour().minute().second())
+                } else {
+                    Text("—")
+                }
+            }
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.tertiary)
+            .frame(width: 70, alignment: .leading)
+            .padding(.top, 8)
+
+            VStack(spacing: 0) {
+                Group {
+                    if showsProgress {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Image(systemName: symbol)
+                            .font(.caption.weight(.semibold))
+                    }
+                }
+                .foregroundStyle(.secondary)
+                .frame(width: 24, height: 24)
+                .help(help ?? accessibilityLabel)
+                .accessibilityLabel(accessibilityLabel)
+
+                Rectangle()
+                    .fill(Color.secondary.opacity(0.22))
+                    .frame(width: 1)
+                    .frame(maxHeight: .infinity)
+            }
+            .frame(width: 32)
+
+            content
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 10)
+                .padding(.bottom, 14)
+        }
+    }
+}
+
+private struct ChatTimelineRow: View {
+    let message: AppModel.ChatMessage
+    let agentName: String
+    let modelName: String
+
+    var body: some View {
+        TimelineRow(
+            date: message.createdAt,
+            symbol: message.role == .user ? "person" : "sparkles",
+            accessibilityLabel: message.role == .user ? "You" : agentLabel,
+            help: message.role == .assistant ? agentLabel : nil
+        ) {
+            MarkdownText(content: message.content)
+                .padding(.vertical, 5)
+        }
+    }
+
+    private var agentLabel: String {
+        [agentName.isEmpty ? "Agent" : agentName, modelName].filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+}
+
+private struct ToolActivityDetail: View {
+    let activity: AppModel.RunActivity
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let input = activity.input {
+                detailSection("INPUT", value: input.prettyPrinted)
+            }
+            if let output = activity.output {
+                detailSection("OUTPUT", value: output.prettyPrinted)
+            }
+            if let error = activity.errorMessage {
+                detailSection("ERROR", value: error, isFailure: true)
+            }
+            if activity.input == nil && activity.output == nil && activity.errorMessage == nil {
+                Text("No additional detail was recorded.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func detailSection(_ label: String, value: String, isFailure: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).sectionLabel()
+            Text(value)
+                .font(.caption.monospaced())
+                .foregroundStyle(isFailure ? Color.red : Color.primary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
 private struct RunActivityFeed: View {
+    @EnvironmentObject private var model: AppModel
     let record: AppModel.RunRecord
     let agentName: String
-    @Binding var isExpanded: Bool
+    let modelName: String
 
     private var isThinking: Bool {
         record.interaction == nil
             && (record.status == .queued || record.status == .running || record.isRequestInFlight)
+            && record.activities.last?.toolState != .running
     }
 
     private var showsDuration: Bool {
         !record.status.isActive && record.activityStartedAt != nil && record.activityFinishedAt != nil
     }
 
-    private var assistantActivities: [AppModel.RunActivity] {
-        record.activities.filter { $0.kind == .assistant }
-    }
-
-    private var toolActivities: [AppModel.RunActivity] {
-        record.activities.filter { $0.kind == .tool }
+    private var feedItems: [TimelineFeedItem] {
+        let activities = record.activities.enumerated().map {
+            TimelineFeedItem.activity($0.element, order: $0.offset)
+        }
+        let messages = record.chatMessages.enumerated().map {
+            TimelineFeedItem.message($0.element, order: record.activities.count + $0.offset)
+        }
+        return (activities + messages).sorted { left, right in
+            if left.date == right.date { return left.order < right.order }
+            return left.date < right.date
+        }
     }
 
     var body: some View {
-        if !record.activities.isEmpty || isThinking || showsDuration {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("ACTIVITY").sectionLabel()
-                LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(assistantActivities) { activity in
-                        RunActivityRow(activity: activity, agentName: agentName)
-                            .id(activity.id)
+        if record.kind == .run || !feedItems.isEmpty || isThinking || showsDuration {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                if record.kind == .run {
+                    TimelineRow(date: record.activityStartedAt, symbol: "person", accessibilityLabel: "Goal") {
+                        Text(record.title)
+                            .textSelection(.enabled)
+                            .padding(.vertical, 5)
                     }
-                    if !toolActivities.isEmpty {
-                        CompactToolActivityView(activities: toolActivities, isExpanded: $isExpanded)
-                    }
-                    if isThinking {
-                        ThinkingActivityRow(startedAt: record.activityStartedAt)
-                            .id("thinking")
-                    } else if showsDuration,
-                              let startedAt = record.activityStartedAt,
-                              let finishedAt = record.activityFinishedAt {
-                        FinishedActivityRow(
-                            status: record.status,
-                            duration: max(0, finishedAt.timeIntervalSince(startedAt))
+                    .id("run-goal")
+                }
+                ForEach(feedItems) { item in
+                    switch item {
+                    case .activity(let activity, _):
+                        RunActivityRow(
+                            activity: activity,
+                            agentName: agentName,
+                            modelName: modelName,
+                            files: files(for: activity)
                         )
+                        .id(activity.id)
+                    case .message(let message, _):
+                        ChatTimelineRow(message: message, agentName: agentName, modelName: modelName)
+                            .id("message-\(message.id.uuidString)")
                     }
+                }
+                ForEach(unattachedFiles) { file in
+                    TimelineRow(date: nil, symbol: "doc", accessibilityLabel: "File artifact") {
+                        FileRow(file: file).environmentObject(model)
+                    }
+                }
+                if let interaction = record.interaction {
+                    TimelineRow(
+                        date: interaction.createdAt,
+                        symbol: interactionSymbol(interaction),
+                        accessibilityLabel: "Interaction required"
+                    ) {
+                        InteractionCard(recordID: record.id, interaction: interaction)
+                            .environmentObject(model)
+                    }
+                    .id("interaction-\(record.id.uuidString)")
+                }
+                if let error = record.errorMessage {
+                    TimelineRow(date: record.activityFinishedAt, symbol: "exclamationmark.triangle", accessibilityLabel: "Run failed") {
+                        ErrorCard(message: error)
+                    }
+                    .id("error")
+                }
+                if let error = record.auxiliaryErrorMessage {
+                    TimelineRow(date: nil, symbol: "exclamationmark.triangle", accessibilityLabel: "Operation failed") {
+                        ErrorCard(message: error)
+                    }
+                    .id("auxiliary-error")
+                }
+                if isThinking {
+                    ThinkingActivityRow(startedAt: record.activityStartedAt)
+                        .id("thinking")
+                } else if showsDuration,
+                          let startedAt = record.activityStartedAt,
+                          let finishedAt = record.activityFinishedAt {
+                    FinishedActivityRow(
+                        status: record.status,
+                        duration: max(0, finishedAt.timeIntervalSince(startedAt)),
+                        toolCount: record.activities.filter { $0.kind == .tool }.count,
+                        fileCount: record.files.count,
+                        finishedAt: finishedAt
+                    )
                 }
             }
         }
     }
-}
 
-private struct CompactToolActivityView: View {
-    let activities: [AppModel.RunActivity]
-    @Binding var isExpanded: Bool
-
-    private var latest: AppModel.RunActivity { activities[activities.count - 1] }
-    private var completedCount: Int {
-        activities.filter { activity in
-            switch activity.toolState {
-            case .succeeded, .failed, .skipped: true
-            case .awaitingApproval, .running, nil: false
-            }
-        }.count
+    private var unattachedFiles: [AppModel.RunFile] {
+        let attached = Set(record.activities.flatMap { files(for: $0).map(\.id) })
+        return record.files.filter { !attached.contains($0.id) }
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.18)) { isExpanded.toggle() }
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Text("Activity")
-                        .font(.callout.weight(.semibold))
-                    Text("\(completedCount) of \(activities.count) complete")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                    Divider().frame(height: 16)
-                    Text(latest.toolName ?? "tool")
-                        .font(.caption.monospaced().weight(.medium))
-                        .lineLimit(1)
-                    if let detail = latest.detail {
-                        Text("· \(detail)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    Spacer(minLength: 8)
-                    if latest.toolState == .running { ProgressView().controlSize(.mini) }
-                    Text(stateLabel(latest.toolState))
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(stateColor(latest.toolState))
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 10)
-            .frame(maxWidth: .infinity, minHeight: 36)
-            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
-            .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
-            .keyboardShortcut("a", modifiers: [.option, .command])
-
-            if isExpanded {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 8) {
-                        ForEach(activities) { ToolActivityRow(activity: $0) }
-                    }
-                }
-                .frame(minHeight: 120, maxHeight: 260)
-            }
+    private func files(for activity: AppModel.RunActivity) -> [AppModel.RunFile] {
+        record.files.filter { file in
+            if let sourceActivityID = file.sourceActivityID { return sourceActivityID == activity.id }
+            guard activity.kind == .tool,
+                  activity.sourceRunId == file.sourceRunId,
+                  activity.toolName == "write_file" || activity.toolName == "edit_file" else { return false }
+            return record.activities.last(where: {
+                $0.kind == .tool && $0.sourceRunId == file.sourceRunId
+                    && ($0.toolName == "write_file" || $0.toolName == "edit_file")
+            })?.id == activity.id
         }
     }
 
-    private func stateLabel(_ state: AppModel.RunActivity.ToolState?) -> String {
-        switch state {
-        case .awaitingApproval: "Approval"
-        case .running: "Running"
-        case .succeeded: "Done"
-        case .failed: "Failed"
-        case .skipped: "Skipped"
-        case nil: ""
+    private func interactionSymbol(_ interaction: AppModel.Interaction) -> String {
+        switch interaction.kind {
+        case .approval: "checkmark.shield"
+        case .clarification: "questionmark.bubble"
         }
     }
 
-    private func stateColor(_ state: AppModel.RunActivity.ToolState?) -> Color {
-        switch state {
-        case .awaitingApproval: .orange
-        case .running: .accentColor
-        case .succeeded: .green
-        case .failed: .red
-        case .skipped, nil: .secondary
+    private enum TimelineFeedItem: Identifiable {
+        case activity(AppModel.RunActivity, order: Int)
+        case message(AppModel.ChatMessage, order: Int)
+
+        var id: String {
+            switch self {
+            case .activity(let activity, _): "activity:\(activity.id)"
+            case .message(let message, _): "message:\(message.id.uuidString)"
+            }
+        }
+        var date: Date {
+            switch self {
+            case .activity(let activity, _): activity.createdAt ?? .distantPast
+            case .message(let message, _): message.createdAt
+            }
+        }
+        var order: Int {
+            switch self {
+            case .activity(_, let order), .message(_, let order): order
+            }
         }
     }
 }
@@ -1808,82 +2041,116 @@ private struct CompactToolActivityView: View {
 private struct RunActivityRow: View {
     let activity: AppModel.RunActivity
     let agentName: String
+    let modelName: String
+    let files: [AppModel.RunFile]
 
     var body: some View {
         switch activity.kind {
         case .assistant:
             if let content = activity.content {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "sparkles")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.tint)
-                        Text(agentName.isEmpty ? "AGENT" : agentName.uppercased())
-                            .sectionLabel()
+                TimelineRow(
+                    date: activity.createdAt,
+                    symbol: "sparkles",
+                    accessibilityLabel: agentLabel,
+                    help: agentLabel
+                ) {
+                    VStack(alignment: .leading, spacing: 7) {
                         if activity.isFinalAssistantMessage {
-                            Text("FINAL")
-                                .font(.caption2.weight(.semibold))
+                            Text("RESULT")
+                                .font(.caption.weight(.bold))
                                 .foregroundStyle(.secondary)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(.quaternary.opacity(0.65), in: Capsule())
+                        }
+                        MarkdownText(content: content)
+                    }
+                    .padding(activity.isFinalAssistantMessage ? 12 : 0)
+                    .overlay(alignment: .leading) {
+                        if activity.isFinalAssistantMessage {
+                            Rectangle().fill(.secondary).frame(width: 2)
                         }
                     }
-                    MarkdownText(content: content)
                 }
             }
         case .tool:
-            ToolActivityRow(activity: activity)
+            ToolActivityRow(activity: activity, files: files)
         }
+    }
+
+    private var agentLabel: String {
+        [agentName.isEmpty ? "Agent" : agentName, modelName].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 }
 
 private struct ToolActivityRow: View {
+    @EnvironmentObject private var model: AppModel
     let activity: AppModel.RunActivity
+    let files: [AppModel.RunFile]
+    @State private var isExpanded = false
 
     var body: some View {
-        HStack(spacing: 9) {
-            Image(systemName: toolSymbol)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(stateColor)
-                .frame(width: 24, height: 24)
-                .background(stateColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+        TimelineRow(
+            date: activity.createdAt,
+            symbol: toolSymbol,
+            showsProgress: activity.toolState == .running,
+            accessibilityLabel: activity.toolName ?? "Tool",
+            help: activity.toolName
+        ) {
+            VStack(alignment: .leading, spacing: 8) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) { isExpanded.toggle() }
+                } label: {
+                    HStack(spacing: 9) {
+                        Text(activity.detail ?? "Tool activity")
+                            .font(.callout.monospaced())
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer(minLength: 8)
+                        status
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(activity.toolName ?? "Tool"), \(activity.detail ?? "activity"), \(stateLabel)")
+                .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
 
-            Text(activity.toolName ?? "tool")
-                .font(.callout.monospaced().weight(.medium))
-                .lineLimit(1)
-            if let detail = activity.detail {
-                Text("·")
-                    .foregroundStyle(.tertiary)
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                if isExpanded {
+                    ToolActivityDetail(activity: activity)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+                ForEach(files) { file in
+                    FileRow(file: file).environmentObject(model)
+                }
             }
-
-            Spacer(minLength: 8)
-            if activity.toolState == .running {
-                ProgressView().controlSize(.mini)
-            }
-            Text(stateLabel)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(stateColor)
-                .lineLimit(1)
+            .padding(.vertical, 6)
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 6)
-        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
-        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder private var status: some View {
+        if activity.toolState == .running {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                Text("Running… \(ThinkingActivityRow.durationText(max(0, context.date.timeIntervalSince(activity.createdAt ?? context.date))))")
+                    .font(.caption.weight(.medium).monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        } else {
+            HStack(spacing: 4) {
+                Image(systemName: stateSymbol)
+                Text(stateLabel)
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(activity.toolState == .failed ? Color.red : Color.secondary)
+        }
     }
 
     private var toolSymbol: String {
         switch activity.toolName {
         case "web_search": return "magnifyingglass"
         case "read_web_page", "fetch_page": return "globe"
-        case "read_file": return "doc.text.magnifyingglass"
+        case "read_file": return "doc.text"
         case "write_file": return "square.and.pencil"
-        case "edit_file": return "pencil.line"
+        case "edit_file": return "square.and.pencil"
         case "shell_exec": return "terminal"
         default:
             return activity.toolName?.localizedCaseInsensitiveContains("file") == true
@@ -1903,13 +2170,14 @@ private struct ToolActivityRow: View {
         }
     }
 
-    private var stateColor: Color {
+    private var stateSymbol: String {
         switch activity.toolState {
-        case .awaitingApproval: return .orange
-        case .running: return .accentColor
-        case .succeeded: return .green
-        case .failed: return .red
-        case .skipped, nil: return .secondary
+        case .awaitingApproval: return "hand.raised"
+        case .running: return "circle.dotted"
+        case .succeeded: return "checkmark"
+        case .failed: return "xmark"
+        case .skipped: return "forward"
+        case nil: return "circle"
         }
     }
 }
@@ -1919,17 +2187,23 @@ private struct ThinkingActivityRow: View {
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            HStack(spacing: 9) {
-                ProgressView().controlSize(.small)
-                Text("Thinking…")
-                    .foregroundStyle(.secondary)
+            TimelineRow(
+                date: startedAt,
+                symbol: "sparkles",
+                showsProgress: true,
+                accessibilityLabel: "Agent thinking",
+                help: "Agent"
+            ) {
                 if let startedAt {
-                    Text(Self.durationText(max(0, context.date.timeIntervalSince(startedAt))))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.tertiary)
+                    Text("Thinking… \(Self.durationText(max(0, context.date.timeIntervalSince(startedAt))))")
+                        .font(.callout.weight(.medium).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Thinking…")
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.secondary)
                 }
             }
-            .accessibilityElement(children: .combine)
         }
     }
 
@@ -1945,16 +2219,20 @@ private struct ThinkingActivityRow: View {
 private struct FinishedActivityRow: View {
     let status: AppModel.RunStatus
     let duration: TimeInterval
+    let toolCount: Int
+    let fileCount: Int
+    let finishedAt: Date
 
     var body: some View {
-        Label {
-            Text("\(label) \(ThinkingActivityRow.durationText(duration))")
-                .font(.caption.monospacedDigit())
-        } icon: {
-            Image(systemName: symbol)
+        TimelineRow(date: finishedAt, symbol: symbol, accessibilityLabel: label) {
+            Text(
+                "\(label) \(ThinkingActivityRow.durationText(duration))"
+                    + " · \(toolCount) \(toolCount == 1 ? "tool call" : "tool calls")"
+                    + " · \(fileCount) \(fileCount == 1 ? "file" : "files")"
+            )
+                .font(.caption.weight(.semibold).monospacedDigit())
+                .foregroundStyle(status == .failed ? Color.red : Color.secondary)
         }
-        .foregroundStyle(color)
-        .accessibilityElement(children: .combine)
     }
 
     private var label: String {
@@ -1963,17 +2241,9 @@ private struct FinishedActivityRow: View {
 
     private var symbol: String {
         switch status {
-        case .succeeded: return "checkmark.circle.fill"
-        case .failed: return "xmark.circle.fill"
-        default: return "stop.circle.fill"
-        }
-    }
-
-    private var color: Color {
-        switch status {
-        case .succeeded: return .green
-        case .failed: return .red
-        default: return .secondary
+        case .succeeded: return "checkmark.circle"
+        case .failed: return "exclamationmark.triangle"
+        default: return "stop.circle"
         }
     }
 }
@@ -2444,7 +2714,9 @@ private struct InteractionCard: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 9) {
                 Image(systemName: icon)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.secondary)
+                    .help(toolHelp)
+                    .accessibilityLabel(toolHelp)
                 Text(title)
                     .font(.headline)
                 Spacer()
@@ -2463,24 +2735,18 @@ private struct InteractionCard: View {
             actions
         }
         .padding(18)
-        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.orange.opacity(0.35)))
+        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.secondary.opacity(0.25)))
     }
 
     @ViewBuilder private var interactionDetails: some View {
         switch interaction.kind {
-        case .approval(let toolName, let input, _):
-            if let toolName {
-                LabeledContent("Tool") {
-                    Text(toolName).font(.body.monospaced())
-                }
-            }
+        case .approval(_, let input, _):
             if let input {
-                ScrollView(.horizontal) {
-                    Text(input.prettyPrinted)
-                        .font(.callout.monospaced())
-                        .textSelection(.enabled)
-                }
+                Text(input.prettyPrinted)
+                    .font(.callout.monospaced())
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
                 .padding(10)
                 .background(.background.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
             }
@@ -2534,6 +2800,11 @@ private struct InteractionCard: View {
         case .clarification: return "questionmark.bubble"
         }
     }
+
+    private var toolHelp: String {
+        if case .approval(let toolName, _, _) = interaction.kind { return toolName ?? title }
+        return title
+    }
 }
 
 private struct ErrorCard: View {
@@ -2552,61 +2823,13 @@ private struct ErrorCard: View {
     }
 }
 
-private struct FilesChangedView: View {
-    @EnvironmentObject private var model: AppModel
-    let record: AppModel.RunRecord
-
-    private var primaryFiles: [AppModel.RunFile] { record.files.filter { !$0.isSupportFile } }
-    private var supportFiles: [AppModel.RunFile] { record.files.filter(\.isSupportFile) }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("FILES CHANGED · \(primaryFiles.count)").sectionLabel()
-                Spacer()
-                if record.files.filter({ model.fileExists($0) }).count > 1 {
-                    Button("Show All in Finder") { model.revealAllFiles(for: record.id) }
-                        .buttonStyle(.link)
-                }
-            }
-
-            VStack(spacing: 0) {
-                ForEach(Array(primaryFiles.enumerated()), id: \.element.id) { index, file in
-                    if index > 0 { Divider() }
-                    FileRow(file: file)
-                        .environmentObject(model)
-                }
-            }
-            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
-
-            if !supportFiles.isEmpty {
-                DisclosureGroup("Generated support files (\(supportFiles.count))") {
-                    VStack(spacing: 0) {
-                        ForEach(Array(supportFiles.enumerated()), id: \.element.id) { index, file in
-                            if index > 0 { Divider() }
-                            FileRow(file: file)
-                                .environmentObject(model)
-                        }
-                    }
-                    .padding(.top, 8)
-                }
-                .font(.callout)
-            }
-
-            Text("Tracks successful write_file and edit_file operations. Shell commands may change additional files.")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-        }
-    }
-}
-
 private struct FileRow: View {
     @EnvironmentObject private var model: AppModel
     let file: AppModel.RunFile
 
     var body: some View {
         HStack(spacing: 11) {
-            Image(systemName: "doc.text")
+            Image(systemName: "doc")
                 .foregroundStyle(.secondary)
                 .frame(width: 20)
             VStack(alignment: .leading, spacing: 2) {

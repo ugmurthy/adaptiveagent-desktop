@@ -112,6 +112,7 @@ final class AppModel: ObservableObject {
         let id = UUID()
         let role: Role
         let content: String
+        let createdAt: Date = .now
 
         var protocolValue: JSONValue {
             .object([
@@ -133,6 +134,12 @@ final class AppModel: ObservableObject {
         var detail: String?
         var toolState: ToolState?
         var isFinalAssistantMessage = false
+        var createdAt: Date? = nil
+        var completedAt: Date? = nil
+        var eventSeq: Int? = nil
+        var input: JSONValue? = nil
+        var output: JSONValue? = nil
+        var errorMessage: String? = nil
     }
 
     struct Interaction: Equatable {
@@ -145,6 +152,7 @@ final class AppModel: ObservableObject {
         var approvalId: String? = nil
         var message: String
         var kind: Kind
+        var createdAt: Date = .now
         var isResolving = false
         var errorMessage: String?
     }
@@ -158,6 +166,7 @@ final class AppModel: ObservableObject {
         var operation: Operation
         var isSupportFile: Bool
         var sourceRunId: String
+        var sourceActivityID: String? = nil
     }
 
     struct SubmittedAttachment: Identifiable, Equatable {
@@ -171,6 +180,7 @@ final class AppModel: ObservableObject {
         let id: UUID
         var runtimeSessionID: UUID? = nil
         var agentName = ""
+        var modelName = ""
         let kind: RunKind
         var title: String
         var sessionId: String?
@@ -1038,6 +1048,7 @@ final class AppModel: ObservableObject {
             id: recordID,
             runtimeSessionID: tabs[tabIndex].runtimeSessionID,
             agentName: sessions[tabs[tabIndex].runtimeSessionID]?.agentName ?? "",
+            modelName: sessions[tabs[tabIndex].runtimeSessionID]?.configuration.model ?? "",
             kind: kind,
             title: title(for: text),
             sessionId: sessionId,
@@ -1210,6 +1221,7 @@ final class AppModel: ObservableObject {
             id: recordID,
             runtimeSessionID: historyItem(rootRunId: runId)?.runtimeSessionID ?? selectedTab?.runtimeSessionID,
             agentName: selectedSession?.agentName ?? "",
+            modelName: selectedSession?.configuration.model ?? "",
             kind: .run,
             title: preferredTitle.flatMap { $0.isEmpty ? nil : $0 } ?? "Run \(abbreviatedRunId)",
             runIds: [runId],
@@ -1730,12 +1742,11 @@ final class AppModel: ObservableObject {
             guard let index = recordIndex(forRunId: runId) else { return }
             resolvedInteractions.remove(runs[index].id)
             let toolName = payload["toolName"]?.stringValue
-            let message = toolName.map { "Allow \($0) to continue?" } ?? "The agent needs approval to continue."
             runs[index].status = .waitingForApproval
             runs[index].interaction = Interaction(
                 runId: runId,
                 approvalId: payload["approvalId"]?.stringValue,
-                message: message,
+                message: "Allow this action to continue?",
                 kind: .approval(
                     toolName: toolName,
                     input: payload["input"],
@@ -1752,7 +1763,11 @@ final class AppModel: ObservableObject {
                 kind: .clarification(suggestedQuestions: payload["suggestedQuestions"]?.stringArray ?? [])
             )
         case "tool.completed":
-            captureFiles(from: payload, sourceRunId: runId)
+            captureFiles(
+                from: payload,
+                sourceRunId: runId,
+                sourceActivityID: event["toolCallId"]?.stringValue.map { "tool:\($0)" }
+            )
         default:
             break
         }
@@ -2236,6 +2251,7 @@ final class AppModel: ObservableObject {
                     captureFiles(
                         from: event["payload"]?.objectValue ?? [:],
                         sourceRunId: sourceRunId,
+                        sourceActivityID: event["toolCallId"]?.stringValue.map { "tool:\($0)" },
                         at: index
                     )
                 }
@@ -2254,9 +2270,9 @@ final class AppModel: ObservableObject {
 
     private func applyOutput(_ output: JSONValue, to index: Int) {
         runs[index].output = output
-        if runs[index].kind == .run, let content = output.stringValue {
+        if runs[index].kind == .run {
             appendAssistantActivity(
-                content: content,
+                content: output.stringValue ?? output.prettyPrinted,
                 id: "assistant:\(runs[index].latestRunId ?? runs[index].id.uuidString):final",
                 sourceRunId: runs[index].latestRunId ?? "",
                 isFinal: true,
@@ -2264,7 +2280,6 @@ final class AppModel: ObservableObject {
             )
             return
         }
-        guard runs[index].kind == .chat else { return }
         let content = output.stringValue ?? output.prettyPrinted
         if runs[index].chatMessages.last?.role != .assistant || runs[index].chatMessages.last?.content != content {
             runs[index].chatMessages.append(ChatMessage(role: .assistant, content: content))
@@ -2288,6 +2303,8 @@ final class AppModel: ObservableObject {
                 id: "assistant:\(sourceRunId):\(stepKey)",
                 sourceRunId: sourceRunId,
                 isFinal: false,
+                createdAt: Self.activityDate(event["createdAt"]?.stringValue),
+                eventSeq: Self.activitySequence(event["seq"]),
                 at: index
             )
         }
@@ -2301,6 +2318,8 @@ final class AppModel: ObservableObject {
                 id: "assistant:\(sourceRunId):final",
                 sourceRunId: sourceRunId,
                 isFinal: true,
+                createdAt: Self.activityDate(event["createdAt"]?.stringValue),
+                eventSeq: Self.activitySequence(event["seq"]),
                 at: index
             )
         }
@@ -2317,11 +2336,19 @@ final class AppModel: ObservableObject {
         default: .failed
         }
         let detail = Self.compactToolDetail(toolName: toolName, input: payload["input"]?.objectValue)
+        let eventDate = Self.activityDate(event["createdAt"]?.stringValue)
+        let eventSeq = Self.activitySequence(event["seq"])
 
         if let activityIndex = runs[index].activities.firstIndex(where: { $0.id == id }) {
             runs[index].activities[activityIndex].toolName = toolName
             runs[index].activities[activityIndex].toolState = state
             if let detail { runs[index].activities[activityIndex].detail = detail }
+            if let input = payload["input"] { runs[index].activities[activityIndex].input = input }
+            if let output = payload["output"] { runs[index].activities[activityIndex].output = output }
+            if let error = payload["error"]?.stringValue { runs[index].activities[activityIndex].errorMessage = error }
+            if state != .running && state != .awaitingApproval {
+                runs[index].activities[activityIndex].completedAt = eventDate
+            }
         } else {
             appendActivity(RunActivity(
                 id: id,
@@ -2329,7 +2356,13 @@ final class AppModel: ObservableObject {
                 sourceRunId: sourceRunId,
                 toolName: toolName,
                 detail: detail,
-                toolState: state
+                toolState: state,
+                createdAt: eventDate,
+                completedAt: state == .running || state == .awaitingApproval ? nil : eventDate,
+                eventSeq: eventSeq,
+                input: payload["input"],
+                output: payload["output"],
+                errorMessage: payload["error"]?.stringValue
             ), at: index)
         }
     }
@@ -2339,6 +2372,8 @@ final class AppModel: ObservableObject {
         id: String,
         sourceRunId: String,
         isFinal: Bool,
+        createdAt: Date? = nil,
+        eventSeq: Int? = nil,
         at index: Int
     ) {
         let content = content.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2359,7 +2394,9 @@ final class AppModel: ObservableObject {
             kind: .assistant,
             sourceRunId: sourceRunId,
             content: content,
-            isFinalAssistantMessage: isFinal
+            isFinalAssistantMessage: isFinal,
+            createdAt: createdAt ?? .now,
+            eventSeq: eventSeq
         ), at: index)
     }
 
@@ -2368,6 +2405,18 @@ final class AppModel: ObservableObject {
         if runs[index].activities.count > 250 {
             runs[index].activities.removeFirst(runs[index].activities.count - 250)
         }
+    }
+
+    private static func activityDate(_ value: String?) -> Date {
+        guard let value else { return .now }
+        let date = historyDate(value)
+        return date == .distantPast ? .now : date
+    }
+
+    private static func activitySequence(_ value: JSONValue?) -> Int? {
+        guard case .number(let number) = value, number.isFinite,
+              number.rounded(.towardZero) == number else { return nil }
+        return Int(exactly: number)
     }
 
     private nonisolated static func compactToolDetail(
@@ -2432,6 +2481,7 @@ final class AppModel: ObservableObject {
     private func captureFiles(
         from payload: [String: JSONValue],
         sourceRunId: String,
+        sourceActivityID: String? = nil,
         at targetIndex: Int? = nil
     ) {
         guard payload["skipped"] != .bool(true),
@@ -2442,18 +2492,22 @@ final class AppModel: ObservableObject {
         switch toolName {
         case "write_file":
             if let path = output["path"]?.stringValue {
-                registerFile(path: path, operation: .written, support: false, sourceRunId: sourceRunId, at: index)
+                registerFile(path: path, operation: .written, support: false, sourceRunId: sourceRunId,
+                             sourceActivityID: sourceActivityID, at: index)
             }
             if let path = output["intermediatePath"]?.stringValue {
-                registerFile(path: path, operation: .written, support: true, sourceRunId: sourceRunId, at: index)
+                registerFile(path: path, operation: .written, support: true, sourceRunId: sourceRunId,
+                             sourceActivityID: sourceActivityID, at: index)
             }
         case "edit_file":
             guard output["changed"] == .bool(true) else { return }
             if let path = output["path"]?.stringValue {
-                registerFile(path: path, operation: .edited, support: false, sourceRunId: sourceRunId, at: index)
+                registerFile(path: path, operation: .edited, support: false, sourceRunId: sourceRunId,
+                             sourceActivityID: sourceActivityID, at: index)
             }
             if let path = output["backupPath"]?.stringValue {
-                registerFile(path: path, operation: .written, support: true, sourceRunId: sourceRunId, at: index)
+                registerFile(path: path, operation: .written, support: true, sourceRunId: sourceRunId,
+                             sourceActivityID: sourceActivityID, at: index)
             }
         default:
             break
@@ -2465,6 +2519,7 @@ final class AppModel: ObservableObject {
         operation: RunFile.Operation,
         support: Bool,
         sourceRunId: String,
+        sourceActivityID: String?,
         at index: Int
     ) {
         let session = runs[index].runtimeSessionID.flatMap { sessions[$0] }
@@ -2480,13 +2535,15 @@ final class AppModel: ObservableObject {
             runs[index].files[fileIndex].operation = operation
             runs[index].files[fileIndex].isSupportFile = support
             runs[index].files[fileIndex].sourceRunId = sourceRunId
+            runs[index].files[fileIndex].sourceActivityID = sourceActivityID
         } else {
             runs[index].files.append(RunFile(
                 path: url.path,
                 workspaceRoot: rootPath,
                 operation: operation,
                 isSupportFile: support,
-                sourceRunId: sourceRunId
+                sourceRunId: sourceRunId,
+                sourceActivityID: sourceActivityID
             ))
         }
         runs[index].files.sort { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
