@@ -129,16 +129,16 @@ private struct WindowCloseObserver: NSViewRepresentable {
         coordinator.stopObserving()
     }
 
+    @MainActor
     final class Coordinator {
         private let onClose: @MainActor () -> Void
         private weak var window: NSWindow?
-        private var observer: NSObjectProtocol?
+        nonisolated(unsafe) private var observer: NSObjectProtocol?
 
         init(onClose: @escaping @MainActor () -> Void) {
             self.onClose = onClose
         }
 
-        @MainActor
         func observe(window: NSWindow?) {
             guard let window, self.window !== window else { return }
             stopObserving()
