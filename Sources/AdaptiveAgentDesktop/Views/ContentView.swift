@@ -15,22 +15,32 @@ struct ContentView: View {
     @State private var pendingDeletionRunIDs: Set<String> = []
     @State private var deletionConfirmationPresented = false
 
+    init(inspectorPresented: Bool = false) {
+        _inspectorPresented = State(initialValue: inspectorPresented)
+    }
+
     var body: some View {
-        NavigationSplitView {
-            runSidebar
-                .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
-        } detail: {
-            detail
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // SwiftUI's native inspector can enter an AppKit constraint-update cycle
+        // when it changes a NavigationSplitView's width on macOS 26.
+        HStack(spacing: 0) {
+            NavigationSplitView {
+                runSidebar
+                    .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
+            } detail: {
+                detail
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            if inspectorPresented {
+                Divider()
+                RuntimeInspectorView()
+                    .environmentObject(model)
+                    .frame(width: 340)
+            }
         }
         .frame(minWidth: 980, minHeight: 680)
         .tint(.teal)
         .toolbar { toolbar }
-        .inspector(isPresented: $inspectorPresented) {
-            RuntimeInspectorView()
-                .environmentObject(model)
-                .inspectorColumnWidth(min: 280, ideal: 340, max: 480)
-        }
         .sheet(isPresented: $model.showConfiguration) {
             ConfigurationView()
                 .environmentObject(model)
@@ -224,7 +234,7 @@ struct ContentView: View {
             } label: {
                 Label("Inspector", systemImage: "sidebar.trailing")
             }
-            .help("Show runtime inspector")
+            .help(inspectorPresented ? "Hide runtime inspector" : "Show runtime inspector")
         }
     }
 

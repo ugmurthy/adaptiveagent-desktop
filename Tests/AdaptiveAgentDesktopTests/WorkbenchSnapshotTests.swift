@@ -14,7 +14,7 @@ final class WorkbenchSnapshotTests: XCTestCase {
         if let icon = Bundle.main.url(forResource: "AppIcon", withExtension: "icns") {
             NSApplication.shared.applicationIconImage = NSImage(contentsOf: icon)
         }
-        for state in ["ready", "chat", "disconnected", "active", "attention", "timeline", "dark", "expanded"] {
+        for state in ["ready", "chat", "disconnected", "active", "attention", "timeline", "dark", "expanded", "inspector"] {
             let model = AppModel(
                 client: RuntimeClient(executableURL: URL(fileURLWithPath: "/nonexistent/development-preview-runtime")),
                 workingDirectoryURL: URL(fileURLWithPath: "/tmp/Workbench Preview")
@@ -88,9 +88,11 @@ final class WorkbenchSnapshotTests: XCTestCase {
                 model.isConnected = true
             }
             let view = NSHostingView(
-                rootView: ContentView().environmentObject(model).background(Color(nsColor: .windowBackgroundColor)))
+                rootView: ContentView(inspectorPresented: state == "inspector")
+                    .environmentObject(model)
+                    .background(Color(nsColor: .windowBackgroundColor)))
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 980, height: 760),
+                contentRect: NSRect(x: 0, y: 0, width: state == "inspector" ? 1320 : 980, height: 760),
                 styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
             window.appearance = NSAppearance(named: state == "dark" ? .darkAqua : .aqua)
             window.contentView = view
@@ -117,6 +119,34 @@ final class WorkbenchSnapshotTests: XCTestCase {
             XCTAssertGreaterThan(data.count, 1000)
             window.orderOut(nil)
         }
+    }
+
+    @MainActor
+    func testInspectorLayoutRemainsStableWhileResizing() {
+        let model = AppModel(
+            client: RuntimeClient(executableURL: URL(fileURLWithPath: "/nonexistent/layout-test-runtime")),
+            workingDirectoryURL: URL(fileURLWithPath: "/tmp/Inspector Layout Test")
+        )
+        model.isConnected = true
+        model.bootstrap()
+
+        let view = NSHostingView(rootView: ContentView(inspectorPresented: true).environmentObject(model))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1320, height: 760),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.contentView = view
+        window.makeKeyAndOrderFront(nil)
+
+        for width in [1320.0, 980.0, 1180.0, 1320.0] {
+            window.setContentSize(NSSize(width: width, height: 760))
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+            view.layoutSubtreeIfNeeded()
+            XCTAssertEqual(view.bounds.width, width, accuracy: 1)
+        }
+
+        XCTAssertTrue(view.bounds.width.isFinite)
+        XCTAssertTrue(view.bounds.height.isFinite)
+        window.orderOut(nil)
     }
 
     @MainActor
