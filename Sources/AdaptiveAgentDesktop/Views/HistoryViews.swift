@@ -103,7 +103,8 @@ struct HistoryTreeRow: View {
             if node.item != nil || rowRunId != nil {
                 HStack(spacing: 5) {
                     if let item = node.item {
-                        Image(systemName: AppModel.historyDisplayStatus(item.status) == "Waiting" ? "hand.raised" : "circle.dotted")
+                        Image(systemName: ["Blocked", "Waiting"].contains(AppModel.historyDisplayStatus(item.status))
+                              ? "hand.raised" : "circle.dotted")
                             .font(.system(size: 8))
                         Text(AppModel.historyDisplayStatus(item.status))
                         let timeText = AppModel.historyTimeText(AppModel.historyDate(item.startedAt))
@@ -164,7 +165,7 @@ struct HistoryTreeRow: View {
     private static func statusDotColor(_ status: String) -> Color {
         switch status.lowercased() {
         case "queued", "planning", "running", "awaiting_subagent":
-            return .accentColor
+            return .orange
         case "awaiting_approval", "approval required", "clarification_requested", "question pending":
             return .orange
         case "succeeded", "completed":

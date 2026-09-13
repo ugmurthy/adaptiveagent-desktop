@@ -77,39 +77,44 @@ struct ContentView: View {
 
     private var runSidebar: some View {
         VStack(spacing: 0) {
+            VStack(spacing: 8) {
+                HStack {
+                    Text("History")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button(action: model.collapseAllHistory) {
+                        Image(systemName: "rectangle.compress.vertical")
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(model.expandedHistoryIDs.isEmpty)
+                    .help("Collapse all expanded history")
+                    Button(action: model.refreshHistory) {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Refresh run history")
+                }
+                HStack(spacing: 6) {
+                    HistorySearchField(
+                        text: historySearchBinding,
+                        isSearching: model.isSearchingHistory
+                    )
+                    historyFilterMenu
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+            .padding(.bottom, 10)
+
+            Divider()
+
             List(selection: $sidebarSelections) {
                 if !activeRuns.isEmpty {
                     Section("Active") {
                         ForEach(activeRuns) { record in
                             RunRow(record: record).tag(SidebarItemID.live(record.id))
                         }
-                    }
-                }
-
-                Section {
-                    HStack(spacing: 6) {
-                        HistorySearchField(
-                            text: historySearchBinding,
-                            isSearching: model.isSearchingHistory
-                        )
-                        historyFilterMenu
-                    }
-                    .listRowSeparator(.hidden)
-                } header: {
-                    HStack {
-                        Text("History")
-                        Spacer()
-                        Button(action: model.collapseAllHistory) {
-                            Image(systemName: "rectangle.compress.vertical")
-                        }
-                        .buttonStyle(.borderless)
-                        .disabled(model.expandedHistoryIDs.isEmpty)
-                        .help("Collapse all expanded history")
-                        Button(action: model.refreshHistory) {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                        .buttonStyle(.borderless)
-                        .help("Refresh run history")
                     }
                 }
 
@@ -369,7 +374,7 @@ struct ContentView: View {
 
     @ViewBuilder private var historyFilterMenu: some View {
         Menu {
-            Toggle("Running", isOn: historyStatusFilterBinding(.running))
+            Toggle("Blocked", isOn: historyStatusFilterBinding(.blocked))
             Toggle("Waiting", isOn: historyStatusFilterBinding(.waiting))
             Toggle("Failed", isOn: historyStatusFilterBinding(.failed))
             Divider()
@@ -528,13 +533,6 @@ private struct HistorySearchField: View {
 extension AppModel.HistoryItem {
     var systemImage: String {
         type == "chat" ? "bubble.left.and.bubble.right.fill" : "play.fill"
-    }
-
-    var allowsDeletion: Bool {
-        ![
-            "queued", "planning", "running", "awaiting_subagent",
-            "awaiting_approval", "clarification_requested"
-        ].contains(status.lowercased())
     }
 }
 

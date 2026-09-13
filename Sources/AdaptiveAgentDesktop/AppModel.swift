@@ -752,7 +752,7 @@ final class AppModel: ObservableObject {
                     }
                     affectedSessionIDs.insert(owningSessionID)
                     let owningClient = owningSession.client
-                    let result = try await owningClient.deleteRun(runId)
+                    let result = try await deleteRun(runId, using: owningClient)
                     guard result.deleted else {
                         failures.append("\(runId): runtime did not confirm deletion")
                         continue
@@ -774,6 +774,18 @@ final class AppModel: ObservableObject {
 
     func clearRunDeletionError() {
         runDeletionError = nil
+    }
+
+    private func deleteRun(_ runId: String, using client: RuntimeClient) async throws -> RunDeletionResult {
+        do {
+            return try await client.deleteRun(runId)
+        } catch RuntimeClientError.remote(_, let protocolCode, _) where protocolCode == "RUN_NOT_TERMINAL" {
+            // Persisted history can contain orphaned nonterminal trees after the
+            // process that owned them has stopped. The runtime requires an
+            // explicit interruption before it will delete such a tree.
+            _ = try await client.send(method: "run/interrupt", params: ["runId": .string(runId)])
+            return try await client.deleteRun(runId)
+        }
     }
 
     func newRun() {

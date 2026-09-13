@@ -362,7 +362,7 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(ids(.init(statuses: [.failed])), ["failed"])
         XCTAssertEqual(ids(.init(kinds: [.chat])), ["chat"])
         XCTAssertEqual(ids(.init(hasSession: false)), ["sessionless"])
-        XCTAssertEqual(ids(.init(statuses: [.running, .waiting])), ["active", "pinned-active"])
+        XCTAssertEqual(ids(.init(statuses: [.blocked, .waiting])), ["active", "pinned-active"])
 
         let wrapper = AppModel.HistoryNode(
             id: "root:x", label: "Root x", item: nil, rootRunId: "x", newest: now, children: []
@@ -382,8 +382,10 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(AppModel.historyDisplayStatus("awaiting_approval"), "Waiting")
         XCTAssertEqual(AppModel.historyDisplayStatus("Approval required"), "Waiting")
         XCTAssertEqual(AppModel.historyDisplayStatus("Question pending"), "Waiting")
-        XCTAssertEqual(AppModel.historyDisplayStatus("awaiting_subagent"), "Running")
-        XCTAssertEqual(AppModel.historyDisplayStatus("planning"), "Planning")
+        XCTAssertEqual(AppModel.historyDisplayStatus("awaiting_subagent"), "Blocked")
+        XCTAssertEqual(AppModel.historyDisplayStatus("running"), "Blocked")
+        XCTAssertEqual(AppModel.historyDisplayStatus("planning"), "Blocked")
+        XCTAssertEqual(AppModel.historyStatusCategory("awaiting_subagent"), .blocked)
         XCTAssertEqual(AppModel.historyDisplayStatus("interrupted"), "Interrupted")
         XCTAssertEqual(AppModel.historyDisplayStatus("mystery"), "Unknown")
         XCTAssertEqual(AppModel.historyTimeText(.distantPast), "")

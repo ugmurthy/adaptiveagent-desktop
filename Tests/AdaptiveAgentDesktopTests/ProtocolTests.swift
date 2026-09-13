@@ -1745,7 +1745,7 @@ done
     }
 
     @MainActor
-    func testDeletingMultipleRunsCleansSuccessfulRunStateAndReportsPartialFailure() async throws {
+    func testDeletingMultipleRunsInterruptsStaleTreesAndReportsPartialFailure() async throws {
         let workspace = try temporaryDirectoryURL()
         let requestLog = temporaryFileURL(named: "app-run-delete-requests.log")
         let executable = try makeRuntimeScript(#"""
@@ -1761,7 +1761,20 @@ while IFS= read -r line; do
     run/delete)
       case "$line" in
         *root-a*) printf '{"jsonrpc":"2.0","id":"%s","result":{"deleted":true,"rootRunId":"root-a"}}\n' "$id" ;;
+        *root-c*)
+          if [ -f \#(shellQuote(workspace.appendingPathComponent("root-c-interrupted").path)) ]; then
+            printf '{"jsonrpc":"2.0","id":"%s","result":{"deleted":true,"rootRunId":"root-c"}}\n' "$id"
+          else
+            printf '{"jsonrpc":"2.0","id":"%s","error":{"code":-32000,"message":"Run is not terminal","data":{"protocolCode":"RUN_NOT_TERMINAL"}}}\n' "$id"
+          fi
+          ;;
         *) printf '{"jsonrpc":"2.0","id":"%s","error":{"code":-32000,"message":"Run is not terminal","data":{"protocolCode":"RUN_NOT_TERMINAL"}}}\n' "$id" ;;
+      esac
+      ;;
+    run/interrupt)
+      case "$line" in
+        *root-c*) touch \#(shellQuote(workspace.appendingPathComponent("root-c-interrupted").path)); printf '{"jsonrpc":"2.0","id":"%s","result":{"runId":"root-c","interrupted":true}}\n' "$id" ;;
+        *) printf '{"jsonrpc":"2.0","id":"%s","error":{"code":-32000,"message":"Run could not be interrupted","data":{"protocolCode":"COMMAND_REJECTED"}}}\n' "$id" ;;
       esac
       ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
@@ -1781,23 +1794,26 @@ done
 
         let deletedRecordID = UUID()
         let retainedRecordID = UUID()
+        let staleRecordID = UUID()
         model.runs = [
             .init(id: deletedRecordID, kind: .run, title: "Delete me", runIds: ["root-a"], status: .succeeded),
-            .init(id: retainedRecordID, kind: .run, title: "Keep me", runIds: ["root-b"], status: .failed)
+            .init(id: retainedRecordID, kind: .run, title: "Keep me", runIds: ["root-b"], status: .failed),
+            .init(id: staleRecordID, kind: .run, title: "Stale", runIds: ["root-c"], status: .interrupted)
         ]
         model.selectRun(deletedRecordID)
         model.selectRun(retainedRecordID)
 
-        model.deleteRuns(rootRunIDs: ["root-a", "root-b"])
+        model.deleteRuns(rootRunIDs: ["root-a", "root-b", "root-c"])
         for _ in 0..<100 where !model.deletingRunIDs.isEmpty {
             try? await Task.sleep(for: .milliseconds(20))
         }
 
         XCTAssertNil(model.runs.first(where: { $0.id == deletedRecordID }))
+        XCTAssertNil(model.runs.first(where: { $0.id == staleRecordID }))
         XCTAssertNotNil(model.runs.first(where: { $0.id == retainedRecordID }))
         XCTAssertNil(model.tabs.first(where: { $0.selectedRunID == deletedRecordID }))
         XCTAssertNotNil(model.tabs.first(where: { $0.selectedRunID == retainedRecordID }))
-        XCTAssertTrue(model.runDeletionError?.contains("RUN_NOT_TERMINAL") == true)
+        XCTAssertTrue(model.runDeletionError?.contains("COMMAND_REJECTED") == true)
 
         let requests = try String(contentsOf: requestLog, encoding: .utf8)
             .split(separator: "\n")
@@ -1806,7 +1822,15 @@ done
             guard request.objectValue?["method"] == .string("run/delete") else { return nil }
             return request.objectValue?["params"]?.objectValue?["runId"]?.stringValue
         })
-        XCTAssertEqual(deletedRunIDs, ["root-a", "root-b"])
+        XCTAssertEqual(deletedRunIDs, ["root-a", "root-b", "root-c"])
+        XCTAssertTrue(requests.contains {
+            $0.objectValue?["method"] == .string("run/interrupt")
+                && $0.objectValue?["params"]?.objectValue?["runId"] == .string("root-b")
+        })
+        XCTAssertEqual(requests.filter {
+            $0.objectValue?["method"] == .string("run/delete")
+                && $0.objectValue?["params"]?.objectValue?["runId"] == .string("root-c")
+        }.count, 2)
         await model.shutdown()
     }
 

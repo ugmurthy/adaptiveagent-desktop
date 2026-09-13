@@ -57,7 +57,7 @@ extension AppModel {
     }
 
     enum HistoryStatusFilter: String, CaseIterable, Identifiable {
-        case running, waiting, failed
+        case blocked, waiting, failed
 
         var id: String { rawValue }
     }
@@ -224,7 +224,6 @@ extension AppModel {
 
     func deletableHistoryRoot(for runId: String) -> String? {
         guard let item = historyItem(rootRunId: runId), item.rootRunId == runId,
-              item.allowsDeletion,
               !runs.contains(where: { $0.runIds.contains(runId) && ($0.status.isActive || $0.hasRequestInFlight) }) else { return nil }
         return item.rootRunId
     }
@@ -262,7 +261,8 @@ extension AppModel {
 
     static func historyStatusCategory(_ status: String) -> HistoryStatusFilter? {
         switch status.lowercased() {
-        case "queued", "planning", "running", "awaiting_subagent": return .running
+        case "queued", "planning", "running", "awaiting_subagent",
+             "replan_required": return .blocked
         case "awaiting_approval", "approval required", "clarification_requested", "question pending": return .waiting
         case "failed": return .failed
         default: return nil
@@ -273,9 +273,7 @@ extension AppModel {
         switch status.lowercased() {
         case "succeeded", "completed": return "Completed"
         case "failed": return "Failed"
-        case "running", "awaiting_subagent": return "Running"
-        case "queued": return "Queued"
-        case "planning": return "Planning"
+        case "queued", "planning", "running", "awaiting_subagent": return "Blocked"
         case "awaiting_approval", "approval required", "clarification_requested", "question pending": return "Waiting"
         case "interrupted": return "Interrupted"
         default: return "Unknown"
