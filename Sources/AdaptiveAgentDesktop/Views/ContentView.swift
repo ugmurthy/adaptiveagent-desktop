@@ -136,11 +136,17 @@ struct ContentView: View {
             }
             .onChange(of: sidebarSelections) { previous, selections in
                 guard let selection = selections.subtracting(previous).first else { return }
-                switch selection {
-                case .live(let recordID): model.selectRun(recordID)
-                case .history(let rootRunId):
-                    model.selectHistoryRun(rootRunId)
-                    model.expandHistoryThread(containing: rootRunId)
+                // A SwiftUI List is backed by NSTableView on macOS. Changing the
+                // tab or expanding history synchronously here can rebuild that
+                // table while its selection delegate callback is still active.
+                DispatchQueue.main.async {
+                    guard sidebarSelections.contains(selection) else { return }
+                    switch selection {
+                    case .live(let recordID): model.selectRun(recordID)
+                    case .history(let rootRunId):
+                        model.selectHistoryRun(rootRunId)
+                        model.expandHistoryThread(containing: rootRunId)
+                    }
                 }
             }
             Divider()
