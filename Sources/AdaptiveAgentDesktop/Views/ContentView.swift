@@ -1013,9 +1013,16 @@ private struct HistoricalRunDetailView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(item.title).font(.headline).lineLimit(1)
                     HStack(spacing: 6) {
-                        Text(item.status.capitalized)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
+                        StatusBadge(status: historyStatus)
+                        if let duration = historyDuration {
+                            historySummaryChip(ThinkingActivityRow.durationText(duration), symbol: "clock")
+                        }
+                        if historyToolCount > 0 {
+                            historySummaryChip("\(historyToolCount)", symbol: "wrench.and.screwdriver")
+                        }
+                        if historyFileCount > 0 {
+                            historySummaryChip("\(historyFileCount)", symbol: "doc")
+                        }
                         Text(item.id)
                             .font(.caption.monospaced())
                             .foregroundStyle(.tertiary)
@@ -1071,6 +1078,49 @@ private struct HistoricalRunDetailView: View {
         }
     }
 
+    private var historyStatus: AppModel.RunStatus {
+        switch item.status.lowercased() {
+        case "queued": return .queued
+        case "planning", "running", "awaiting_subagent", "replan_required": return .running
+        case "awaiting_approval", "approval required": return .waitingForApproval
+        case "clarification_requested", "question pending": return .waitingForClarification
+        case "succeeded", "completed": return .succeeded
+        case "failed": return .failed
+        case "interrupted": return .interrupted
+        default: return .unknown
+        }
+    }
+
+    private var historyDuration: TimeInterval? {
+        guard let completedAt = item.completedAt else { return nil }
+        let start = AppModel.historyDate(item.startedAt)
+        let end = AppModel.historyDate(completedAt)
+        guard start != .distantPast, end != .distantPast else { return nil }
+        return max(0, end.timeIntervalSince(start))
+    }
+
+    private var historyToolCount: Int {
+        if let detail = model.historyDetails[item.id], !detail.activities.isEmpty {
+            return detail.activities.filter { $0.kind == .tool }.count
+        }
+        return model.historyReports[item.rootRunId]?.timeline.filter {
+            $0.runId == item.id && $0.toolName != nil
+        }.count ?? 0
+    }
+
+    private var historyFileCount: Int {
+        model.historyDetails[item.id]?.files.count ?? 0
+    }
+
+    private func historySummaryChip(_ text: String, symbol: String) -> some View {
+        Label(text, systemImage: symbol)
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(.quaternary.opacity(0.35), in: Capsule())
+    }
+
     private func summary(_ report: TraceReport) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("ROOT TRACE SUMMARY").sectionLabel()
@@ -1092,7 +1142,7 @@ private struct HistoricalRunDetailView: View {
         }
     }
 
-    private func toolActivities(_ report: TraceReport) -> [AppModel.RunActivity] {
+    private func traceToolActivities(_ report: TraceReport) -> [AppModel.RunActivity] {
         report.timeline.compactMap { entry in
             guard entry.runId == item.id, let toolName = entry.toolName else { return nil }
             let state: AppModel.RunActivity.ToolState
@@ -1123,8 +1173,9 @@ private struct HistoricalRunDetailView: View {
     }
 
     private func historicalTimeline(_ report: TraceReport) -> some View {
-        let activities = toolActivities(report)
         let detail = model.historyDetails[item.id]
+        let activities = detail.map { $0.activities.isEmpty ? traceToolActivities(report) : $0.activities }
+            ?? traceToolActivities(report)
         let startedAt = AppModel.historyDate(item.startedAt)
         let completedAt = item.completedAt.map(AppModel.historyDate)
         return LazyVStack(alignment: .leading, spacing: 0) {
@@ -1132,7 +1183,12 @@ private struct HistoricalRunDetailView: View {
                 Text(item.title).textSelection(.enabled).padding(.vertical, 5)
             }
             ForEach(activities) { activity in
-                ToolActivityRow(activity: activity, files: historyFiles(for: activity, activities: activities))
+                RunActivityRow(
+                    activity: activity,
+                    agentName: "Agent",
+                    modelName: report.rootRuns.first(where: { $0.runId == item.id })?.modelName ?? "",
+                    files: historyFiles(for: activity, activities: activities)
+                )
             }
             ForEach(unattachedHistoryFiles(activities: activities)) { file in
                 TimelineRow(date: nil, symbol: "doc", accessibilityLabel: "File artifact") {
@@ -1156,9 +1212,9 @@ private struct HistoricalRunDetailView: View {
             }
             if let completedAt {
                 FinishedActivityRow(
-                    status: item.status.lowercased().contains("fail") ? .failed : .succeeded,
+                    status: historyStatus,
                     duration: max(0, completedAt.timeIntervalSince(startedAt)),
-                    toolCount: activities.count,
+                    toolCount: activities.filter { $0.kind == .tool }.count,
                     fileCount: detail?.files.count ?? 0,
                     finishedAt: completedAt
                 )
@@ -1187,6 +1243,7 @@ private struct HistoricalRunDetailView: View {
     ) -> [AppModel.RunFile] {
         guard activity.toolName == "write_file" || activity.toolName == "edit_file" else { return [] }
         return (model.historyDetails[item.id]?.files ?? []).filter { file in
+            if let sourceActivityID = file.sourceActivityID { return sourceActivityID == activity.id }
             guard file.sourceRunId == activity.sourceRunId else { return false }
             return activities.last(where: {
                 $0.sourceRunId == file.sourceRunId

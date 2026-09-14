@@ -73,7 +73,8 @@ usage = dict(total=total, byRootRun=[dict(rootRunId="root-a", usage=total)], byP
         dict(provider="unpriced-provider", operation="fetch", toolCalls=1, requests=1, billableRequests=0,
              cachedToolCalls=0, unpricedRequests=1, estimatedCostUSD=0)]))
 def goal(root, run, title, started="2026-09-08T10:00:00Z"):
-    return dict(rootRunId=root, runId=run, goal=title, status="succeeded", linkedAt=started, startedAt=started, type="run")
+    return dict(rootRunId=root, runId=run, goal=title, status="succeeded", linkedAt=started, startedAt=started,
+                completedAt="2026-09-08T10:02:00Z", type="run")
 def group(session, goals):
     return dict(sessionId=session, startedAt="2020-01-01T00:00:00Z", status="succeeded", goals=goals,
                 cursor=dict(startedAt=goals[0]["startedAt"], key=session or goals[0]["rootRunId"]))
@@ -81,14 +82,15 @@ groups = [group("session-research", [goal("root-a", "root-a", "Research report")
                                      goal("root-c", "root-c", "Follow-up report", "2026-09-08T08:00:00Z")]),
           group(None, [goal("root-b", "run-b", "Review without a session", "2026-09-08T09:00:00Z")])]
 tree = [dict(rootRunId="root-a", runId=run, parentRunId=parent, delegateName=title, depth=depth,
-             createdAt=f"2026-09-08T10:0{depth}:00Z", status="succeeded") for run,parent,title,depth in [
+             createdAt=f"2026-09-08T10:0{depth}:00Z", completedAt="2026-09-08T10:02:00Z",
+             status="succeeded") for run,parent,title,depth in [
              ("root-a", None, "Research report", 0), ("child-a", "root-a", "Source analysis", 1),
              ("grandchild-a", "child-a", "Citation verification", 2)]]
 report = dict(target=dict(kind="root-run",requestedId="root-a",resolvedRootRunId="root-a"),
               session=None,rootRuns=[],usage=dict(total=total),timeline=[],runTree=tree,
               summary=dict(status="succeeded",reason="Research and delegated review completed."),warnings=[])
 if runtime:
-    emit(dict(jsonrpc="2.0",method="runtime/ready",params=dict(protocolVersion="1.17",bridgeVersion="0.1.0",pid=os.getpid())))
+    emit(dict(jsonrpc="2.0",method="runtime/ready",params=dict(protocolVersion="1.18",bridgeVersion="0.1.0",pid=os.getpid())))
 for line in sys.stdin:
     request=json.loads(line)
     with (home / ("runtime.log" if runtime else "trace.log")).open("a") as log: log.write(line)
@@ -99,11 +101,11 @@ for line in sys.stdin:
         response["error"]=dict(code=-32000,message="Fixture retrieval failed; token=secret",data=dict(protocolCode="UNAVAILABLE"))
     else:
         if method=="initialize":
-            result=dict(protocolVersion="1.17") if runtime else dict(protocolVersion="1.0",backend=dict(kind="sqlite",readOnly=True))
+            result=dict(protocolVersion="1.18") if runtime else dict(protocolVersion="1.0",backend=dict(kind="sqlite",readOnly=True))
         elif runtime and method=="runtime/initialize":
             result=dict(agent=dict(id="fixture",name="History Preview"),runtimeMode="sqlite",workspaceRoot=str(home),shellCwd=str(home),registeredToolNames=[])
         elif runtime and method=="runtime/info":
-            result=dict(protocolVersion="1.17",bridgeVersion="0.1.0",initialized=True,clientInfo=dict(name="fixture"),runtimeMode="sqlite",connections=dict(sqlite=dict(configured=True,state="connected",path=str(home/"fixture.sqlite"))))
+            result=dict(protocolVersion="1.18",bridgeVersion="0.1.0",initialized=True,clientInfo=dict(name="fixture"),runtimeMode="sqlite",connections=dict(sqlite=dict(configured=True,state="connected",path=str(home/"fixture.sqlite"))))
         elif not runtime and method=="trace/listSessions":
             if mode in ["pages","legacy"]:
                 result=[group(f"session-{i:03}",[goal(f"root-{i:03}",f"root-{i:03}",f"Report {i}")]) for i in range(100)] if "after" not in params else [group("last-session",[goal("last-root","last-root","Oldest report")])]
@@ -122,7 +124,14 @@ for line in sys.stdin:
         elif runtime and method=="run/inspect":
             run=params["runId"]
             result=dict(run=dict(id=run,result=f"Verified findings from {run}.",usage=tokens(20,15,.0023),status="succeeded"),events=[
-                dict(type="tool.completed",runId=run,payload=dict(toolName="write_file",output=dict(path=str(home/"report.md"))))])
+                dict(id="search-started",seq=2,createdAt="2026-09-08T10:01:02Z",type="tool.started",runId=run,
+                     stepId="research",toolCallId="search",payload=dict(toolName="web_search",
+                     assistantContent="I’ll gather the relevant sources before preparing the report.",input=dict(query="latest research findings"))),
+                dict(id="search-completed",seq=3,createdAt="2026-09-08T10:01:04Z",type="tool.completed",runId=run,
+                     stepId="research",toolCallId="search",payload=dict(toolName="web_search",output=dict(resultCount=5))),
+                dict(id="write-completed",seq=4,createdAt="2026-09-08T10:01:30Z",type="tool.completed",runId=run,
+                     stepId="write",toolCallId="write",payload=dict(toolName="write_file",assistantContent="The sources are ready. I’ll save the finished report.",
+                     input=dict(path=str(home/"report.md")),output=dict(path=str(home/"report.md"))))])
         elif method in ["shutdown","runtime/shutdown"]: result={}
         else:
             sys.exit(91)
@@ -307,6 +316,73 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(try AppModel.historyDetail(incompleteUsage, runId: "child", workspace: "/tmp/work").output, .string("Still visible"))
         XCTAssertNil(try AppModel.historyDetail(incompleteUsage, runId: "child", workspace: "/tmp/work").usage)
         XCTAssertThrowsError(try AppModel.historyDetail(inspection, runId: "root", workspace: "/tmp/work"))
+    }
+
+    @MainActor
+    func testHistoryDetailReconstructsRichChronologicalActivities() throws {
+        func event(
+            id: String,
+            seq: Double,
+            createdAt: String,
+            type: String,
+            stepId: String,
+            toolCallId: String,
+            payload: [String: JSONValue]
+        ) -> JSONValue {
+            .object([
+                "id": .string(id), "seq": .number(seq), "createdAt": .string(createdAt),
+                "type": .string(type), "runId": .string("run"), "stepId": .string(stepId),
+                "toolCallId": .string(toolCallId), "payload": .object(payload)
+            ])
+        }
+        let assistant = "I’ll search first, then save the report."
+        let inspection: JSONValue = .object([
+            "run": .object(["id": .string("run"), "result": .string("Report complete")]),
+            // Deliberately reverse storage order: seq is the persisted source of chronology.
+            "events": .array([
+                event(
+                    id: "search-completed", seq: 3, createdAt: "2026-09-12T10:00:03Z",
+                    type: "tool.completed", stepId: "search-step", toolCallId: "search-call",
+                    payload: [
+                        "toolName": .string("web_search"),
+                        "assistantContent": .string(assistant),
+                        "output": .object(["authorization": .string("secret"), "count": .number(3)])
+                    ]
+                ),
+                event(
+                    id: "write-completed", seq: 5, createdAt: "2026-09-12T10:00:05Z",
+                    type: "tool.completed", stepId: "write-step", toolCallId: "write-call",
+                    payload: [
+                        "toolName": .string("write_file"),
+                        "input": .object(["path": .string("/tmp/work/report.md")]),
+                        "output": .object(["path": .string("/tmp/work/report.md")])
+                    ]
+                ),
+                event(
+                    id: "search-started", seq: 2, createdAt: "2026-09-12T10:00:02Z",
+                    type: "tool.started", stepId: "search-step", toolCallId: "search-call",
+                    payload: [
+                        "toolName": .string("web_search"),
+                        "assistantContent": .string(assistant),
+                        "input": .object(["query": .string("West Asia weekly news")])
+                    ]
+                )
+            ])
+        ])
+
+        let detail = try AppModel.historyDetail(inspection, runId: "run", workspace: "/tmp/work")
+
+        XCTAssertEqual(detail.activities.map(\.id), [
+            "assistant:run:search-step", "tool:search-call", "tool:write-call"
+        ])
+        XCTAssertEqual(detail.activities.first?.content, assistant)
+        let search = try XCTUnwrap(detail.activities.first { $0.id == "tool:search-call" })
+        XCTAssertEqual(search.detail, "West Asia weekly news")
+        XCTAssertEqual(search.toolState, .succeeded)
+        XCTAssertNotNil(search.completedAt)
+        XCTAssertEqual(search.output?.objectValue?["authorization"], .string("<redacted>"))
+        XCTAssertEqual(detail.files.first?.sourceActivityID, "tool:write-call")
+        XCTAssertEqual(detail.output, .string("Report complete"))
     }
 
     @MainActor

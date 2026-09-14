@@ -24,6 +24,7 @@ extension AppModel {
         let output: JSONValue?
         let usage: TraceUsageTotals?
         let files: [RunFile]
+        let activities: [RunActivity]
     }
 
     struct HistoryNode: Identifiable {
@@ -389,28 +390,110 @@ extension AppModel {
         }
         let root = URL(fileURLWithPath: workspace, isDirectory: true).standardizedFileURL.path
         var files: [String: RunFile] = [:]
+        var activities: [RunActivity] = []
         if case .array(let events) = inspection.objectValue?["events"] {
-            for event in events {
-                guard let event = event.objectValue, event["runId"]?.stringValue == runId,
-                      event["type"]?.stringValue == "tool.completed",
+            let selectedEvents = events.compactMap(\.objectValue).filter { $0["runId"]?.stringValue == runId }
+            activities = historyActivities(from: selectedEvents, runId: runId)
+            for event in selectedEvents {
+                guard event["type"]?.stringValue == "tool.completed",
                       let payload = event["payload"]?.objectValue, payload["skipped"] != .bool(true),
                       let tool = payload["toolName"]?.stringValue,
                       let output = payload["output"]?.objectValue,
                       tool == "write_file" || (tool == "edit_file" && output["changed"] == .bool(true)) else { continue }
+                let sourceActivityID = event["toolCallId"]?.stringValue.map { "tool:\($0)" }
                 for key in ["path", tool == "write_file" ? "intermediatePath" : "backupPath"] {
                     guard let path = output[key]?.stringValue, NSString(string: path).isAbsolutePath else { continue }
                     let url = URL(fileURLWithPath: path).standardizedFileURL
                     guard url.path.hasPrefix(root + "/") else { continue }
                     files[url.path] = RunFile(path: url.path, workspaceRoot: root,
                                              operation: tool == "edit_file" && key == "path" ? .edited : .written,
-                                             isSupportFile: key != "path", sourceRunId: runId)
+                                             isSupportFile: key != "path", sourceRunId: runId,
+                                             sourceActivityID: sourceActivityID)
                 }
             }
         }
         return HistoryDetail(
             output: run["result"].map(ProtocolRedactor.redact),
             usage: run["usage"].flatMap { try? $0.decode(TraceUsageTotals.self) },
-            files: files.values.sorted { $0.path < $1.path }
+            files: files.values.sorted { $0.path < $1.path },
+            activities: activities
         )
+    }
+
+    private static func historyActivities(
+        from events: [[String: JSONValue]],
+        runId: String
+    ) -> [RunActivity] {
+        var activities: [RunActivity] = []
+        let orderedEvents = events.enumerated().sorted { left, right in
+            let leftSequence = activitySequence(left.element["seq"])
+            let rightSequence = activitySequence(right.element["seq"])
+            if let leftSequence, let rightSequence, leftSequence != rightSequence {
+                return leftSequence < rightSequence
+            }
+            let leftDate = left.element["createdAt"]?.stringValue.map(historyDate) ?? .distantPast
+            let rightDate = right.element["createdAt"]?.stringValue.map(historyDate) ?? .distantPast
+            return leftDate == rightDate ? left.offset < right.offset : leftDate < rightDate
+        }
+
+        for (_, event) in orderedEvents {
+            guard let type = event["type"]?.stringValue else { continue }
+            let payload = event["payload"]?.objectValue ?? [:]
+            let eventDate = event["createdAt"]?.stringValue.map(historyDate).flatMap { $0 == .distantPast ? nil : $0 }
+            let eventSequence = activitySequence(event["seq"])
+
+            if let rawContent = payload["assistantContent"]?.stringValue {
+                let content = rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !content.isEmpty {
+                    let stepKey = event["stepId"]?.stringValue ?? event["id"]?.stringValue ?? content
+                    let id = "assistant:\(runId):\(stepKey)"
+                    if !activities.contains(where: { $0.id == id || ($0.kind == .assistant && $0.content == content) }) {
+                        activities.append(RunActivity(
+                            id: id, kind: .assistant, sourceRunId: runId, content: content,
+                            createdAt: eventDate, eventSeq: eventSequence
+                        ))
+                    }
+                }
+            }
+
+            guard ["approval.requested", "tool.started", "tool.completed", "tool.failed"].contains(type),
+                  let toolName = payload["toolName"]?.stringValue else { continue }
+            let correlationID = event["toolCallId"]?.stringValue
+                ?? [runId, event["stepId"]?.stringValue ?? "step", toolName].joined(separator: ":")
+            let id = "tool:\(correlationID)"
+            let state: RunActivity.ToolState = switch type {
+            case "approval.requested": .awaitingApproval
+            case "tool.started": .running
+            case "tool.completed": payload["skipped"] == .bool(true) ? .skipped : .succeeded
+            default: .failed
+            }
+            let detail = compactToolDetail(toolName: toolName, input: payload["input"]?.objectValue)
+            if let index = activities.firstIndex(where: { $0.id == id }) {
+                activities[index].toolName = toolName
+                activities[index].toolState = state
+                if let detail { activities[index].detail = detail }
+                if let input = payload["input"] { activities[index].input = ProtocolRedactor.redact(input) }
+                if let output = payload["output"] { activities[index].output = ProtocolRedactor.redact(output) }
+                if let error = payload["error"]?.stringValue { activities[index].errorMessage = error }
+                if state != .running && state != .awaitingApproval { activities[index].completedAt = eventDate }
+            } else {
+                activities.append(RunActivity(
+                    id: id, kind: .tool, sourceRunId: runId, toolName: toolName,
+                    detail: detail, toolState: state, createdAt: eventDate,
+                    completedAt: state == .running || state == .awaitingApproval ? nil : eventDate,
+                    eventSeq: eventSequence,
+                    input: payload["input"].map(ProtocolRedactor.redact),
+                    output: payload["output"].map(ProtocolRedactor.redact),
+                    errorMessage: payload["error"]?.stringValue
+                ))
+            }
+        }
+        return activities
+    }
+
+    private static func activitySequence(_ value: JSONValue?) -> Int? {
+        guard case .number(let number) = value, number.isFinite,
+              number.rounded(.towardZero) == number else { return nil }
+        return Int(exactly: number)
     }
 }

@@ -2028,7 +2028,9 @@ final class AppModel: ObservableObject {
         if let record = runs.first(where: { $0.runIds.contains(item.id) }), !record.status.isActive {
             historyDetails[item.id] = HistoryDetail(
                 output: record.latestRunId == item.id ? record.output.map(ProtocolRedactor.redact) : nil,
-                usage: nil, files: record.files.filter { $0.sourceRunId == item.id }
+                usage: nil,
+                files: record.files.filter { $0.sourceRunId == item.id },
+                activities: record.activities.filter { $0.sourceRunId == item.id }
             )
         }
         loadingHistoryDetails.insert(item.id)
@@ -2431,7 +2433,7 @@ final class AppModel: ObservableObject {
         return Int(exactly: number)
     }
 
-    private nonisolated static func compactToolDetail(
+    nonisolated static func compactToolDetail(
         toolName: String,
         input: [String: JSONValue]?
     ) -> String? {

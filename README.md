@@ -1,13 +1,13 @@
 # AdaptiveAgent Desktop
 
-A restrained macOS 14+ SwiftUI vertical slice for the local AdaptiveAgent runtime. The app supervises a bundled `agent-runtime` process and communicates exclusively over protocol `1.17` using JSON-RPC 2.0 NDJSON on stdin/stdout. Filesystem access, agent loading, tools, providers, and Postgres runtime semantics remain in the runtime process.
+A restrained macOS 14+ SwiftUI vertical slice for the local AdaptiveAgent runtime. The app supervises a bundled `agent-runtime` process and communicates exclusively over protocol `1.18` using JSON-RPC 2.0 NDJSON on stdin/stdout. Filesystem access, agent loading, tools, providers, and Postgres runtime semantics remain in the runtime process.
 
 ## Requirements
 
 - macOS 14 or newer and Xcode 16+
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`)
 - A local Postgres instance and valid `DATABASE_URL` when settings explicitly select the Postgres runtime
-- A protocol `1.17` standalone `agent-runtime` executable
+- A protocol `1.18` standalone `agent-runtime` executable
 
 ## Install the runtime bridge
 
@@ -70,7 +70,7 @@ New runs can include generic files, images, and audio when the connected runtime
 
 Each native macOS window tab owns its own runtime process and workspace configuration, so changing one tab's agent, model, or workspace does not interrupt runs in another tab. Within a tab, runs remain available in the sidebar while the detail pane switches between drafts and run results. Closing a native tab shuts down only that tab's runtime process.
 
-Select one historical run, or Command-click multiple rows, then use the trash button or a row's **Delete Run…** context-menu action to permanently delete terminal run data through the typed protocol `1.17` `run/delete` method. The app confirms destructive deletion, closes tabs for successful deletions, refreshes persisted history, and reports any runs the runtime could not delete.
+Select one historical run, or Command-click multiple rows, then use the trash button or a row's **Delete Run…** context-menu action to permanently delete terminal run data through the typed protocol `1.18` `run/delete` method. The app confirms destructive deletion, closes tabs for successful deletions, refreshes persisted history, and reports any runs the runtime could not delete.
 
 History combines completed local and persisted runs in a newest-first session/root/run tree. Expanding a root loads recursive child runs; selecting any run shows its persisted output, recorded file evidence, selected-run usage, and separately scoped root/subtree model and tool-provider accounting without attaching the run to the active execution UI. Correct pagination and tool-provider accounting require a trace-session helper that supports list cursors and `trace/usage`; older helpers stop safely at the first page rather than risking skipped history.
 
@@ -84,7 +84,7 @@ The standard **About AdaptiveAgent Desktop** panel displays the marketing versio
 - `TraceSessionClient` independently supervises the optional read-only
   `trace-session-sidecar` helper over its protocol `1.0`. Its failure disables
   persisted history only and never changes agent execution.
-- Startup requires a JSON-RPC `runtime/ready` notification, protocol `1.17` negotiation with `initialize`, and then a separate `runtime/initialize` before agent operations.
+- Startup requires a JSON-RPC `runtime/ready` notification, protocol `1.18` negotiation with `initialize`, and then a separate `runtime/initialize` before agent operations.
 - `AppModel` is main-actor isolated and translates UI actions into typed JSON-RPC methods. It reads only the non-secret runtime, model-selection, and interaction fields needed to seed editable `runtime/initialize` overrides.
 - The Swift renderer does not read agent profiles or other workspace contents and has no cloud behavior. It ignores secret-related settings fields; native file panels otherwise select paths only, and the runtime process performs runtime and filesystem behavior.
 - Runtime stderr is captured separately and displayed as diagnostic event entries; it is never parsed as protocol traffic.
