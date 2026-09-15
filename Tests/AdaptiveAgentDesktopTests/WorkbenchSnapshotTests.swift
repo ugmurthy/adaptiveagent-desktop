@@ -38,6 +38,8 @@ final class WorkbenchSnapshotTests: XCTestCase {
                     id: UUID(), agentName: "Research Assistant", modelName: "claude-sonnet-4.5", kind: .run,
                     title: "Review the workspace and recommend next steps")
                 record.runIds = ["development-preview"]
+                record.selectedAgentId = "research-assistant"
+                record.selectedAgentName = "Research Assistant"
                 record.status = state == "active" ? .running : state == "timeline" ? .succeeded : .waitingForApproval
                 if state == "attention" {
                     record.interaction = .init(

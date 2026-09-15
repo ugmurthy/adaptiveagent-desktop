@@ -186,10 +186,13 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(AppModel.historyTree(items: merged, query: "grandchild").first?.item?.id, "root")
 
         let first = item("first", session: "shared", time: "2026-09-07T09:00:00Z")
-        let second = item("second", session: "shared", time: "2026-09-08T09:00:00Z")
-        let session = try XCTUnwrap(AppModel.historyTree(items: [second, first]).first)
+        var second = item("second", session: "shared", time: "2026-09-08T09:00:00Z")
+        second.sessionTitle = "Prepared session title"
+        var titledFirst = first
+        titledFirst.sessionTitle = "Prepared session title"
+        let session = try XCTUnwrap(AppModel.historyTree(items: [second, titledFirst]).first)
         XCTAssertEqual(session.id, "session:shared")
-        XCTAssertEqual(session.label, "first", "A multi-run session uses its earliest root goal as its title")
+        XCTAssertEqual(session.label, "Prepared session title", "A trace-provided title takes precedence over the earliest root goal")
         XCTAssertEqual(session.item?.id, "first", "The first run is represented by the session header rather than duplicated")
         XCTAssertEqual(session.children.map(\.item?.id), ["second"])
         XCTAssertEqual(session.runCount, 2)

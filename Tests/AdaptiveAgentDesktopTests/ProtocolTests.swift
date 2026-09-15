@@ -357,6 +357,7 @@ done
         XCTAssertEqual(model.configuredGatewayURL, "ws://127.0.0.1:3006/rpc")
         XCTAssertTrue(model.configuredRequireRunPermit)
         XCTAssertNil(model.settingsConfigurationError)
+        model.agentConfigPath = "/tmp/stale-agent.json"
 
         model.selectInferenceMode("local")
         XCTAssertEqual(model.configuredInferenceMode, "local")
@@ -391,7 +392,7 @@ done
         XCTAssertEqual(params["clarificationMode"], .string("fail"))
         XCTAssertNil(params["overrideApiKeyEnv"])
         XCTAssertNil(params["apiKey"])
-        XCTAssertNil(params["agentConfigPath"])
+        XCTAssertNil(params["agentConfigPath"], "Workspace settings must not be overridden by a stale UI profile path")
         XCTAssertEqual(params["inferenceMode"], .string("local"))
         XCTAssertNil(params["inferenceTier"])
         XCTAssertEqual(params["gatewayUrl"], .string("ws://127.0.0.1:3006/rpc"))
@@ -541,6 +542,7 @@ done
         let runRequest = try XCTUnwrap(requests.first { $0.objectValue?["method"] == .string("agent/run") })
         let runParams = try XCTUnwrap(runRequest.objectValue?["params"]?.objectValue)
         XCTAssertFalse(try XCTUnwrap(runParams["runId"]?.stringValue).isEmpty)
+        XCTAssertFalse(try XCTUnwrap(runParams["sessionId"]?.stringValue).isEmpty)
         XCTAssertEqual(runParams["goal"], .string("Run this task"))
         XCTAssertNil(runParams["attachments"])
         let runtimeInitialize = try XCTUnwrap(requests.first {
@@ -656,7 +658,7 @@ done
         let runParams = try XCTUnwrap(run.objectValue?["params"]?.objectValue)
         XCTAssertEqual(runParams["goal"], .string("Read the attachments"))
         XCTAssertNotNil(runParams["runId"]?.stringValue)
-        XCTAssertEqual(Set(runParams.keys), ["runId", "goal", "attachments"])
+        XCTAssertEqual(Set(runParams.keys), ["runId", "sessionId", "goal", "attachments"])
         let chat = try XCTUnwrap(requests.first { $0.objectValue?["method"] == .string("agent/chat") })
         XCTAssertNil(chat.objectValue?["params"]?.objectValue?["attachments"])
         await model.shutdown()
@@ -1234,6 +1236,17 @@ done
         let recordID = UUID()
         model.runs = [AppModel.RunRecord(id: recordID, kind: .run, title: "Research")]
         model.acceptResult(.object(["runId": .string("root-run")]), for: recordID)
+        model.receive(method: "agent/event", params: .object([
+            "type": .string("run.agent_selected"),
+            "runId": .string("root-run"),
+            "payload": .object([
+                "agentId": .string("distance-running-coach"),
+                "agentName": .string("Distance Running Coach")
+            ])
+        ]))
+        XCTAssertEqual(model.runs[0].selectedAgentId, "distance-running-coach")
+        XCTAssertEqual(model.runs[0].selectedAgentName, "Distance Running Coach")
+        XCTAssertEqual(model.runs[0].agentName, "Distance Running Coach")
         model.receive(method: "agent/event", params: .object([
             "type": .string("run.started"),
             "runId": .string("root-run"),

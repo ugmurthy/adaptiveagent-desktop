@@ -191,7 +191,7 @@ extension AppModel {
                 let key = "session:\(session)"
                 groups[key, default: []].append(root)
                 let candidate = (date: historyDate(owner.startedAt), id: owner.id,
-                                 rootID: rootID, title: owner.title)
+                                 rootID: rootID, title: owner.sessionTitle ?? owner.title)
                 if let current = sessionTitles[key] {
                     if candidate.date < current.date || (candidate.date == current.date && candidate.id < current.id) {
                         sessionTitles[key] = candidate

@@ -223,6 +223,8 @@ final class AppModel: ObservableObject {
         let id: UUID
         var runtimeSessionID: UUID? = nil
         var agentName = ""
+        var selectedAgentId = ""
+        var selectedAgentName = ""
         var modelName = ""
         let kind: RunKind
         var title: String
@@ -253,6 +255,7 @@ final class AppModel: ObservableObject {
         var parentRunId: String? = nil
         var runtimeSessionID: UUID? = nil
         let sessionId: String?
+        var sessionTitle: String? = nil
         let title: String
         let status: String
         let startedAt: String
@@ -1251,7 +1254,7 @@ final class AppModel: ObservableObject {
 
         let recordID = UUID()
         let runId = recordID.uuidString
-        let sessionId = kind == .chat ? UUID().uuidString : nil
+        let sessionId = UUID().uuidString
         var record = RunRecord(
             id: recordID,
             runtimeSessionID: tabs[tabIndex].runtimeSessionID,
@@ -1287,7 +1290,7 @@ final class AppModel: ObservableObject {
         } else {
             fields["transcript"] = .array(record.chatMessages.map(\.protocolValue))
         }
-        if let sessionId { fields["sessionId"] = .string(sessionId) }
+        fields["sessionId"] = .string(sessionId)
         beginAgentRequest(method: method, fields: fields, recordID: recordID)
         return true
     }
@@ -1923,6 +1926,11 @@ final class AppModel: ObservableObject {
             )
         }
         switch type {
+        case "run.agent_selected":
+            guard let index = recordIndex(forRunId: runId) else { return }
+            runs[index].selectedAgentId = payload["agentId"]?.stringValue ?? ""
+            runs[index].selectedAgentName = payload["agentName"]?.stringValue ?? runs[index].selectedAgentId
+            runs[index].agentName = runs[index].selectedAgentName
         case "run.started":
             guard isRootEvent else { return }
             updateStatus(.running, forRunId: runId)
@@ -2041,7 +2049,9 @@ final class AppModel: ObservableObject {
             session.status = "Loading workspace configuration…"
             let parameters = RuntimeInitializationParameters(
                 cwd: workingDirectory.path,
-                agentConfigPath: configuration.agentConfigPath.isEmpty ? nil : configuration.agentConfigPath,
+                agentConfigPath: configuration.settingsConfigPath.isEmpty && !configuration.agentConfigPath.isEmpty
+                    ? configuration.agentConfigPath
+                    : nil,
                 settingsConfigPath: configuration.settingsConfigPath.isEmpty ? nil : configuration.settingsConfigPath,
                 runtimeMode: configuration.runtimeMode.isEmpty ? nil : configuration.runtimeMode,
                 provider: configuration.provider.isEmpty ? nil : configuration.provider,
@@ -2259,6 +2269,7 @@ final class AppModel: ObservableObject {
                     runId: goal.runId,
                     runtimeSessionID: runtimeSessionID,
                     sessionId: traceSession.sessionId,
+                    sessionTitle: traceSession.title,
                     title: displayTitle ?? "Run \(String(goal.rootRunId.prefix(12)))",
                     status: goal.status ?? traceSession.status ?? "unknown",
                     startedAt: goal.startedAt ?? goal.linkedAt,

@@ -1411,6 +1411,15 @@ private struct RunDetailView: View {
                     .lineLimit(1)
                 HStack(spacing: 6) {
                     StatusBadge(status: record.status)
+                    let resolvedAgent = record.selectedAgentName.isEmpty
+                        ? record.selectedAgentId
+                        : record.selectedAgentName
+                    if !resolvedAgent.isEmpty {
+                        summaryChip(
+                            resolvedAgent, symbol: "person.crop.circle",
+                            accessibilityLabel: "Selected agent \(resolvedAgent)", target: "run-activity"
+                        )
+                    }
                     if let startedAt = record.activityStartedAt {
                         summaryChip(
                             ThinkingActivityRow.durationText(max(0, (record.activityFinishedAt ?? .now).timeIntervalSince(startedAt))),

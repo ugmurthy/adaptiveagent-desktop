@@ -46,6 +46,7 @@ struct TraceHistoryGoal: Codable, Equatable, Identifiable, Sendable {
 struct TraceSessionListItem: Codable, Equatable, Identifiable, Sendable {
     let sessionId: String?
     let startedAt: String
+    let title: String?
     let status: String?
     let goals: [TraceHistoryGoal]
     var cursor: TraceSessionCursor? = nil
