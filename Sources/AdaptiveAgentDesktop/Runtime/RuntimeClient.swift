@@ -249,6 +249,74 @@ actor RuntimeClient {
         return try decodeResult(result, as: RunDeletionResult.self, method: "run/delete")
     }
 
+    func createAgentDraft(
+        brief: String,
+        generatorAgent: String? = nil,
+        id: String? = nil,
+        provider: String? = nil,
+        model: String? = nil
+    ) async throws -> AgentDraftResult {
+        let brief = brief.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !brief.isEmpty else {
+            throw RuntimeClientError.protocolViolation("agent draft brief must not be empty")
+        }
+        let generatorAgent = try validatedDraftOverride(generatorAgent, name: "generatorAgent")
+        let id = try validatedDraftOverride(id, name: "id")
+        let provider = try validatedDraftOverride(provider, name: "provider")
+        let model = try validatedDraftOverride(model, name: "model")
+        if let provider, !["openrouter", "ollama", "mistral", "mesh"].contains(provider) {
+            throw RuntimeClientError.protocolViolation("agent draft provider is unsupported")
+        }
+        var params = ["brief": JSONValue.string(brief)]
+        if let generatorAgent { params["generatorAgent"] = .string(generatorAgent) }
+        if let id { params["id"] = .string(id) }
+        if let provider { params["provider"] = .string(provider) }
+        if let model { params["model"] = .string(model) }
+        let result = try await send(method: "agent/createDraft", params: params, timeoutPolicy: .none)
+        return try decodeResult(result, as: AgentDraftResult.self, method: "agent/createDraft")
+    }
+
+    func validateAgentConfig(
+        _ agent: JSONValue,
+        generatorAgent: String? = nil,
+        targetPath: String? = nil
+    ) async throws -> AgentConfigPreview {
+        var params = ["agent": agent]
+        if let generatorAgent { params["generatorAgent"] = .string(generatorAgent) }
+        if let targetPath { params["targetPath"] = .string(targetPath) }
+        let result = try await send(method: "agent/validateConfig", params: params)
+        return try decodeResult(result, as: AgentConfigPreview.self, method: "agent/validateConfig")
+    }
+
+    func saveAgentConfig(
+        _ agent: JSONValue,
+        generatorAgent: String? = nil,
+        targetPath: String? = nil,
+        overwrite: Bool,
+        expectedPath: String,
+        expectedTargetFingerprint: String
+    ) async throws -> AgentConfigPreview {
+        var params: [String: JSONValue] = [
+            "agent": agent,
+            "overwrite": .bool(overwrite),
+            "expectedPath": .string(expectedPath),
+            "expectedTargetFingerprint": .string(expectedTargetFingerprint)
+        ]
+        if let generatorAgent { params["generatorAgent"] = .string(generatorAgent) }
+        if let targetPath { params["targetPath"] = .string(targetPath) }
+        let result = try await send(method: "agent/saveConfig", params: params)
+        return try decodeResult(result, as: AgentConfigPreview.self, method: "agent/saveConfig")
+    }
+
+    private func validatedDraftOverride(_ value: String?, name: String) throws -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw RuntimeClientError.protocolViolation("agent draft \(name) must not be blank")
+        }
+        return trimmed
+    }
+
     func send(
         method: String,
         params: [String: JSONValue] = [:],

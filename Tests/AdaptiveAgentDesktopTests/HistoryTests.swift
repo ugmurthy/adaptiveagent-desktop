@@ -90,7 +90,7 @@ report = dict(target=dict(kind="root-run",requestedId="root-a",resolvedRootRunId
               session=None,rootRuns=[],usage=dict(total=total),timeline=[],runTree=tree,
               summary=dict(status="succeeded",reason="Research and delegated review completed."),warnings=[])
 if runtime:
-    emit(dict(jsonrpc="2.0",method="runtime/ready",params=dict(protocolVersion="1.18",bridgeVersion="0.1.0",pid=os.getpid())))
+    emit(dict(jsonrpc="2.0",method="runtime/ready",params=dict(protocolVersion="1.19",bridgeVersion="0.1.0",pid=os.getpid())))
 for line in sys.stdin:
     request=json.loads(line)
     with (home / ("runtime.log" if runtime else "trace.log")).open("a") as log: log.write(line)
@@ -101,11 +101,11 @@ for line in sys.stdin:
         response["error"]=dict(code=-32000,message="Fixture retrieval failed; token=secret",data=dict(protocolCode="UNAVAILABLE"))
     else:
         if method=="initialize":
-            result=dict(protocolVersion="1.18") if runtime else dict(protocolVersion="1.0",backend=dict(kind="sqlite",readOnly=True))
+            result=dict(protocolVersion="1.19") if runtime else dict(protocolVersion="1.0",backend=dict(kind="sqlite",readOnly=True))
         elif runtime and method=="runtime/initialize":
             result=dict(agent=dict(id="fixture",name="History Preview"),runtimeMode="sqlite",workspaceRoot=str(home),shellCwd=str(home),registeredToolNames=[])
         elif runtime and method=="runtime/info":
-            result=dict(protocolVersion="1.18",bridgeVersion="0.1.0",initialized=True,clientInfo=dict(name="fixture"),runtimeMode="sqlite",connections=dict(sqlite=dict(configured=True,state="connected",path=str(home/"fixture.sqlite"))))
+            result=dict(protocolVersion="1.19",bridgeVersion="0.1.0",initialized=True,clientInfo=dict(name="fixture"),runtimeMode="sqlite",connections=dict(sqlite=dict(configured=True,state="connected",path=str(home/"fixture.sqlite"))))
         elif not runtime and method=="trace/listSessions":
             if mode in ["pages","legacy"]:
                 result=[group(f"session-{i:03}",[goal(f"root-{i:03}",f"root-{i:03}",f"Report {i}")]) for i in range(100)] if "after" not in params else [group("last-session",[goal("last-root","last-root","Oldest report")])]

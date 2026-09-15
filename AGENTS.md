@@ -19,14 +19,17 @@ In this repository:
 - Do not introduce or restore a legacy Sidecar service, sidecar framework,
   sidecar-specific API, HTTP server, WebSocket transport, or XPC protocol.
 - The Swift application launches agent-runtime as a managed child process.
-- Communication with that process exclusively uses protocol "1.18", which
+- Communication with that process exclusively uses protocol "1.19", which
   uses JSON-RPC 2.0 over newline-delimited stdin/stdout.
-- Protocol "1.18" is the only supported protocol version.
-- Protocol "1.18" adds agent discovery capabilities. The Swift application
-  does not consume those capabilities yet.
+- Protocol "1.19" is the only protocol version the Swift application
+  negotiates. The runtime bridge remains backward-compatible with protocols
+  "1.10" through "1.18", but the Swift client must not negotiate down or
+  retry with an older version.
+- Protocol "1.19" retains agent discovery capabilities and adds optional ID,
+  provider, and model controls to agent/createDraft.
 - Do not emit, accept, or depend on the removed protocol-v1
   { "version", "id", "type" } envelope, including during startup.
-- Do not fall back to protocol v1 when protocol "1.18" negotiation fails.
+- Do not fall back to an older protocol when protocol "1.19" negotiation fails.
   Report an incompatible-runtime error instead.
 - Treat a legacy-shaped message from the runtime as an incompatible-runtime or
   protocol error rather than attempting to decode it.
@@ -63,11 +66,11 @@ Required startup sequence
 
 1. Launch the bundled agent-runtime executable.
 2. Read its JSON-RPC runtime/ready notification.
-3. Verify that params.protocolVersion is exactly the string "1.18".
+3. Verify that params.protocolVersion is exactly the string "1.19".
 4. If the version is missing or unsupported, terminate the process and report
-   an incompatible-runtime error. Do not attempt a protocol-v1 fallback.
+   an incompatible-runtime error. Do not negotiate down to an older protocol.
 5. Send the JSON-RPC initialize request shown below.
-6. Verify that the successful response selects protocol "1.18".
+6. Verify that the successful response selects protocol "1.19".
 7. Send runtime/initialize.
 8. Only after both initialization operations succeed, issue methods that
    require the persistent agent runtime, such as agent/run.
@@ -80,13 +83,13 @@ The startup message is a JSON-RPC notification. It has no request id:
 "jsonrpc": "2.0",
 "method": "runtime/ready",
 "params": {
-"protocolVersion": "1.18",
+"protocolVersion": "1.19",
 "bridgeVersion": "0.1.0",
 "pid": 1234
 }
 }
 
-The first outbound request must negotiate protocol "1.18" using JSON-RPC
+The first outbound request must negotiate protocol "1.19" using JSON-RPC
 2.0:
 
 {
@@ -94,7 +97,7 @@ The first outbound request must negotiate protocol "1.18" using JSON-RPC
 "id": "initialize",
 "method": "initialize",
 "params": {
-"protocolVersion": "1.18",
+"protocolVersion": "1.19",
 "clientInfo": {
 "name": "<Swift application name>",
 "version": "<application version>"
@@ -103,7 +106,7 @@ The first outbound request must negotiate protocol "1.18" using JSON-RPC
 }
 }
 
-protocolVersion must be the JSON string "1.18", never the number 1.18.
+protocolVersion must be the JSON string "1.19", never the number 1.19.
 Protocol versions are identifiers and must not be represented as JSON numbers.
 
 After protocol negotiation, initialize the persistent agent runtime separately:
@@ -205,6 +208,9 @@ API usage rules
 Prefer typed JSON-RPC methods for persistent desktop operations:
 
 - auth/updateAccessToken
+- agent/createDraft
+- agent/validateConfig
+- agent/saveConfig
 - agent/run
 - agent/chat
 - run/resume
@@ -218,10 +224,24 @@ Prefer typed JSON-RPC methods for persistent desktop operations:
 - interaction/resolveApproval
 - interaction/resolveClarification
 
-Protocol 1.18 requires the Swift client to assign a non-empty runId for every
+Protocol 1.19 requires the Swift client to assign a non-empty runId for every
 agent/run and agent/chat request. agent/chat sends the complete non-empty
 transcript rather than a singular message. interaction/resolveApproval sends
 the approvalId received in the approval result or event payload.
+
+agent/createDraft accepts a non-empty brief and an optional non-empty
+generatorAgent. Protocol 1.19 also permits optional non-empty id, provider, and
+model overrides. provider, when present, must be openrouter, ollama, mistral,
+or mesh. Do not send blank override values; the runtime rejects blank,
+incorrectly typed, or unsupported override values with INVALID_PARAMS. Clients
+negotiating protocol 1.18 or earlier may send only brief and generatorAgent.
+
+Draft generation does not write files. Present the returned generated agent
+JSON, output path, notes, recommendations, duplicate paths, and target
+fingerprint for review. Validate the reviewed JSON with agent/validateConfig,
+then persist it only through agent/saveConfig. Do not bypass this
+create-review-validate-save sequence or write generated agent profiles from
+Swift.
 
 New agent/run submissions may include managed attachment descriptors with kind
 file, image, or audio when advertised by runtime/initialize capabilities.
@@ -246,12 +266,21 @@ Tests must cover:
 
 - Parsing the initial JSON-RPC runtime/ready notification.
 - Verifying that runtime/ready.params.protocolVersion is exactly the string
-  "1.18".
+  "1.19".
 - Verifying that runtime/ready has no id.
-- Negotiating protocol "1.18" as a string.
+- Negotiating protocol "1.19" as a string without retrying an older supported
+  runtime protocol.
 - Sending auth/updateAccessToken only after protocol initialization and
   decoding its typed { "updated": true } response.
 - Encoding typed runtime/initialize fields and decoding typed runtime/info.
+- Encoding agent/createDraft with brief and generatorAgent alone, and with
+  protocol 1.19 id, provider, and model overrides.
+- Rejecting blank draft overrides and providers outside openrouter, ollama,
+  mistral, and mesh before submission, while surfacing runtime INVALID_PARAMS
+  errors.
+- Decoding the complete agent/createDraft review payload and keeping draft
+  generation write-free until agent/validateConfig succeeds and
+  agent/saveConfig is explicitly requested.
 - Encoding file, image, and audio run attachment descriptors, including the
   audio-only audioFormat field, while preserving text-only and chat behavior.
 - Validating attachment kinds, MIME types, audio formats, and limits against

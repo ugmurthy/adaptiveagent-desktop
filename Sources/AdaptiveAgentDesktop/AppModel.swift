@@ -107,6 +107,49 @@ final class AppModel: ObservableObject {
         case interrupt
     }
 
+    struct AgentCreatorState: Equatable {
+        enum Stage: Equatable {
+            case compose
+            case review
+            case saved
+        }
+
+        var stage: Stage = .compose
+        var brief = ""
+        var generatorAgent = ""
+        var idOverride = ""
+        var providerOverride = ""
+        var modelOverride = ""
+        var agentJSON = ""
+        var agentJSONWasEdited = false
+        var draft: AgentDraftResult?
+        var validation: AgentConfigPreview?
+        var overwriteApproved = false
+        var isGenerating = false
+        var isValidating = false
+        var isSaving = false
+        var errorMessage: String?
+        var savedPath: String?
+
+        var duplicatePaths: [String] {
+            validation?.duplicatePaths ?? (agentJSONWasEdited ? [] : draft?.duplicatePaths ?? [])
+        }
+
+        var targetExists: Bool {
+            validation?.exists ?? (agentJSONWasEdited ? false : draft?.exists ?? false)
+        }
+
+        var canOverrideExistingTarget: Bool {
+            targetExists && duplicatePaths.isEmpty
+        }
+
+        var hasUnresolvedCollision: Bool {
+            !duplicatePaths.isEmpty || (targetExists && !overwriteApproved)
+        }
+
+        var isWorking: Bool { isGenerating || isValidating || isSaving }
+    }
+
     struct ChatMessage: Identifiable, Equatable {
         enum Role: String { case user, assistant }
         let id = UUID()
@@ -251,6 +294,8 @@ final class AppModel: ObservableObject {
     @Published var isBusy = false
     @Published var isConnected = false
     @Published var showConfiguration = false
+    @Published var showAgentCreator = false
+    @Published var agentCreator = AgentCreatorState()
     @Published var showQuitConfirmation = false
 
     @Published var agentName = ""
@@ -449,6 +494,10 @@ final class AppModel: ObservableObject {
         selectedTab?.selectedRunID == nil && selectedTab?.selectedHistoryRunID == nil
     }
 
+    var canCreateAgentProfile: Bool {
+        isConnected && !isBusy && canEditSelectedRuntimeConfiguration
+    }
+
     var hasActiveWork: Bool {
         runs.contains { $0.status.isActive || $0.hasRequestInFlight }
     }
@@ -569,6 +618,153 @@ final class AppModel: ObservableObject {
         if mode == "local" || mode == "byok" {
             configuredRequireRunPermit = false
         }
+    }
+
+    func presentAgentCreator() {
+        guard canCreateAgentProfile else { return }
+        agentCreator = AgentCreatorState()
+        showAgentCreator = true
+    }
+
+    func dismissAgentCreator() {
+        guard !agentCreator.isWorking else { return }
+        showAgentCreator = false
+    }
+
+    func generateAgentDraft() {
+        let brief = agentCreator.brief.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !brief.isEmpty, !agentCreator.isWorking,
+              let sessionID = selectedTab?.runtimeSessionID,
+              let session = sessions[sessionID], session.isConnected else { return }
+        let generatorAgent = nonEmptyAgentCreatorValue(agentCreator.generatorAgent)
+        let id = nonEmptyAgentCreatorValue(agentCreator.idOverride)
+        let provider = nonEmptyAgentCreatorValue(agentCreator.providerOverride)
+        let model = nonEmptyAgentCreatorValue(agentCreator.modelOverride)
+        guard provider.map(Self.supportedProviders.contains) ?? true else {
+            agentCreator.errorMessage = "Choose OpenRouter, Ollama, Mistral, or Mesh as the provider."
+            return
+        }
+        agentCreator.isGenerating = true
+        agentCreator.errorMessage = nil
+        Task {
+            defer { agentCreator.isGenerating = false }
+            do {
+                let result = try await session.client.createAgentDraft(
+                    brief: brief,
+                    generatorAgent: generatorAgent,
+                    id: id,
+                    provider: provider,
+                    model: model
+                )
+                guard selectedTab?.runtimeSessionID == sessionID, showAgentCreator else { return }
+                agentCreator.draft = result
+                agentCreator.agentJSON = result.agent.prettyPrinted
+                agentCreator.agentJSONWasEdited = false
+                agentCreator.validation = nil
+                agentCreator.overwriteApproved = false
+                agentCreator.stage = .review
+            } catch {
+                agentCreator.errorMessage = redactedErrorDescription(error)
+            }
+        }
+    }
+
+    func updateAgentDraftJSON(_ text: String) {
+        agentCreator.agentJSON = text
+        agentCreator.agentJSONWasEdited = true
+        agentCreator.validation = nil
+        agentCreator.overwriteApproved = false
+        agentCreator.errorMessage = nil
+    }
+
+    func returnToAgentCreatorBrief() {
+        guard !agentCreator.isWorking else { return }
+        agentCreator.stage = .compose
+        agentCreator.draft = nil
+        agentCreator.validation = nil
+        agentCreator.overwriteApproved = false
+        agentCreator.errorMessage = nil
+    }
+
+    func approveAgentProfileOverwrite() {
+        agentCreator.overwriteApproved = true
+        agentCreator.validation = nil
+        agentCreator.errorMessage = nil
+    }
+
+    func validateAgentDraft() {
+        guard !agentCreator.hasUnresolvedCollision, !agentCreator.isWorking,
+              let agent = decodedAgentCreatorJSON(),
+              let sessionID = selectedTab?.runtimeSessionID,
+              let session = sessions[sessionID], session.isConnected else { return }
+        let generatorAgent = nonEmptyAgentCreatorValue(agentCreator.generatorAgent)
+        agentCreator.isValidating = true
+        agentCreator.errorMessage = nil
+        Task {
+            defer { agentCreator.isValidating = false }
+            do {
+                let result = try await session.client.validateAgentConfig(agent, generatorAgent: generatorAgent)
+                guard selectedTab?.runtimeSessionID == sessionID, showAgentCreator else { return }
+                agentCreator.validation = result
+                agentCreator.agentJSONWasEdited = false
+                if result.exists && result.duplicatePaths.isEmpty && !agentCreator.overwriteApproved {
+                    agentCreator.errorMessage = "Edit ID or override to Validate and Save."
+                }
+            } catch {
+                agentCreator.validation = nil
+                agentCreator.errorMessage = redactedErrorDescription(error)
+            }
+        }
+    }
+
+    func saveAgentDraft() {
+        guard !agentCreator.hasUnresolvedCollision, !agentCreator.isWorking,
+              let validation = agentCreator.validation,
+              let agent = decodedAgentCreatorJSON(),
+              let sessionID = selectedTab?.runtimeSessionID,
+              let session = sessions[sessionID], session.isConnected else { return }
+        let generatorAgent = nonEmptyAgentCreatorValue(agentCreator.generatorAgent)
+        agentCreator.isSaving = true
+        agentCreator.errorMessage = nil
+        Task {
+            defer { agentCreator.isSaving = false }
+            do {
+                let result = try await session.client.saveAgentConfig(
+                    agent,
+                    generatorAgent: generatorAgent,
+                    overwrite: agentCreator.overwriteApproved,
+                    expectedPath: validation.path,
+                    expectedTargetFingerprint: validation.targetFingerprint
+                )
+                guard selectedTab?.runtimeSessionID == sessionID, showAgentCreator else { return }
+                agentConfigPath = result.path
+                persistSelectedConfiguration()
+                agentCreator.savedPath = result.path
+                agentCreator.stage = .saved
+            } catch {
+                agentCreator.validation = nil
+                agentCreator.errorMessage = redactedErrorDescription(error)
+            }
+        }
+    }
+
+    private func decodedAgentCreatorJSON() -> JSONValue? {
+        do {
+            let value = try JSONDecoder().decode(JSONValue.self, from: Data(agentCreator.agentJSON.utf8))
+            guard value.objectValue != nil else {
+                agentCreator.errorMessage = "Agent JSON must be an object."
+                return nil
+            }
+            return value
+        } catch {
+            agentCreator.errorMessage = "Agent JSON is invalid. Check its syntax and try again."
+            return nil
+        }
+    }
+
+    private func nonEmptyAgentCreatorValue(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     func chooseWorkspace() {

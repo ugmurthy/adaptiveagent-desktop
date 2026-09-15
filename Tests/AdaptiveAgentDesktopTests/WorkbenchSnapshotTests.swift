@@ -150,6 +150,61 @@ final class WorkbenchSnapshotTests: XCTestCase {
     }
 
     @MainActor
+    func testAgentCreatorCollisionSnapshot() throws {
+        guard let directory = ProcessInfo.processInfo.environment["WORKBENCH_SNAPSHOT_DIRECTORY"] else {
+            throw XCTSkip("Set WORKBENCH_SNAPSHOT_DIRECTORY to render the agent creator fixture")
+        }
+        let model = AppModel(
+            client: RuntimeClient(executableURL: URL(fileURLWithPath: "/nonexistent/agent-creator-preview-runtime")),
+            workingDirectoryURL: URL(fileURLWithPath: "/tmp/Agent Creator Preview")
+        )
+        model.agentCreator.stage = .review
+        model.agentCreator.agentJSON = JSONValue.object([
+            "id": .string("security-reviewer"),
+            "name": .string("Security Reviewer"),
+            "description": .string("Reviews TypeScript changes for exploitable security issues."),
+            "provider": .string("mistral"),
+            "model": .string("codestral"),
+            "instructions": .array([
+                .string("Prioritize exploitable findings."),
+                .string("Explain concrete remediation steps.")
+            ])
+        ]).prettyPrinted
+        model.agentCreator.draft = AgentDraftResult(
+            generatorAgent: .init(requested: "default", id: "default", name: "Visual Fixture Agent"),
+            path: "/workspace/agents/security-reviewer.json",
+            agentsDir: "/workspace/agents",
+            exists: true,
+            duplicatePaths: [],
+            targetFingerprint: "existing-profile-fingerprint",
+            agent: .object(["id": .string("security-reviewer")]),
+            notes: ["Generated from the requested TypeScript security-review brief."],
+            recommendations: ["Review the selected provider and model before saving."]
+        )
+
+        let view = NSHostingView(
+            rootView: AgentCreatorView()
+                .environmentObject(model)
+                .background(Color(nsColor: .windowBackgroundColor))
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 680),
+            styleMask: [.titled, .closable], backing: .buffered, defer: false
+        )
+        window.appearance = NSAppearance(named: .aqua)
+        window.contentView = view
+        window.makeKeyAndOrderFront(nil)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        view.layoutSubtreeIfNeeded()
+        let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent("native-agent-creator-collision.png"))
+        XCTAssertGreaterThan(data.count, 1000)
+        window.orderOut(nil)
+    }
+
+    @MainActor
     func testHistorySnapshots() async throws {
         guard let directory = ProcessInfo.processInfo.environment["WORKBENCH_SNAPSHOT_DIRECTORY"] else {
             throw XCTSkip("Set WORKBENCH_SNAPSHOT_DIRECTORY to render history fixtures")

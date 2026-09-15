@@ -234,6 +234,33 @@ struct RunDeletionResult: Codable, Equatable, Sendable {
     let rootRunId: String
 }
 
+struct AgentConfigPreview: Codable, Equatable, Sendable {
+    let path: String
+    let agentsDir: String
+    let exists: Bool
+    let duplicatePaths: [String]
+    let targetFingerprint: String
+    let agent: JSONValue
+}
+
+struct AgentDraftResult: Codable, Equatable, Sendable {
+    struct GeneratorAgent: Codable, Equatable, Sendable {
+        let requested: String
+        let id: String
+        let name: String
+    }
+
+    let generatorAgent: GeneratorAgent
+    let path: String
+    let agentsDir: String
+    let exists: Bool
+    let duplicatePaths: [String]
+    let targetFingerprint: String
+    let agent: JSONValue
+    let notes: [String]
+    let recommendations: [String]
+}
+
 enum ProtocolRedactor {
     private static let sensitiveKeys = ["accesstoken", "authorization", "apikey", "token"]
 
@@ -298,7 +325,7 @@ enum RuntimeProtocolMessage: Equatable, Sendable {
 }
 
 enum ProtocolCodec {
-    static let version = "1.18"
+    static let version = "1.19"
 
     static func encodeRequest(id: JSONRPCID, method: String, params: [String: JSONValue] = [:]) throws -> Data {
         let request = JSONValue.object([

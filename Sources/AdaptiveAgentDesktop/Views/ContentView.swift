@@ -45,6 +45,10 @@ struct ContentView: View {
             ConfigurationView()
                 .environmentObject(model)
         }
+        .sheet(isPresented: $model.showAgentCreator) {
+            AgentCreatorView()
+                .environmentObject(model)
+        }
         .alert("Quit AdaptiveAgent Desktop?", isPresented: $model.showQuitConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Quit", role: .destructive, action: model.confirmQuit)
@@ -225,6 +229,11 @@ struct ContentView: View {
             .help("New Chat")
 
             Menu {
+                Button("Create Agent Profile…", systemImage: "person.crop.circle.badge.plus") {
+                    model.presentAgentCreator()
+                }
+                .disabled(!model.canCreateAgentProfile)
+                Divider()
                 Button("Markdown Appearance…", systemImage: "textformat") {
                     openSettings()
                 }
@@ -869,6 +878,10 @@ private struct WorkspaceContextView: View {
     private var compactContent: some View {
         HStack(spacing: 8) {
             Menu {
+                Button("Create Agent Profile…", systemImage: "person.crop.circle.badge.plus") {
+                    model.presentAgentCreator()
+                }
+                .disabled(!model.canCreateAgentProfile)
                 Button("Agent Settings…", systemImage: "sparkles") { model.showConfiguration = true }
                 Button("Choose Agent…", systemImage: "person.crop.circle") { model.showConfiguration = true }
                 Divider()

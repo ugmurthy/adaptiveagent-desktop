@@ -14,11 +14,13 @@ object per line to stdout and reserves stderr for diagnostics. Requests may run
 concurrently, so clients must correlate responses by `id` and process
 notifications independently.
 
-The bridge currently exposes protocol `1.18` over JSON-RPC 2.0. There is no
+The desktop client negotiates protocol `1.19` over JSON-RPC 2.0. The runtime
+bridge also supports protocols `1.10` through `1.18`, but this client does not
+negotiate down. There is no
 legacy custom-envelope compatibility: every request must use JSON-RPC,
 including before initialization.
 
-Protocol `1.18` is intentionally a string. Protocol versions are identifiers
+Protocol `1.19` is intentionally a string. Protocol versions are identifiers
 and must not be represented as JSON numbers.
 
 At startup the bridge emits this JSON-RPC notification:
@@ -27,11 +29,11 @@ At startup the bridge emits this JSON-RPC notification:
 {
   "jsonrpc": "2.0",
   "method": "runtime/ready",
-  "params": { "protocolVersion": "1.18", "bridgeVersion": "0.1.0", "pid": 1234 }
+  "params": { "protocolVersion": "1.19", "bridgeVersion": "0.1.0", "pid": 1234 }
 }
 ```
 
-## Protocol 1.18 handshake
+## Protocol 1.19 handshake
 
 The first JSON-RPC request must negotiate the protocol. Once successful, the
 connection is sticky: subsequent input and agent events use JSON-RPC only.
@@ -42,7 +44,7 @@ connection is sticky: subsequent input and agent events use JSON-RPC only.
   "id": "initialize",
   "method": "initialize",
   "params": {
-    "protocolVersion": "1.18",
+    "protocolVersion": "1.19",
     "clientInfo": { "name": "adaptive-agent-desktop", "version": "1.0.0" },
     "capabilities": {}
   }
@@ -56,7 +58,7 @@ The result advertises supported methods, notifications, and CLI commands:
   "jsonrpc": "2.0",
   "id": "initialize",
   "result": {
-    "protocolVersion": "1.18",
+    "protocolVersion": "1.19",
     "bridgeVersion": "0.1.0",
     "serverInfo": {
       "name": "@adaptive-agent/desktop-bridge",
@@ -69,6 +71,9 @@ The result advertises supported methods, notifications, and CLI commands:
         "runtime/info",
         "runtime/shutdown",
         "auth/updateAccessToken",
+        "agent/createDraft",
+        "agent/validateConfig",
+        "agent/saveConfig",
         "agent/run",
         "agent/chat",
         "run/resume",
@@ -129,6 +134,9 @@ steering, and in-memory run state.
 | `runtime/info`                     | -                                    | -                                                                                                                       |
 | `runtime/shutdown`                 | -                                    | -                                                                                                                       |
 | `auth/updateAccessToken`           | `accessToken`                        | -                                                                                                                       |
+| `agent/createDraft`                | `brief`                              | `generatorAgent`, `id`, `provider`, `model`                                                                             |
+| `agent/validateConfig`             | `agent`                              | `generatorAgent`, `targetPath`                                                                                           |
+| `agent/saveConfig`                 | `agent`, `expectedPath`, `expectedTargetFingerprint` | `generatorAgent`, `targetPath`, `overwrite`                                                           |
 | `agent/run`                        | `runId`, `goal`                      | `sessionId`, `input`, `attachments`                                                                                     |
 | `agent/chat`                       | `runId`, `transcript`                | `sessionId`                                                                                                             |
 | `run/resume`                       | `runId`                              | -                                                                                                                       |
@@ -269,7 +277,7 @@ Postgres runtime for cross-process inspection and recovery.
 
 ## Errors
 
-Protocol 1.18 uses standard JSON-RPC codes and includes a stable protocol code in
+Protocol 1.19 uses standard JSON-RPC codes and includes a stable protocol code in
 `error.data.protocolCode`.
 
 | JSON-RPC code | Meaning                                       |
@@ -293,7 +301,7 @@ ids may be strings or finite numbers and are echoed without coercion.
 ```sh
 bun run compile
 printf '%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1.18","clientInfo":{"name":"smoke"}}}' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1.19","clientInfo":{"name":"smoke"}}}' \
   '{"jsonrpc":"2.0","id":2,"method":"cli/execute","params":{"argv":["--version"]}}' \
   | dist/agent-runtime
 ```

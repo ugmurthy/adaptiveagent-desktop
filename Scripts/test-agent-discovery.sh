@@ -19,7 +19,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 printf '%s\n' \
-  '{"jsonrpc":"2.0","id":"initialize","method":"initialize","params":{"protocolVersion":"1.18","clientInfo":{"name":"agent-discovery-smoke-test","version":"1.0.0"},"capabilities":{}}}' \
+  '{"jsonrpc":"2.0","id":"initialize","method":"initialize","params":{"protocolVersion":"1.19","clientInfo":{"name":"agent-discovery-smoke-test","version":"1.0.0"},"capabilities":{}}}' \
   '{"jsonrpc":"2.0","id":"agents-list","method":"agents/list","params":{}}' \
   | "$RUNTIME" >"$TMP/stdout" 2>"$TMP/stderr"
 
@@ -30,10 +30,10 @@ DISCOVERY="$(sed -n '3p' "$TMP/stdout")"
 if ! jq -e '
   .jsonrpc == "2.0" and
   .method == "runtime/ready" and
-  .params.protocolVersion == "1.18" and
+  .params.protocolVersion == "1.19" and
   (has("id") | not)
 ' >/dev/null <<<"$READY"; then
-  echo "Runtime did not emit a valid protocol 1.18 runtime/ready notification:" >&2
+  echo "Runtime did not emit a valid protocol 1.19 runtime/ready notification:" >&2
   cat "$TMP/stdout" >&2
   exit 1
 fi
@@ -41,10 +41,10 @@ fi
 if ! jq -e '
   .jsonrpc == "2.0" and
   .id == "initialize" and
-  .result.protocolVersion == "1.18" and
+  .result.protocolVersion == "1.19" and
   (.result.capabilities.methods | index("agents/list") != null)
 ' >/dev/null <<<"$INITIALIZED"; then
-  echo "Runtime did not negotiate protocol 1.18 with agents/list support:" >&2
+  echo "Runtime did not negotiate protocol 1.19 with agents/list support:" >&2
   cat "$TMP/stdout" >&2
   exit 1
 fi

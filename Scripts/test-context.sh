@@ -77,7 +77,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 printf '%s\n' \
-  '{"jsonrpc":"2.0","id":"initialize","method":"initialize","params":{"protocolVersion":"1.18","clientInfo":{"name":"context-smoke-test","version":"1.0.0"},"capabilities":{}}}' \
+  '{"jsonrpc":"2.0","id":"initialize","method":"initialize","params":{"protocolVersion":"1.19","clientInfo":{"name":"context-smoke-test","version":"1.0.0"},"capabilities":{}}}' \
   "$EXECUTE_REQUEST" \
   | "$RUNTIME" >"$TMP/protocol" 2>"$TMP/runtime-stderr"
 
@@ -85,16 +85,16 @@ if ! jq -s -e '
   any(.[];
     .jsonrpc == "2.0" and
     .method == "runtime/ready" and
-    .params.protocolVersion == "1.18" and
+    .params.protocolVersion == "1.19" and
     (has("id") | not)
   ) and
   any(.[];
     .id == "initialize" and
-    .result.protocolVersion == "1.18" and
+    .result.protocolVersion == "1.19" and
     (.result.capabilities.methods | index("cli/execute") != null)
   )
 ' "$TMP/protocol" >/dev/null; then
-  echo "Runtime did not negotiate protocol 1.18 with cli/execute support:" >&2
+  echo "Runtime did not negotiate protocol 1.19 with cli/execute support:" >&2
   cat "$TMP/protocol" >&2
   exit 1
 fi
