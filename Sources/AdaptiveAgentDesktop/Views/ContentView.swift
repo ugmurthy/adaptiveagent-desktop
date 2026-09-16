@@ -2015,7 +2015,7 @@ private struct RunActivityFeed: View {
             LazyVStack(alignment: .leading, spacing: 0) {
                 if record.kind == .run {
                     TimelineRow(date: record.activityStartedAt, symbol: "person", accessibilityLabel: "Goal") {
-                        Text(record.title)
+                        Text(record.runGoal ?? record.title)
                             .textSelection(.enabled)
                             .padding(.vertical, 5)
                     }

@@ -75,12 +75,16 @@ usage = dict(total=total, byRootRun=[dict(rootRunId="root-a", usage=total)], byP
 def goal(root, run, title, started="2026-09-08T10:00:00Z"):
     return dict(rootRunId=root, runId=run, goal=title, status="succeeded", linkedAt=started, startedAt=started,
                 completedAt="2026-09-08T10:02:00Z", type="run")
-def group(session, goals):
-    return dict(sessionId=session, startedAt="2020-01-01T00:00:00Z", status="succeeded", goals=goals,
+def group(session, goals, title=None, name=None):
+    return dict(sessionId=session, startedAt="2020-01-01T00:00:00Z",
+                title=title or f"Session {session or goals[0]['rootRunId']}",
+                name=name or f"session-{session or goals[0]['rootRunId']}", status="succeeded", goals=goals,
                 cursor=dict(startedAt=goals[0]["startedAt"], key=session or goals[0]["rootRunId"]))
 groups = [group("session-research", [goal("root-a", "root-a", "Research report"),
-                                     goal("root-c", "root-c", "Follow-up report", "2026-09-08T08:00:00Z")]),
-          group(None, [goal("root-b", "run-b", "Review without a session", "2026-09-08T09:00:00Z")])]
+                                     goal("root-c", "root-c", "Follow-up report", "2026-09-08T08:00:00Z")],
+                 "Prepared research session", "prepared-research-session"),
+          group(None, [goal("root-b", "run-b", "Review without a session", "2026-09-08T09:00:00Z")],
+                "Independent review", "independent-review")]
 tree = [dict(rootRunId="root-a", runId=run, parentRunId=parent, delegateName=title, depth=depth,
              createdAt=f"2026-09-08T10:0{depth}:00Z", completedAt="2026-09-08T10:02:00Z",
              status="succeeded") for run,parent,title,depth in [
@@ -101,18 +105,19 @@ for line in sys.stdin:
         response["error"]=dict(code=-32000,message="Fixture retrieval failed; token=secret",data=dict(protocolCode="UNAVAILABLE"))
     else:
         if method=="initialize":
-            result=dict(protocolVersion="1.19") if runtime else dict(protocolVersion="1.0",backend=dict(kind="sqlite",readOnly=True))
+            result=dict(protocolVersion="1.19") if runtime else dict(protocolVersion="1.1",backend=dict(kind="sqlite",readOnly=True),capabilities=dict(authoritativeSessionPresentation=True))
         elif runtime and method=="runtime/initialize":
             result=dict(agent=dict(id="fixture",name="History Preview"),runtimeMode="sqlite",workspaceRoot=str(home),shellCwd=str(home),registeredToolNames=[])
         elif runtime and method=="runtime/info":
             result=dict(protocolVersion="1.19",bridgeVersion="0.1.0",initialized=True,clientInfo=dict(name="fixture"),runtimeMode="sqlite",connections=dict(sqlite=dict(configured=True,state="connected",path=str(home/"fixture.sqlite"))))
         elif not runtime and method=="trace/listSessions":
-            if mode in ["pages","legacy"]:
+            if mode=="live":
+                result=[group("session-live", [goal("root-live", "root-live", "Specific submitted goal")],
+                              "Helper prepared title", "helper-prepared-title")]
+            elif mode=="pages":
                 result=[group(f"session-{i:03}",[goal(f"root-{i:03}",f"root-{i:03}",f"Report {i}")]) for i in range(100)] if "after" not in params else [group("last-session",[goal("last-root","last-root","Oldest report")])]
                 # A very old sibling must never be used as the next-page boundary.
                 if "after" not in params: result[0]["goals"].append(goal("ancient","ancient","Ancient sibling","2000-01-01T00:00:00Z"))
-                if mode=="legacy":
-                    for item in result: item.pop("cursor",None)
             else: result=groups
         elif not runtime and method=="trace/get":
             result=dict(report)
@@ -174,16 +179,33 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(merged.map(\.id), ["grandchild", "other", "solo", "sibling", "child", "root"])
         let tree = AppModel.historyTree(items: merged)
         XCTAssertEqual(tree.map(\.id), ["run:root", "run:other", "run:solo"])
-        XCTAssertEqual(tree[0].label, "root")
+        XCTAssertEqual(tree[0].label, "Session s")
         XCTAssertEqual(tree[0].runCount, 4)
         XCTAssertEqual(tree[0].sessionId, "s")
         XCTAssertEqual(tree[0].item?.id, "root")
         XCTAssertEqual(tree[0].children.map(\.item?.id), ["sibling", "child"], "Run siblings use their own start time")
         XCTAssertEqual(tree[0].children[1].children[0].item?.id, "grandchild")
-        XCTAssertEqual(tree[2].label, "solo")
+        XCTAssertEqual(tree[2].label, "Session solo")
         let ties = [item("b", time: "2026-09-08T01:00:00-07:00"), item("a", time: "2026-09-08T08:00:00.000Z")]
         XCTAssertEqual(model.mergeHistory([], ties).map(\.id), ["a", "b"])
         XCTAssertEqual(AppModel.historyTree(items: merged, query: "grandchild").first?.item?.id, "root")
+
+        var authoritativeSingle = noSession
+        authoritativeSingle.sessionTitle = "Authoritative standalone title"
+        authoritativeSingle.sessionName = "authoritative-standalone-title"
+        let single = try XCTUnwrap(AppModel.historyTree(items: [authoritativeSingle]).first)
+        XCTAssertEqual(single.label, "Authoritative standalone title")
+        XCTAssertEqual(single.item?.title, "solo", "A specific run keeps its goal label")
+        XCTAssertEqual(
+            AppModel.historyTree(items: [authoritativeSingle], query: "standalone").first?.label,
+            "Authoritative standalone title"
+        )
+        var localTerminal = authoritativeSingle
+        localTerminal.sessionTitle = nil
+        localTerminal.sessionName = nil
+        let terminalMerge = try XCTUnwrap(model.mergeHistory([authoritativeSingle], [localTerminal]).first)
+        XCTAssertEqual(terminalMerge.sessionTitle, "Authoritative standalone title")
+        XCTAssertEqual(terminalMerge.sessionName, "authoritative-standalone-title")
 
         let first = item("first", session: "shared", time: "2026-09-07T09:00:00Z")
         var second = item("second", session: "shared", time: "2026-09-08T09:00:00Z")
@@ -212,9 +234,10 @@ final class HistoryTests: XCTestCase {
                            "Typing a run goal must not query the trace helper")
             let session = try XCTUnwrap(model.historyTree.first)
             XCTAssertEqual(session.id, "session:session-research")
-            XCTAssertEqual(session.label, "Follow-up report")
+            XCTAssertEqual(session.label, "Prepared research session")
             XCTAssertEqual(session.runCount, 2, "Runs with the same non-empty session ID share one collapsed row")
             XCTAssertEqual(session.item?.id, "root-c")
+            XCTAssertEqual(session.item?.sessionName, "prepared-research-session")
             XCTAssertEqual(session.children.map(\.item?.id), ["root-a"])
             model.setHistoryExpanded(true, node: session)
             XCTAssertTrue(model.historyReports.isEmpty, "Expanding a session must not load every root")
@@ -264,34 +287,62 @@ final class HistoryTests: XCTestCase {
     }
 
     @MainActor
-    func testCursorPagesKeepBoundaryAndLegacyHelperNeverUsesUnsafeUntil() async throws {
-        for mode in ["pages", "legacy"] {
-            let fixture = try HistoryFixture(mode: mode)
-            do {
-                try await fixture.start()
-                XCTAssertEqual(fixture.model.historyItems.count, 101)
-                if mode == "pages" {
-                    XCTAssertTrue(fixture.model.hasOlderHistory)
-                    fixture.model.loadOlderHistory()
-                    try await fixture.wait { fixture.model.historyItems.count == 102 }
-                    XCTAssertFalse(fixture.model.hasOlderHistory)
-                    let pages = try fixture.requests("trace").filter { $0.objectValue?["method"] == .string("trace/listSessions") }
-                    XCTAssertEqual(pages.count, 2)
-                    let first = pages[0].objectValue?["params"]?.objectValue
-                    let second = pages[1].objectValue?["params"]?.objectValue
-                    XCTAssertEqual(first?["until"], second?["until"])
-                    XCTAssertEqual(second?["after"]?.objectValue?["key"], .string("session-099"))
-                    XCTAssertEqual(second?["after"]?.objectValue?["startedAt"], .string("2026-09-08T10:00:00Z"))
-                } else {
-                    XCTAssertFalse(fixture.model.hasOlderHistory)
-                    XCTAssertNotNil(fixture.model.historyPagingMessage)
-                    fixture.model.loadOlderHistory()
-                    try await Task.sleep(for: .milliseconds(80))
-                    XCTAssertEqual(try fixture.requests("trace").filter { $0.objectValue?["method"] == .string("trace/listSessions") }.count, 1)
-                }
-            } catch { await fixture.close(); throw error }
-            await fixture.close()
-        }
+    func testRunCreatedUpdatesLiveSessionPresentationWithoutEndingExecution() async throws {
+        let fixture = try HistoryFixture(mode: "live")
+        do {
+            try await fixture.start()
+            let runtimeSessionID = try XCTUnwrap(fixture.model.selectedTab?.runtimeSessionID)
+            let recordID = UUID()
+            fixture.model.runs = [.init(
+                id: recordID,
+                runtimeSessionID: runtimeSessionID,
+                kind: .run,
+                title: "Session session-",
+                runGoal: "Specific submitted goal",
+                sessionId: "session-live",
+                status: .running
+            )]
+            fixture.model.acceptResult(.object(["runId": .string("root-live")]), for: recordID)
+
+            fixture.model.receive(
+                method: "agent/event",
+                params: .object([
+                    "type": .string("run.created"),
+                    "runId": .string("root-live"),
+                    "payload": .object(["rootRunId": .string("root-live")])
+                ]),
+                sessionID: runtimeSessionID
+            )
+
+            try await fixture.wait { fixture.model.runs.first?.title == "Helper prepared title" }
+            XCTAssertEqual(fixture.model.runs.first?.authoritativeSessionTitle, "Helper prepared title")
+            XCTAssertEqual(fixture.model.runs.first?.sessionName, "helper-prepared-title")
+            XCTAssertEqual(fixture.model.runs.first?.runGoal, "Specific submitted goal")
+            XCTAssertEqual(fixture.model.runs.first?.status, .running)
+            XCTAssertTrue(fixture.model.runs.first?.isRequestInFlight == false)
+        } catch { await fixture.close(); throw error }
+        await fixture.close()
+    }
+
+    @MainActor
+    func testCursorPagesKeepBoundary() async throws {
+        let fixture = try HistoryFixture(mode: "pages")
+        do {
+            try await fixture.start()
+            XCTAssertEqual(fixture.model.historyItems.count, 101)
+            XCTAssertTrue(fixture.model.hasOlderHistory)
+            fixture.model.loadOlderHistory()
+            try await fixture.wait { fixture.model.historyItems.count == 102 }
+            XCTAssertFalse(fixture.model.hasOlderHistory)
+            let pages = try fixture.requests("trace").filter { $0.objectValue?["method"] == .string("trace/listSessions") }
+            XCTAssertEqual(pages.count, 2)
+            let first = pages[0].objectValue?["params"]?.objectValue
+            let second = pages[1].objectValue?["params"]?.objectValue
+            XCTAssertEqual(first?["until"], second?["until"])
+            XCTAssertEqual(second?["after"]?.objectValue?["key"], .string("session-099"))
+            XCTAssertEqual(second?["after"]?.objectValue?["startedAt"], .string("2026-09-08T10:00:00Z"))
+        } catch { await fixture.close(); throw error }
+        await fixture.close()
         let value = try JSONValue.encode(TraceSessionListParameters(after: .init(startedAt: nil, key: "null-time")))
         XCTAssertEqual(value.objectValue?["after"]?.objectValue?["startedAt"], .null)
     }

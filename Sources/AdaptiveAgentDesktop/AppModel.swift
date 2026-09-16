@@ -228,7 +228,10 @@ final class AppModel: ObservableObject {
         var modelName = ""
         let kind: RunKind
         var title: String
+        var runGoal: String? = nil
         var sessionId: String?
+        var sessionName: String? = nil
+        var authoritativeSessionTitle: String? = nil
         var runIds: [String] = []
         var status: RunStatus = .queued
         var output: JSONValue?
@@ -256,6 +259,7 @@ final class AppModel: ObservableObject {
         var runtimeSessionID: UUID? = nil
         let sessionId: String?
         var sessionTitle: String? = nil
+        var sessionName: String? = nil
         let title: String
         let status: String
         let startedAt: String
@@ -1261,7 +1265,8 @@ final class AppModel: ObservableObject {
             agentName: sessions[tabs[tabIndex].runtimeSessionID]?.agentName ?? "",
             modelName: sessions[tabs[tabIndex].runtimeSessionID]?.configuration.model ?? "",
             kind: kind,
-            title: title(for: text),
+            title: Self.neutralSessionTitle(sessionId),
+            runGoal: kind == .run ? text : nil,
             sessionId: sessionId,
             status: .queued,
             attachments: attachments.map {
@@ -1909,6 +1914,7 @@ final class AppModel: ObservableObject {
                 }
                 updateStatus(.running, forRunId: runId)
                 if let index = recordIndex(forRunId: runId) { beginActivityTimer(at: index) }
+                loadAuthoritativeSessionPresentation(rootRunId: rootRunId)
             }
             return
         }
@@ -2177,11 +2183,19 @@ final class AppModel: ObservableObject {
         do {
             let traceSessions = try await session.traceClient.listSessions(.init(limit: 100, until: page.until, after: page.after))
             historyPages[sessionID] = HistoryPage(until: page.until, after: traceSessions.last?.cursor)
-            hasOlderHistory = traceSessions.count == 100 && traceSessions.last?.cursor != nil
-            historyPagingMessage = traceSessions.count == 100 && traceSessions.last?.cursor == nil
-                ? "More history may exist. Upgrade the trace helper for correctly ordered, cursor-based history."
-                : nil
+            hasOlderHistory = traceSessions.count == 100
+            historyPagingMessage = nil
             let loaded = flattenHistory(traceSessions, runtimeSessionID: sessionID)
+            for traceSession in traceSessions {
+                for goal in traceSession.goals {
+                    guard let recordID = recordByRoot[goal.rootRunId] else { continue }
+                    applyAuthoritativeSessionPresentation(
+                        traceSession,
+                        to: recordID,
+                        rootRunId: goal.rootRunId
+                    )
+                }
+            }
             if replacing {
                 let openHistoryIDs = Set(
                     tabs.filter { $0.runtimeSessionID == sessionID }.compactMap(\.selectedHistoryRunID)
@@ -2270,6 +2284,7 @@ final class AppModel: ObservableObject {
                     runtimeSessionID: runtimeSessionID,
                     sessionId: traceSession.sessionId,
                     sessionTitle: traceSession.title,
+                    sessionName: traceSession.name,
                     title: displayTitle ?? "Run \(String(goal.rootRunId.prefix(12)))",
                     status: goal.status ?? traceSession.status ?? "unknown",
                     startedAt: goal.startedAt ?? goal.linkedAt,
@@ -2289,8 +2304,12 @@ final class AppModel: ObservableObject {
         var byID: [String: HistoryItem] = [:]
         for var item in first + second {
             // The same persisted UUID can be visible through several connections to one DB.
-            // Refresh metadata without silently changing the connection/workspace that owns it.
-            item.runtimeSessionID = byID[item.id]?.runtimeSessionID ?? item.runtimeSessionID
+            // Refresh metadata without silently changing its owning connection or replacing
+            // authoritative helper presentation with local placeholder data.
+            let existing = byID[item.id]
+            item.runtimeSessionID = existing?.runtimeSessionID ?? item.runtimeSessionID
+            item.sessionTitle = item.sessionTitle ?? existing?.sessionTitle
+            item.sessionName = item.sessionName ?? existing?.sessionName
             byID[item.id] = item
         }
         let datedItems: [(item: HistoryItem, date: Date)] = byID.values.map { item in
@@ -2352,7 +2371,7 @@ final class AppModel: ObservableObject {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return historyItems }
         return historyItems.filter { item in
-            [item.title, item.rootRunId, item.sessionId ?? "", item.status, item.type]
+            [item.title, item.sessionTitle ?? "", item.rootRunId, item.sessionId ?? "", item.status, item.type]
                 .contains { $0.localizedCaseInsensitiveContains(query) }
         }
     }
@@ -2366,6 +2385,48 @@ final class AppModel: ObservableObject {
             guard !Task.isCancelled else { return }
             await loadHistory(sessionID: sessionID, replacing: true)
         }
+    }
+
+    private func loadAuthoritativeSessionPresentation(rootRunId: String) {
+        guard let recordID = recordByRoot[rootRunId],
+              let index = runs.firstIndex(where: { $0.id == recordID }),
+              let runtimeSessionID = runs[index].runtimeSessionID,
+              let session = sessions[runtimeSessionID], session.traceConnected,
+              let expectedSessionId = runs[index].sessionId else { return }
+        let traceClient = session.traceClient
+        Task {
+            do {
+                // Protocol 1.1 has no exact session/root lookup. Query only the newest page,
+                // then require both IDs to match before applying presentation metadata.
+                let traceSessions = try await traceClient.listSessions(.init(limit: 100))
+                guard let traceSession = traceSessions.first(where: {
+                    $0.sessionId == expectedSessionId
+                        && $0.goals.contains(where: {
+                            $0.rootRunId == rootRunId || $0.runId == rootRunId
+                        })
+                }) else { return }
+                applyAuthoritativeSessionPresentation(
+                    traceSession,
+                    to: recordID,
+                    rootRunId: rootRunId
+                )
+            } catch {
+                recordTraceDiagnostic("Session presentation lookup failed: \(redactedErrorDescription(error))")
+            }
+        }
+    }
+
+    private func applyAuthoritativeSessionPresentation(
+        _ presentation: TraceSessionListItem,
+        to recordID: UUID,
+        rootRunId: String
+    ) {
+        guard recordByRoot[rootRunId] == recordID,
+              let index = runs.firstIndex(where: { $0.id == recordID }),
+              runs[index].sessionId == presentation.sessionId else { return }
+        runs[index].title = presentation.title
+        runs[index].authoritativeSessionTitle = presentation.title
+        runs[index].sessionName = presentation.name
     }
 
     private func recordTraceDiagnostic(_ message: String) {
@@ -2843,9 +2904,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func title(for text: String) -> String {
-        let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
-        return firstLine.count > 54 ? String(firstLine.prefix(51)) + "…" : firstLine
+    private static func neutralSessionTitle(_ sessionId: String) -> String {
+        "Session \(String(sessionId.prefix(8)))"
     }
 
     private func appendEvent(_ event: String) {

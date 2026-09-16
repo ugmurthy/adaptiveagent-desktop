@@ -518,6 +518,9 @@ done
         for _ in 0..<100 where model.runs.first?.status != .succeeded {
             try? await Task.sleep(for: .milliseconds(20))
         }
+        XCTAssertTrue(model.runs.first?.title.hasPrefix("Session ") == true)
+        XCTAssertNotEqual(model.runs.first?.title, "Run this task")
+        XCTAssertEqual(model.runs.first?.runGoal, "Run this task")
 
         model.newChat()
         let chatTabID = try XCTUnwrap(model.selectedTabID)
@@ -2261,11 +2264,11 @@ exit 7
     func testTraceSessionClientNegotiatesListsLoadsAndShutsDown() async throws {
         let executable = try makeTraceScript(#"""
 IFS= read -r line
-printf '%s\n' "$line" | grep -q '"protocolVersion":"1.0"'
-printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.0","backend":{"kind":"sqlite","readOnly":true}}}'
+printf '%s\n' "$line" | grep -q '"protocolVersion":"1.1"'
+printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.1","backend":{"kind":"sqlite","readOnly":true},"capabilities":{"authoritativeSessionPresentation":true}}}'
 IFS= read -r line
 id="$(printf '%s\n' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
-printf '{"jsonrpc":"2.0","id":"%s","result":[{"sessionId":"session-1","startedAt":"2026-08-28T10:00:00.000Z","status":"succeeded","goals":[{"rootRunId":"run-1","runId":"run-1","status":"succeeded","startedAt":"2026-08-28T10:00:00.000Z","completedAt":"2026-08-28T10:01:00.000Z","goal":"Research AI news","linkedAt":"2026-08-28T10:00:00.000Z","type":"run"}]}]}\n' "$id"
+printf '{"jsonrpc":"2.0","id":"%s","result":[{"sessionId":"session-1","startedAt":"2026-08-28T10:00:00.000Z","title":"AI research session","name":"ai-research-session","status":"succeeded","cursor":{"startedAt":"2026-08-28T10:00:00.000Z","key":"session-1"},"goals":[{"rootRunId":"run-1","runId":"run-1","status":"succeeded","startedAt":"2026-08-28T10:00:00.000Z","completedAt":"2026-08-28T10:01:00.000Z","goal":"Research AI news","linkedAt":"2026-08-28T10:00:00.000Z","type":"run"}]}]}\n' "$id"
 IFS= read -r line
 id="$(printf '%s\n' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
 printf '{"jsonrpc":"2.0","id":"%s","result":{"target":{"kind":"root-run","requestedId":"run-1","resolvedRootRunId":"run-1"},"session":null,"rootRuns":[{"rootRunId":"run-1","runId":"run-1","invocationKind":"run","linkedAt":"2026-08-28T10:00:00.000Z","startedAt":"2026-08-28T10:00:00.000Z","updatedAt":"2026-08-28T10:01:00.000Z","completedAt":"2026-08-28T10:01:00.000Z","status":"succeeded","goal":"Research AI news","modelProvider":"openrouter","modelName":"model"}],"usage":{"total":{"promptTokens":10,"completionTokens":20,"totalTokens":30,"estimatedCostUSD":0.01}},"timeline":[{"rootRunId":"run-1","runId":"run-1","depth":0,"stepId":"step-1","toolCallId":"tool-1","eventType":"tool.completed","toolName":"web_search","startedAt":"2026-08-28T10:00:01.000Z","completedAt":"2026-08-28T10:00:02.000Z","durationMs":1000,"outcome":"completed","childRunId":null,"eventSeq":2}],"runTree":[],"summary":{"status":"succeeded","reason":"Trace status is succeeded."},"warnings":[]}}\n' "$id"
@@ -2275,12 +2278,15 @@ printf '{"jsonrpc":"2.0","id":"%s","result":{"shutdown":true}}\n' "$id"
 """#)
         let client = TraceSessionClient(executableURL: executable, responseTimeout: .seconds(2))
         let initialized = try await client.start(backend: .sqlite(path: "/tmp/runtime.sqlite"))
-        XCTAssertEqual(initialized.protocolVersion, "1.0")
+        XCTAssertEqual(initialized.protocolVersion, "1.1")
+        XCTAssertTrue(initialized.capabilities?.authoritativeSessionPresentation == true)
         XCTAssertTrue(initialized.backend.readOnly)
 
         let sessions = try await client.listSessions(.init(limit: 100))
         XCTAssertEqual(sessions.first?.goals.first?.rootRunId, "run-1")
         XCTAssertEqual(sessions.first?.goals.first?.goal, "Research AI news")
+        XCTAssertEqual(sessions.first?.title, "AI research session")
+        XCTAssertEqual(sessions.first?.name, "ai-research-session")
 
         let report = try await client.getTrace(rootRunId: "run-1")
         XCTAssertEqual(report.usage.total.totalTokens, 30)
@@ -2291,7 +2297,7 @@ printf '{"jsonrpc":"2.0","id":"%s","result":{"shutdown":true}}\n' "$id"
     func testTraceSessionClientRejectsWritableOrWrongBackend() async throws {
         let executable = try makeTraceScript(#"""
 IFS= read -r line
-printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.0","backend":{"kind":"postgres","readOnly":false}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.1","backend":{"kind":"postgres","readOnly":false},"capabilities":{"authoritativeSessionPresentation":true}}}'
 sleep 1
 """#)
         let client = TraceSessionClient(executableURL: executable, responseTimeout: .seconds(1))
@@ -2306,10 +2312,73 @@ sleep 1
         await client.shutdown()
     }
 
+    func testTraceSessionClientRejectsOldProtocolAndMissingAuthoritativePresentationCapability() async throws {
+        let oldExecutable = try makeTraceScript(#"""
+IFS= read -r line
+printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.0","backend":{"kind":"sqlite","readOnly":true}}}'
+sleep 1
+"""#)
+        let oldClient = TraceSessionClient(executableURL: oldExecutable, responseTimeout: .seconds(1))
+        do {
+            _ = try await oldClient.start(backend: .sqlite(path: "/tmp/runtime.sqlite"))
+            XCTFail("protocol 1.0 must be rejected")
+        } catch {
+            XCTAssertEqual(error as? TraceSessionClientError, .incompatibleProtocol("1.0"))
+        }
+
+        let missingCapabilityExecutable = try makeTraceScript(#"""
+IFS= read -r line
+printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.1","backend":{"kind":"sqlite","readOnly":true},"capabilities":{"authoritativeSessionPresentation":false}}}'
+sleep 1
+"""#)
+        let missingCapabilityClient = TraceSessionClient(
+            executableURL: missingCapabilityExecutable,
+            responseTimeout: .seconds(1)
+        )
+        do {
+            _ = try await missingCapabilityClient.start(backend: .sqlite(path: "/tmp/runtime.sqlite"))
+            XCTFail("the authoritative presentation capability must be required")
+        } catch {
+            guard case .protocolViolation(let message) = error as? TraceSessionClientError else {
+                return XCTFail("expected protocolViolation, got \(error)")
+            }
+            XCTAssertTrue(message.contains("authoritativeSessionPresentation"))
+        }
+    }
+
+    func testTraceSessionClientRejectsMissingOrBlankSessionPresentation() async throws {
+        for result in [
+            #"[{"sessionId":"session-1","startedAt":"2026-08-28T10:00:00Z","name":"session-name","cursor":{"startedAt":null,"key":"session-1"},"goals":[]}]"#,
+            #"[{"sessionId":"session-1","startedAt":"2026-08-28T10:00:00Z","title":"Session title","cursor":{"startedAt":null,"key":"session-1"},"goals":[]}]"#,
+            #"[{"sessionId":"session-1","startedAt":"2026-08-28T10:00:00Z","title":" ","name":"session-name","cursor":{"startedAt":null,"key":"session-1"},"goals":[]}]"#,
+            #"[{"sessionId":"session-1","startedAt":"2026-08-28T10:00:00Z","title":"Session title","name":" ","cursor":{"startedAt":null,"key":"session-1"},"goals":[]}]"#
+        ] {
+            let executable = try makeTraceScript("""
+            IFS= read -r line
+            printf '%s\\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.1","backend":{"kind":"sqlite","readOnly":true},"capabilities":{"authoritativeSessionPresentation":true}}}'
+            IFS= read -r line
+            id="$(printf '%s\\n' "$line" | sed -n 's/.*"id":"\\([^"]*\\)".*/\\1/p')"
+            printf '{"jsonrpc":"2.0","id":"%s","result":\(result)}\\n' "$id"
+            sleep 1
+            """)
+            let client = TraceSessionClient(executableURL: executable, responseTimeout: .seconds(1))
+            _ = try await client.start(backend: .sqlite(path: "/tmp/runtime.sqlite"))
+            do {
+                _ = try await client.listSessions()
+                XCTFail("missing or blank presentation fields must be rejected")
+            } catch {
+                guard case .protocolViolation = error as? TraceSessionClientError else {
+                    return XCTFail("expected protocolViolation, got \(error)")
+                }
+            }
+            await client.shutdown()
+        }
+    }
+
     func testTraceSessionClientDecodesRemoteProtocolCode() async throws {
         let executable = try makeTraceScript(#"""
 IFS= read -r line
-printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.0","backend":{"kind":"sqlite","readOnly":true}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.1","backend":{"kind":"sqlite","readOnly":true},"capabilities":{"authoritativeSessionPresentation":true}}}'
 IFS= read -r line
 id="$(printf '%s\n' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
 printf '{"jsonrpc":"2.0","id":"%s","error":{"code":-32020,"message":"Denied","data":{"protocolCode":"SENSITIVE_DATA_NOT_ALLOWED"}}}\n' "$id"
@@ -2332,7 +2401,7 @@ sleep 1
     func testTraceSessionClientRedactsDiagnostics() async throws {
         let executable = try makeTraceScript(#"""
 IFS= read -r line
-printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.0","backend":{"kind":"sqlite","readOnly":true}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.1","backend":{"kind":"sqlite","readOnly":true},"capabilities":{"authoritativeSessionPresentation":true}}}'
 printf '%s\n' '{"accessToken":"trace-secret"}' >&2
 IFS= read -r line
 id="$(printf '%s\n' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
@@ -2356,7 +2425,7 @@ printf '{"jsonrpc":"2.0","id":"%s","result":{"shutdown":true}}\n' "$id"
     func testUnexpectedTraceSessionTerminationFailsPendingRequest() async throws {
         let executable = try makeTraceScript(#"""
 IFS= read -r line
-printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.0","backend":{"kind":"sqlite","readOnly":true}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.1","backend":{"kind":"sqlite","readOnly":true},"capabilities":{"authoritativeSessionPresentation":true}}}'
 IFS= read -r line
 exit 9
 """#)

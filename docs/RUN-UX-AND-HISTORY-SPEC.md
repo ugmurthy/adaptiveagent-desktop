@@ -312,6 +312,8 @@ Important contract: the current trace-session projection intentionally removes
 messages by default. Therefore:
 
 - trace-session owns history discovery and read-only trace presentation;
+- trace-session protocol `1.1` is the sole authority for session `title` and
+  `name`. Desktop must not derive either from goals or raw metadata;
 - `run/inspect` on the agent runtime remains authoritative for a final result,
   detailed execution error, and executable run state;
 - the desktop must not infer a final answer from trace events;
@@ -337,7 +339,7 @@ messages by default. Therefore:
 │          │                   └─────────────────────┘                 │
 │          │                                                          │
 │          └────────▶ TraceHistoryModel                               │
-│                               ┃ protocol 1.0, read-only              │
+│                               ┃ protocol 1.1, read-only              │
 │                               ▼                                     │
 │                      ┌─────────────────────┐                         │
 │                      │ trace-session       │                         │
@@ -358,7 +360,7 @@ start, steer, approve, recover, or otherwise execute an agent operation.
 Add these focused types rather than expanding `RuntimeClient`:
 
 - `TraceSessionClient`: process lifecycle, NDJSON buffering, request IDs,
-  response correlation, protocol-`1.0` initialization, stderr diagnostics,
+  response correlation, protocol-`1.1` initialization, stderr diagnostics,
   bounded timeouts, and graceful `shutdown`.
 - `TraceHistoryModel`: list loading, flattening, deduplication, pagination,
   selection-safe detail loading, and non-fatal health state.
@@ -388,9 +390,17 @@ Start order:
 5. For Postgres, launch with `--database-url-env DATABASE_URL` so the credential
    remains in the inherited process environment and never enters JSON-RPC,
    diagnostics, or UI state.
-6. Send trace `initialize` with protocol version string `"1.0"`; verify
-   `backend.readOnly == true` and the expected backend kind.
+6. Send trace `initialize` with protocol version string `"1.1"`; verify
+   `backend.readOnly == true`, the expected backend kind, and
+   `capabilities.authoritativeSessionPresentation == true`.
 7. Load history.
+
+After a persistent run's root `run.created` notification, request the newest
+`trace/listSessions` page asynchronously and update the live session row only
+when both the generated session ID and root/run ID match. Protocol `1.1` has no
+exact lookup parameter, so this bounded newest-page query is the narrowest
+available operation; a miss leaves the neutral local session identifier in
+place and never delays execution.
 
 If deployments support a Postgres environment variable other than
 `DATABASE_URL`, add a non-secret resolved environment-variable name to the
@@ -515,7 +525,7 @@ This phase is independent of trace-session and should ship first.
 
 - The bundled executable is found and is independently overrideable in tests.
 - Every request is JSON-RPC 2.0 with a string or finite-number ID.
-- Initialization sends trace protocol `"1.0"` as a string and rejects any other
+- Initialization sends trace protocol `"1.1"` as a string and rejects any other
   selected version.
 - Fragmented and combined NDJSON responses decode correctly.
 - Out-of-order responses correlate by ID even though the current server limits
