@@ -26,8 +26,8 @@ Scripts/install-local-runtime.sh /absolute/path/to/agent-runtime
 Both install to `Resources/AgentRuntime/agent-runtime`, which is copied into the app bundle and intentionally gitignored.
 
 Persisted SQLite/Postgres run history also uses the read-only
-`trace-session-sidecar` helper. Compile it from the AdaptiveAgent monorepo and
-install it separately:
+`trace-session-sidecar` helper package `0.2.0` (protocol `1.1`). Compile it from
+the AdaptiveAgent monorepo and install it separately:
 
 ```sh
 bun build packages/trace-session/src/trace-sidecar.ts --compile --target=bun-darwin-arm64 --outfile /tmp/trace-session-sidecar
@@ -74,7 +74,7 @@ Each native macOS window tab owns its own runtime process and workspace configur
 
 Select one historical run, or Command-click multiple rows, then use the trash button or a row's **Delete Run…** context-menu action to permanently delete terminal run data through the typed protocol `1.19` `run/delete` method. The app confirms destructive deletion, closes tabs for successful deletions, refreshes persisted history, and reports any runs the runtime could not delete.
 
-History combines completed local and persisted runs in a newest-first session/root/run tree. Expanding a root loads recursive child runs; selecting any run shows its persisted output, recorded file evidence, selected-run usage, and separately scoped root/subtree model and tool-provider accounting without attaching the run to the active execution UI. Correct pagination and tool-provider accounting require a trace-session helper that supports list cursors and `trace/usage`; older helpers stop safely at the first page rather than risking skipped history.
+History combines completed local and persisted runs in a newest-first session/root/run tree. The trace-session helper is the sole authority for session titles and names; individual run rows retain their own goal labels. Session titles are searchable, while names are decoded and retained for future presentation. Expanding a root loads recursive child runs; selecting any run shows its persisted output, recorded file evidence, selected-run usage, and separately scoped root/subtree model and tool-provider accounting without attaching the run to the active execution UI.
 
 When no run is selected, use the **Existing Run** field on the new-request screen to enter a run ID and invoke the same actions. The app attaches that ID as a tracked sidebar record so status changes, inspection output, and errors remain visible in the normal run detail. The ID must be available to the initialized runtime: runs from previous launches generally require Postgres, while memory-mode runs are available only for the lifetime of their runtime process.
 
@@ -84,7 +84,8 @@ The standard **About AdaptiveAgent Desktop** panel displays the marketing versio
 
 - `RuntimeClient` owns `Process`, separate stdin/stdout/stderr pipes, partial/multiple-line stdout buffering, JSON-RPC request correlation, and clean shutdown.
 - `TraceSessionClient` independently supervises the optional read-only
-  `trace-session-sidecar` helper over its protocol `1.0`. Its failure disables
+  `trace-session-sidecar` helper over its protocol `1.1`, requiring the
+  `authoritativeSessionPresentation` capability. Its failure disables
   persisted history only and never changes agent execution.
 - Startup requires a JSON-RPC `runtime/ready` notification, protocol `1.19` negotiation with `initialize`, and then a separate `runtime/initialize` before agent operations.
 - `AppModel` is main-actor isolated and translates UI actions into typed JSON-RPC methods. It reads only the non-secret runtime, model-selection, and interaction fields needed to seed editable `runtime/initialize` overrides.

@@ -25,8 +25,13 @@ struct TraceSessionInitialization: Codable, Equatable, Sendable {
         let readOnly: Bool
     }
 
+    struct Capabilities: Codable, Equatable, Sendable {
+        let authoritativeSessionPresentation: Bool
+    }
+
     let protocolVersion: String
     let backend: Backend
+    let capabilities: Capabilities?
 }
 
 struct TraceHistoryGoal: Codable, Equatable, Identifiable, Sendable {
@@ -46,10 +51,11 @@ struct TraceHistoryGoal: Codable, Equatable, Identifiable, Sendable {
 struct TraceSessionListItem: Codable, Equatable, Identifiable, Sendable {
     let sessionId: String?
     let startedAt: String
-    let title: String?
+    let title: String
+    let name: String
     let status: String?
     let goals: [TraceHistoryGoal]
-    var cursor: TraceSessionCursor? = nil
+    let cursor: TraceSessionCursor
 
     var id: String { sessionId ?? goals.first?.rootRunId ?? startedAt }
 }

@@ -91,7 +91,8 @@ extension AppModel {
                 HistoryItem(
                     rootRunId: historyRootRunId(for: runId), runId: runId,
                     runtimeSessionID: record.runtimeSessionID, sessionId: record.sessionId,
-                    title: record.title, status: record.status.rawValue,
+                    sessionTitle: record.authoritativeSessionTitle, sessionName: record.sessionName,
+                    title: record.runGoal ?? record.title, status: record.status.rawValue,
                     startedAt: record.activityStartedAt.map { ISO8601DateFormatter().string(from: $0) } ?? "",
                     completedAt: nil, type: record.kind.rawValue
                 )
@@ -141,7 +142,7 @@ extension AppModel {
         var sessionTitles: [String: (date: Date, id: String, rootID: String, title: String)] = [:]
         for (rootID, runs) in Dictionary(grouping: items, by: \.rootRunId) {
             guard query.isEmpty || runs.contains(where: { item in
-                [item.title, item.id, rootID, item.sessionId ?? "", item.status, item.type]
+                [item.title, item.sessionTitle ?? "", item.id, rootID, item.sessionId ?? "", item.status, item.type]
                     .contains { $0.localizedCaseInsensitiveContains(query) }
             }) else { continue }
             let ids = Set(runs.map(\.id))
@@ -191,7 +192,8 @@ extension AppModel {
                 let key = "session:\(session)"
                 groups[key, default: []].append(root)
                 let candidate = (date: historyDate(owner.startedAt), id: owner.id,
-                                 rootID: rootID, title: owner.sessionTitle ?? owner.title)
+                                 rootID: rootID,
+                                 title: owner.sessionTitle ?? "Session \(String(session.prefix(8)))")
                 if let current = sessionTitles[key] {
                     if candidate.date < current.date || (candidate.date == current.date && candidate.id < current.id) {
                         sessionTitles[key] = candidate
@@ -201,11 +203,22 @@ extension AppModel {
                 }
             } else {
                 // A missing session is not an artificial shared session joining unrelated roots.
-                groups["no-session:\(rootID)"] = [root]
+                let key = "no-session:\(rootID)"
+                groups[key] = [root]
+                sessionTitles[key] = (
+                    date: historyDate(owner.startedAt), id: owner.id, rootID: rootID,
+                    title: owner.sessionTitle ?? "Session \(String(rootID.prefix(8)))"
+                )
             }
         }
         return sorted(groups.flatMap { key, roots -> [HistoryNode] in
-            guard let sessionTitle = sessionTitles[key], roots.count > 1 else { return roots }
+            guard let sessionTitle = sessionTitles[key] else { return roots }
+            if roots.count == 1, let only = roots.first {
+                return [HistoryNode(
+                    id: only.id, label: sessionTitle.title, item: only.item,
+                    rootRunId: only.rootRunId, newest: only.newest, children: only.children
+                )]
+            }
             var children = sorted(roots)
             guard let firstIndex = children.firstIndex(where: { $0.rootRunId == sessionTitle.rootID }),
                   let firstItem = children[firstIndex].item else {

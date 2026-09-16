@@ -16,7 +16,7 @@ enum TraceSessionClientError: LocalizedError, Equatable {
         case .executableMissing: "Bundled trace-session-sidecar executable is missing."
         case .invalidBackend(let reason): "Invalid trace backend: \(reason)"
         case .incompatibleProtocol(let value):
-            "Trace-session protocol 1.0 is required\(value.map { "; sidecar selected \($0)" } ?? "")."
+            "Trace-session protocol 1.1 is required\(value.map { "; helper selected \($0)" } ?? "")."
         case .protocolViolation(let message): "Trace-session protocol error: \(message)"
         case .notInitialized: "Trace-session client is not initialized."
         case .remote(let code, let protocolCode, let message): "\(protocolCode ?? String(code)): \(message)"
@@ -27,7 +27,7 @@ enum TraceSessionClientError: LocalizedError, Equatable {
 }
 
 actor TraceSessionClient {
-    static let protocolVersion = "1.0"
+    static let protocolVersion = "1.1"
     typealias DiagnosticsHandler = @Sendable (String) async -> Void
     typealias TerminationHandler = @Sendable (Int32) async -> Void
 
@@ -117,6 +117,11 @@ actor TraceSessionClient {
             guard info.protocolVersion == Self.protocolVersion else {
                 throw TraceSessionClientError.incompatibleProtocol(info.protocolVersion)
             }
+            guard info.capabilities?.authoritativeSessionPresentation == true else {
+                throw TraceSessionClientError.protocolViolation(
+                    "authoritativeSessionPresentation capability is required"
+                )
+            }
             guard info.backend.readOnly else {
                 throw TraceSessionClientError.protocolViolation("backend is not read-only")
             }
@@ -138,10 +143,19 @@ actor TraceSessionClient {
     ) async throws -> [TraceSessionListItem] {
         try requireInitialized()
         let value = try JSONValue.encode(parameters)
-        return try decode(
+        let sessions: [TraceSessionListItem] = try decode(
             try await request(method: "trace/listSessions", params: value.objectValue ?? [:]),
             method: "trace/listSessions"
         )
+        guard sessions.allSatisfy({
+            !$0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }) else {
+            throw TraceSessionClientError.protocolViolation(
+                "trace/listSessions returned a blank title or name"
+            )
+        }
+        return sessions
     }
 
     func getTrace(rootRunId: String) async throws -> TraceReport {
