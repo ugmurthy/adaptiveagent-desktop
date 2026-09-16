@@ -207,17 +207,18 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(terminalMerge.sessionTitle, "Authoritative standalone title")
         XCTAssertEqual(terminalMerge.sessionName, "authoritative-standalone-title")
 
-        let first = item("first", session: "shared", time: "2026-09-07T09:00:00Z")
-        var second = item("second", session: "shared", time: "2026-09-08T09:00:00Z")
-        second.sessionTitle = "Prepared session title"
-        var titledFirst = first
-        titledFirst.sessionTitle = "Prepared session title"
-        let session = try XCTUnwrap(AppModel.historyTree(items: [second, titledFirst]).first)
+        var taskPreparation = item("task-preparation", session: "shared", time: "2026-09-08T07:00:00Z")
+        var agentSelection = item("agent-selection", session: "shared", time: "2026-09-08T08:00:00Z")
+        var mainRun = item("main-run", session: "shared", time: "2026-09-08T09:00:00Z")
+        taskPreparation.sessionTitle = "Prepared session title"
+        agentSelection.sessionTitle = "Prepared session title"
+        mainRun.sessionTitle = "Prepared session title"
+        let session = try XCTUnwrap(AppModel.historyTree(items: [mainRun, taskPreparation, agentSelection]).first)
         XCTAssertEqual(session.id, "session:shared")
-        XCTAssertEqual(session.label, "Prepared session title", "A trace-provided title takes precedence over the earliest root goal")
-        XCTAssertEqual(session.item?.id, "first", "The first run is represented by the session header rather than duplicated")
-        XCTAssertEqual(session.children.map(\.item?.id), ["second"])
-        XCTAssertEqual(session.runCount, 2)
+        XCTAssertEqual(session.label, "Prepared session title", "A trace-provided title takes precedence over the newest root goal")
+        XCTAssertEqual(session.item?.id, "main-run", "The newest run is represented by the session header rather than duplicated")
+        XCTAssertEqual(session.children.map(\.item?.id), ["agent-selection", "task-preparation"])
+        XCTAssertEqual(session.runCount, 3)
     }
 
     @MainActor
@@ -236,15 +237,14 @@ final class HistoryTests: XCTestCase {
             XCTAssertEqual(session.id, "session:session-research")
             XCTAssertEqual(session.label, "Prepared research session")
             XCTAssertEqual(session.runCount, 2, "Runs with the same non-empty session ID share one collapsed row")
-            XCTAssertEqual(session.item?.id, "root-c")
+            XCTAssertEqual(session.item?.id, "root-a")
             XCTAssertEqual(session.item?.sessionName, "prepared-research-session")
-            XCTAssertEqual(session.children.map(\.item?.id), ["root-a"])
+            XCTAssertEqual(session.children.map(\.item?.id), ["root-c"])
             model.setHistoryExpanded(true, node: session)
-            XCTAssertTrue(model.historyReports.isEmpty, "Expanding a session must not load every root")
-            model.setHistoryExpanded(true, node: try XCTUnwrap(session.children.first))
             try await fixture.wait { model.historyReports["root-a"] != nil }
-            let expanded = try XCTUnwrap(model.historyTree.first?.children.first)
-            model.setHistoryExpanded(true, node: try XCTUnwrap(expanded.children.first))
+            XCTAssertNil(model.historyReports["root-c"], "Expanding a session must not load every root")
+            let child = try XCTUnwrap(model.historyTree.first?.children.first { $0.item?.id == "child-a" })
+            model.setHistoryExpanded(true, node: child)
             try await fixture.wait { model.historyUsage["root-a"] != nil }
             XCTAssertEqual(model.historyItem(rootRunId: "grandchild-a")?.parentRunId, "child-a")
             model.selectHistoryRun("child-a")
@@ -276,7 +276,7 @@ final class HistoryTests: XCTestCase {
             XCTAssertTrue(model.expandedHistoryIDs.contains("run:run-b"))
             model.expandHistoryThread(containing: "root-a")
             XCTAssertTrue(model.expandedHistoryIDs.contains("session:session-research"))
-            XCTAssertTrue(model.expandedHistoryIDs.contains("run:root-a"))
+            XCTAssertFalse(model.expandedHistoryIDs.contains("run:root-a"), "The representative root is not duplicated as a child")
             let requests = try fixture.requests("runtime")
             XCTAssertEqual(requests.filter { $0.objectValue?["method"] == .string("run/inspect") }.count, 3)
             XCTAssertTrue(requests.allSatisfy { !$0.objectValue!["method"]!.stringValue!.hasPrefix("agent/") })

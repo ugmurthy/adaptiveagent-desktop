@@ -195,7 +195,7 @@ extension AppModel {
                                  rootID: rootID,
                                  title: owner.sessionTitle ?? "Session \(String(session.prefix(8)))")
                 if let current = sessionTitles[key] {
-                    if candidate.date < current.date || (candidate.date == current.date && candidate.id < current.id) {
+                    if candidate.date > current.date || (candidate.date == current.date && candidate.id < current.id) {
                         sessionTitles[key] = candidate
                     }
                 } else {
@@ -245,7 +245,7 @@ extension AppModel {
     func setHistoryExpanded(_ expanded: Bool, node: HistoryNode) {
         if expanded {
             expandedHistoryIDs.insert(node.id)
-            if let root = node.rootRunId { loadHistoryReport(root) }
+            if let root = node.rootRunId ?? node.item?.rootRunId { loadHistoryReport(root) }
         } else {
             expandedHistoryIDs.remove(node.id)
         }
