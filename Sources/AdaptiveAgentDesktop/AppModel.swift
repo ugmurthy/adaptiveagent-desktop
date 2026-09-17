@@ -1419,6 +1419,7 @@ final class AppModel: ObservableObject {
         let runId = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard isConnected, !runId.isEmpty else { return }
         let preferredTitle = displayTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let historicalItem = historyItem(rootRunId: runId)
 
         if let index = runs.firstIndex(where: { $0.runIds.contains(runId) }) {
             if let preferredTitle, !preferredTitle.isEmpty {
@@ -1433,13 +1434,24 @@ final class AppModel: ObservableObject {
 
         let recordID = UUID()
         let abbreviatedRunId = runId.count > 20 ? String(runId.prefix(17)) + "…" : runId
+        let historicalSessionTitle = historicalItem?.sessionTitle?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let historicalRunTitle = historicalItem?.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        var title = "Run \(abbreviatedRunId)"
+        if let historicalRunTitle, !historicalRunTitle.isEmpty { title = historicalRunTitle }
+        if let historicalSessionTitle, !historicalSessionTitle.isEmpty { title = historicalSessionTitle }
+        if let preferredTitle, !preferredTitle.isEmpty { title = preferredTitle }
         runs.insert(RunRecord(
             id: recordID,
-            runtimeSessionID: historyItem(rootRunId: runId)?.runtimeSessionID ?? selectedTab?.runtimeSessionID,
+            runtimeSessionID: historicalItem?.runtimeSessionID ?? selectedTab?.runtimeSessionID,
             agentName: selectedSession?.agentName ?? "",
             modelName: selectedSession?.configuration.model ?? "",
             kind: .run,
-            title: preferredTitle.flatMap { $0.isEmpty ? nil : $0 } ?? "Run \(abbreviatedRunId)",
+            title: title,
+            runGoal: historicalItem?.title,
+            sessionId: historicalItem?.sessionId,
+            sessionName: historicalItem?.sessionName,
+            authoritativeSessionTitle: historicalSessionTitle.flatMap { $0.isEmpty ? nil : $0 },
             runIds: [runId],
             status: .unknown
         ), at: 0)

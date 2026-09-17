@@ -137,6 +137,8 @@ for line in sys.stdin:
                 dict(id="write-completed",seq=4,createdAt="2026-09-08T10:01:30Z",type="tool.completed",runId=run,
                      stepId="write",toolCallId="write",payload=dict(toolName="write_file",assistantContent="The sources are ready. I’ll save the finished report.",
                      input=dict(path=str(home/"report.md")),output=dict(path=str(home/"report.md"))))])
+        elif runtime and method=="run/resume":
+            result=dict(status="success",runId=params["runId"],output="Resumed")
         elif method in ["shutdown","runtime/shutdown"]: result={}
         else:
             sys.exit(91)
@@ -147,6 +149,26 @@ for line in sys.stdin:
 }
 
 final class HistoryTests: XCTestCase {
+    @MainActor
+    func testResumingPersistedRunPreservesAuthoritativeHistoryTitle() async throws {
+        let fixture = try HistoryFixture()
+        do {
+            try await fixture.start()
+
+            fixture.model.runCommand("run/resume", runId: "root-a")
+
+            let record = try XCTUnwrap(fixture.model.runs.first)
+            XCTAssertEqual(record.title, "Prepared research session")
+            XCTAssertEqual(record.runGoal, "Research report")
+            XCTAssertEqual(record.sessionId, "session-research")
+            XCTAssertEqual(record.sessionName, "prepared-research-session")
+            XCTAssertEqual(record.authoritativeSessionTitle, "Prepared research session")
+            try await fixture.wait { fixture.model.runs.first?.isRequestInFlight == false }
+            XCTAssertEqual(fixture.model.runs.first?.title, "Prepared research session")
+        } catch { await fixture.close(); throw error }
+        await fixture.close()
+    }
+
     @MainActor
     func testInterruptedRunMovesToHistoryOnlyAfterItsRequestSettles() throws {
         let model = AppModel(workingDirectoryURL: URL(fileURLWithPath: "/tmp"))
