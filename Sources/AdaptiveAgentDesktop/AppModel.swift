@@ -232,6 +232,7 @@ final class AppModel: ObservableObject {
         var sessionId: String?
         var sessionName: String? = nil
         var authoritativeSessionTitle: String? = nil
+        var submittedRunId: String? = nil
         var runIds: [String] = []
         var status: RunStatus = .queued
         var output: JSONValue?
@@ -249,6 +250,7 @@ final class AppModel: ObservableObject {
         var auxiliaryErrorMessage: String?
 
         var latestRunId: String? { runIds.last }
+        var commandRunId: String? { submittedRunId ?? latestRunId }
         var hasRequestInFlight: Bool { isRequestInFlight || !auxiliaryOperations.isEmpty }
     }
 
@@ -1277,6 +1279,7 @@ final class AppModel: ObservableObject {
         if kind == .chat {
             record.chatMessages.append(ChatMessage(role: .user, content: text))
         }
+        record.submittedRunId = runId
         runs.insert(record, at: 0)
         bind(rootRunId: runId, to: recordID)
         tabs[tabIndex].selectedRunID = recordID
@@ -1321,6 +1324,7 @@ final class AppModel: ObservableObject {
             "transcript": .array(runs[index].chatMessages.map(\.protocolValue))
         ]
         if let sessionId = runs[index].sessionId { fields["sessionId"] = .string(sessionId) }
+        runs[index].submittedRunId = runId
         bind(rootRunId: runId, to: recordID)
         tabs[tabIndex].pendingChatMessage = text
         tabs[tabIndex].chatMessage = ""
@@ -1395,7 +1399,7 @@ final class AppModel: ObservableObject {
               let recordID = tab.selectedRunID else { return }
         let message = tab.steerMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let index = runs.firstIndex(where: { $0.id == recordID }),
-              let runId = runs[index].latestRunId,
+              let runId = runs[index].commandRunId,
               !runs[index].auxiliaryOperations.contains(.steer),
               !message.isEmpty else { return }
         runs[index].auxiliaryOperations.insert(.steer)
@@ -1452,6 +1456,7 @@ final class AppModel: ObservableObject {
             sessionId: historicalItem?.sessionId,
             sessionName: historicalItem?.sessionName,
             authoritativeSessionTitle: historicalSessionTitle.flatMap { $0.isEmpty ? nil : $0 },
+            submittedRunId: runId,
             runIds: [runId],
             status: .unknown
         ), at: 0)
@@ -1462,8 +1467,9 @@ final class AppModel: ObservableObject {
     }
 
     func runCommand(_ method: String, for recordID: UUID) {
-        guard let index = runs.firstIndex(where: { $0.id == recordID }),
-              let runId = runs[index].latestRunId else { return }
+        guard let index = runs.firstIndex(where: { $0.id == recordID }) else { return }
+        let runId = method == "run/interrupt" ? runs[index].commandRunId : runs[index].latestRunId
+        guard let runId else { return }
         if method == "run/inspect" { showInspection(for: recordID) }
         sendRunCommand(method, runId: runId, recordID: recordID)
     }
@@ -1861,9 +1867,11 @@ final class AppModel: ObservableObject {
             )
         case "run/interrupt":
             finishAuxiliaryOperation(.interrupt, for: recordID)
-            if let index = runs.firstIndex(where: { $0.id == recordID }), runs[index].status.isActive {
-                runs[index].status = .interrupted
-                finishActivityTimer(at: index)
+            guard let object = result.objectValue,
+                  object["interrupted"] == .bool(true),
+                  let responseRunId = object["runId"]?.stringValue,
+                  requestedRunId == nil || responseRunId == requestedRunId else {
+                throw RuntimeClientError.protocolViolation("run/interrupt returned an invalid acknowledgement")
             }
         case "run/recover":
             guard let recoveredResult = result.objectValue?["result"] else {
@@ -1987,6 +1995,9 @@ final class AppModel: ObservableObject {
                let index = recordIndex(forRunId: runId) {
                 acknowledgeResolvingInteraction(at: index)
             }
+        case "run.interrupted":
+            guard isRootEvent else { return }
+            handleStatusChange(payload["status"]?.stringValue ?? "interrupted", runId: runId)
         case "approval.requested":
             guard let index = recordIndex(forRunId: runId) else { return }
             resolvedInteractions.remove(runs[index].id)
@@ -2525,6 +2536,12 @@ final class AppModel: ObservableObject {
             beginActivityTimer(at: index)
         } else if !status.isActive {
             finishActivityTimer(at: index)
+            if status == .interrupted {
+                runs[index].isRequestInFlight = false
+                runs[index].interaction = nil
+                resolvedInteractions.remove(runs[index].id)
+                clearPendingChatMessage(for: runs[index].id)
+            }
         }
     }
 

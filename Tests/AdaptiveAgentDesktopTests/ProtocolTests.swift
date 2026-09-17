@@ -1538,11 +1538,17 @@ done
         let recordID = UUID()
         model.runs = [AppModel.RunRecord(id: recordID, kind: .run, title: "Write a program", isRequestInFlight: true)]
         model.acceptResult(.object(["runId": .string("execution-run")]), for: recordID)
+        model.runs[0].submittedRunId = "execution-run"
         model.acceptResult(.object([
             "status": .string("clarification_requested"),
             "runId": .string("preparation-run"),
             "message": .string("What should the program do?")
         ]), for: recordID)
+        XCTAssertEqual(
+            model.runs[0].commandRunId,
+            "execution-run",
+            "Run Actions must target the submitted execution ID rather than a later task-preparation ID"
+        )
         model.runs[0].interaction?.isResolving = true
         model.runs[0].isRequestInFlight = true
         model.acceptResult(.object([
@@ -1563,6 +1569,72 @@ done
         XCTAssertNil(model.runs[0].interaction)
         XCTAssertEqual(model.runs[0].status, .running)
         XCTAssertTrue(model.runs[0].isRequestInFlight)
+    }
+
+    @MainActor
+    func testSteerAndInterruptTargetSubmittedRunInsteadOfLaterPreparationRun() async throws {
+        let workspace = try temporaryDirectoryURL()
+        let requestLog = temporaryFileURL(named: "submitted-run-command-requests.log")
+        let executable = try makeRuntimeScript(#"""
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.19","bridgeVersion":"0.1.0","pid":123}}'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
+  id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
+  method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
+  run_id="$(printf '%s' "$line" | sed -E 's/.*"runId":"([^"]+)".*/\1/')"
+  case "$method" in
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.19"}}' ;;
+    runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[]}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.19","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
+    run/steer) printf '{"jsonrpc":"2.0","id":"%s","result":{"runId":"%s","accepted":true}}\n' "$id" "$run_id" ;;
+    run/interrupt) printf '{"jsonrpc":"2.0","id":"%s","result":{"runId":"%s","interrupted":true}}\n' "$id" "$run_id" ;;
+    runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
+    *) exit 91 ;;
+  esac
+done
+"""#)
+        let model = AppModel(
+            client: RuntimeClient(executableURL: executable, responseTimeout: .seconds(2)),
+            workingDirectoryURL: workspace
+        )
+        model.bootstrap()
+        for _ in 0..<100 where !model.isConnected {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(model.isConnected, model.status)
+
+        let recordID = UUID()
+        model.runs = [.init(
+            id: recordID,
+            kind: .run,
+            title: "Active execution",
+            submittedRunId: "active-run",
+            runIds: ["active-run", "completed-preparation-run"],
+            status: .running,
+            isRequestInFlight: true
+        )]
+        model.selectRun(recordID)
+        let tabID = try XCTUnwrap(model.selectedTabID)
+        model.setSteerMessage("Focus on tests", forTab: tabID)
+        model.steerRun(in: tabID)
+        for _ in 0..<100 where model.runs[0].auxiliaryOperations.contains(.steer) {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+
+        model.runCommand("run/interrupt", for: recordID)
+        for _ in 0..<100 where model.runs[0].auxiliaryOperations.contains(.interrupt) {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+
+        let requests = try String(contentsOf: requestLog, encoding: .utf8)
+            .split(separator: "\n")
+            .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+        for method in ["run/steer", "run/interrupt"] {
+            let request = try XCTUnwrap(requests.first { $0.objectValue?["method"] == .string(method) })
+            XCTAssertEqual(request.objectValue?["params"]?.objectValue?["runId"], .string("active-run"))
+        }
+        XCTAssertEqual(model.runs[0].status, .running, "An interrupt acknowledgement alone is not proof that the run stopped")
+        await model.shutdown()
     }
 
     @MainActor
@@ -1681,6 +1753,53 @@ done
             "interrupted": .bool(true)
         ]), method: "run/interrupt", for: recordID)
         XCTAssertEqual(model.runs[0].status, .succeeded, "A no-op interrupt must preserve terminal status")
+    }
+
+    @MainActor
+    func testInterruptAcknowledgementWaitsForAuthoritativeRuntimeEvent() throws {
+        let model = AppModel(workingDirectoryURL: try temporaryDirectoryURL())
+        let recordID = UUID()
+        model.runs = [AppModel.RunRecord(
+            id: recordID,
+            kind: .run,
+            title: "Interrupting run",
+            status: .running
+        )]
+        model.acceptResult(.object(["runId": .string("root-run")]), for: recordID)
+        model.runs[0].status = .waitingForClarification
+        model.runs[0].interaction = .init(
+            runId: "root-run",
+            message: "Which target?",
+            kind: .clarification(suggestedQuestions: [])
+        )
+        model.runs[0].activityStartedAt = Date(timeIntervalSince1970: 1_789_000_000)
+        model.runs[0].isRequestInFlight = true
+        model.runs[0].auxiliaryOperations = [.interrupt]
+
+        try model.acceptRunCommandResult(.object([
+            "runId": .string("root-run"),
+            "interrupted": .bool(true)
+        ]), method: "run/interrupt", for: recordID, requestedRunId: "root-run")
+
+        XCTAssertEqual(model.runs[0].status, .waitingForClarification)
+        XCTAssertTrue(model.runs[0].isRequestInFlight)
+        XCTAssertTrue(model.runs[0].auxiliaryOperations.isEmpty)
+        XCTAssertNotNil(model.runs[0].interaction)
+        XCTAssertNil(model.runs[0].activityFinishedAt)
+
+        model.receive(method: "agent/event", params: .object([
+            "type": .string("run.status_changed"),
+            "runId": .string("root-run"),
+            "payload": .object([
+                "rootRunId": .string("root-run"),
+                "toStatus": .string("interrupted")
+            ])
+        ]))
+
+        XCTAssertEqual(model.runs[0].status, .interrupted)
+        XCTAssertFalse(model.runs[0].isRequestInFlight)
+        XCTAssertNil(model.runs[0].interaction)
+        XCTAssertNotNil(model.runs[0].activityFinishedAt)
     }
 
     func testRuntimeProcessUsesSuppliedWorkingDirectory() async throws {
