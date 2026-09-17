@@ -1732,7 +1732,11 @@ final class AppModel: ObservableObject {
         removePendingAssignment(recordID)
         guard let object = result.objectValue,
               let index = runs.firstIndex(where: { $0.id == recordID }) else { return }
-        runs[index].isRequestInFlight = false
+        let isInteractionAcknowledgement = runs[index].interaction?.isResolving == true
+            && object["status"] == nil
+        if !isInteractionAcknowledgement {
+            runs[index].isRequestInFlight = false
+        }
         clearPendingChatMessage(for: recordID)
 
         let runId = object["runId"]?.stringValue
@@ -1788,11 +1792,7 @@ final class AppModel: ObservableObject {
                 )
             }
         default:
-            if runs[index].interaction?.isResolving == true {
-                runs[index].interaction = nil
-                runs[index].status = .running
-                resolvedInteractions.insert(recordID)
-            }
+            break
         }
     }
 
@@ -1913,7 +1913,10 @@ final class AppModel: ObservableObject {
                     removePendingAssignment(pendingID)
                 }
                 updateStatus(.running, forRunId: runId)
-                if let index = recordIndex(forRunId: runId) { beginActivityTimer(at: index) }
+                if let index = recordIndex(forRunId: runId) {
+                    acknowledgeResolvingInteraction(at: index)
+                    beginActivityTimer(at: index)
+                }
                 loadAuthoritativeSessionPresentation(rootRunId: rootRunId)
             }
             return
@@ -1940,7 +1943,15 @@ final class AppModel: ObservableObject {
         case "run.started":
             guard isRootEvent else { return }
             updateStatus(.running, forRunId: runId)
-            if let index = recordIndex(forRunId: runId) { beginActivityTimer(at: index) }
+            if let index = recordIndex(forRunId: runId) {
+                acknowledgeResolvingInteraction(at: index)
+                beginActivityTimer(at: index)
+            }
+        case "run.resumed":
+            guard isRootEvent, let index = recordIndex(forRunId: runId) else { return }
+            acknowledgeResolvingInteraction(at: index)
+            runs[index].status = .running
+            beginActivityTimer(at: index)
         case "run.completed":
             guard isRootEvent, let index = recordIndex(forRunId: runId) else { return }
             runs[index].status = .succeeded
@@ -1960,6 +1971,10 @@ final class AppModel: ObservableObject {
         case "run.status_changed":
             guard isRootEvent else { return }
             handleStatusChange(payload["toStatus"]?.stringValue, runId: runId)
+            if payload["toStatus"]?.stringValue == "running",
+               let index = recordIndex(forRunId: runId) {
+                acknowledgeResolvingInteraction(at: index)
+            }
         case "approval.requested":
             guard let index = recordIndex(forRunId: runId) else { return }
             resolvedInteractions.remove(runs[index].id)
@@ -2483,6 +2498,12 @@ final class AppModel: ObservableObject {
     private func updateStatus(_ status: RunStatus, forRunId runId: String) {
         guard let index = recordIndex(forRunId: runId) else { return }
         runs[index].status = status
+    }
+
+    private func acknowledgeResolvingInteraction(at index: Int) {
+        guard runs[index].interaction?.isResolving == true else { return }
+        runs[index].interaction = nil
+        runs[index].status = .running
     }
 
     private func handleStatusChange(_ status: String?, runId: String) {

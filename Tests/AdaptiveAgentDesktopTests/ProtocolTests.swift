@@ -1443,9 +1443,18 @@ done
         ]), for: recordID)
         XCTAssertEqual(model.runs[0].interaction?.runId, "child-run", "the paused root response must not replace the requesting child run")
         model.runs[0].interaction?.isResolving = true
+        model.runs[0].isRequestInFlight = true
         model.acceptResult(.object(["runId": .string("child-run"), "approved": .bool(true)]), for: recordID)
+        XCTAssertNotNil(model.runs[0].interaction, "an approval acknowledgement alone must not dismiss the resolving card")
+        XCTAssertTrue(model.runs[0].isRequestInFlight)
+        model.receive(method: "agent/event", params: .object([
+            "type": .string("run.started"),
+            "runId": .string("root-run"),
+            "payload": .object(["rootRunId": .string("root-run")])
+        ]))
         XCTAssertNil(model.runs[0].interaction)
         XCTAssertEqual(model.runs[0].status, .running)
+        XCTAssertTrue(model.runs[0].isRequestInFlight)
         XCTAssertEqual(model.runs[0].latestRunId, "root-run")
 
         model.receive(method: "agent/event", params: toolCompletedEvent(
@@ -1521,6 +1530,63 @@ done
             model.runs[0].activities.contains(where: { $0.isFinalAssistantMessage }),
             "A child result must not be presented as the root assistant's final answer"
         )
+    }
+
+    @MainActor
+    func testTargetRunCreationAcknowledgesResolvingTaskPreparationClarification() throws {
+        let model = AppModel(workingDirectoryURL: try temporaryDirectoryURL())
+        let recordID = UUID()
+        model.runs = [AppModel.RunRecord(id: recordID, kind: .run, title: "Write a program", isRequestInFlight: true)]
+        model.acceptResult(.object(["runId": .string("execution-run")]), for: recordID)
+        model.acceptResult(.object([
+            "status": .string("clarification_requested"),
+            "runId": .string("preparation-run"),
+            "message": .string("What should the program do?")
+        ]), for: recordID)
+        model.runs[0].interaction?.isResolving = true
+        model.runs[0].isRequestInFlight = true
+        model.acceptResult(.object([
+            "runId": .string("preparation-run"),
+            "accepted": .bool(true)
+        ]), for: recordID)
+
+        XCTAssertNotNil(model.runs[0].interaction, "an acknowledgement alone must not dismiss the resolving clarification")
+        XCTAssertEqual(model.runs[0].status, .waitingForClarification)
+        XCTAssertTrue(model.runs[0].isRequestInFlight)
+
+        model.receive(method: "agent/event", params: .object([
+            "type": .string("run.created"),
+            "runId": .string("execution-run"),
+            "payload": .object(["rootRunId": .string("execution-run")])
+        ]))
+
+        XCTAssertNil(model.runs[0].interaction)
+        XCTAssertEqual(model.runs[0].status, .running)
+        XCTAssertTrue(model.runs[0].isRequestInFlight)
+    }
+
+    @MainActor
+    func testRepeatedTaskPreparationClarificationReplacesResolvingInteraction() throws {
+        let model = AppModel(workingDirectoryURL: try temporaryDirectoryURL())
+        let recordID = UUID()
+        model.runs = [AppModel.RunRecord(id: recordID, kind: .run, title: "Write a program")]
+        model.acceptResult(.object([
+            "status": .string("clarification_requested"),
+            "runId": .string("preparation-run-1"),
+            "message": .string("What should the program do?")
+        ]), for: recordID)
+        model.runs[0].interaction?.isResolving = true
+
+        model.acceptResult(.object([
+            "status": .string("clarification_requested"),
+            "runId": .string("preparation-run-2"),
+            "message": .string("Which platform should it target?")
+        ]), for: recordID)
+
+        XCTAssertEqual(model.runs[0].interaction?.runId, "preparation-run-2")
+        XCTAssertEqual(model.runs[0].interaction?.message, "Which platform should it target?")
+        XCTAssertEqual(model.runs[0].status, .waitingForClarification)
+        XCTAssertFalse(model.runs[0].interaction?.isResolving ?? true)
     }
 
     @MainActor
