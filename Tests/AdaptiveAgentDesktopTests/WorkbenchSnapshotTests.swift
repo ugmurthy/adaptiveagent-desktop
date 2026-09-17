@@ -14,7 +14,7 @@ final class WorkbenchSnapshotTests: XCTestCase {
         if let icon = Bundle.main.url(forResource: "AppIcon", withExtension: "icns") {
             NSApplication.shared.applicationIconImage = NSImage(contentsOf: icon)
         }
-        for state in ["ready", "chat", "disconnected", "active", "attention", "timeline", "dark", "expanded", "inspector"] {
+        for state in ["ready", "chat", "disconnected", "active", "interrupted", "attention", "timeline", "dark", "expanded", "inspector"] {
             let model = AppModel(
                 client: RuntimeClient(executableURL: URL(fileURLWithPath: "/nonexistent/development-preview-runtime")),
                 workingDirectoryURL: URL(fileURLWithPath: "/tmp/Workbench Preview")
@@ -33,14 +33,21 @@ final class WorkbenchSnapshotTests: XCTestCase {
                 model.agentName = "Research Assistant with a deliberately long profile name for narrow windows"
                 model.setDraftText("Review this workspace and suggest three useful next steps.", forTab: tabID)
             }
-            if state == "active" || state == "attention" || state == "timeline" {
+            if state == "active" || state == "interrupted" || state == "attention" || state == "timeline" {
                 var record = AppModel.RunRecord(
                     id: UUID(), agentName: "Research Assistant", modelName: "claude-sonnet-4.5", kind: .run,
                     title: "Review the workspace and recommend next steps")
                 record.runIds = ["development-preview"]
                 record.selectedAgentId = "research-assistant"
                 record.selectedAgentName = "Research Assistant"
-                record.status = state == "active" ? .running : state == "timeline" ? .succeeded : .waitingForApproval
+                record.status = state == "active" || state == "interrupted" ? .running : state == "timeline" ? .succeeded : .waitingForApproval
+                record.isRequestInFlight = state == "interrupted"
+                record.activityStartedAt = state == "interrupted" ? Date() : nil
+                if state == "interrupted" {
+                    record.sessionId = "development-session"
+                    record.sessionName = "review-workspace"
+                    record.authoritativeSessionTitle = record.title
+                }
                 if state == "attention" {
                     record.interaction = .init(
                         runId: "development-preview", approvalId: "preview-approval",
@@ -100,6 +107,12 @@ final class WorkbenchSnapshotTests: XCTestCase {
             window.contentView = view
             window.makeKeyAndOrderFront(nil)
             RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+            if state == "interrupted" {
+                model.runs[0].status = .interrupted
+                RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+                model.runs[0].isRequestInFlight = false
+                RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+            }
             if state == "expanded" {
                 // Exercise the native disclosure at the fixed 980-point fixture size.
                 let point = NSPoint(x: 306, y: view.bounds.height - 596)
@@ -120,6 +133,33 @@ final class WorkbenchSnapshotTests: XCTestCase {
             try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent("native-\(state).png"))
             XCTAssertGreaterThan(data.count, 1000)
             window.orderOut(nil)
+
+            if state == "interrupted" {
+                let node = try XCTUnwrap(model.historyTree.first)
+                let rowView = NSHostingView(
+                    rootView: HistoryTreeRow(node: node, isThreadRoot: true) { _ in }
+                        .environmentObject(model)
+                        .padding(8)
+                        .background(Color(nsColor: .controlBackgroundColor))
+                )
+                let rowWindow = NSWindow(
+                    contentRect: NSRect(x: 0, y: 0, width: 480, height: 72),
+                    styleMask: [.borderless], backing: .buffered, defer: false
+                )
+                rowWindow.appearance = NSAppearance(named: .aqua)
+                rowWindow.contentView = rowView
+                rowWindow.orderFront(nil)
+                RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                rowView.layoutSubtreeIfNeeded()
+                let rowBitmap = try XCTUnwrap(rowView.bitmapImageRepForCachingDisplay(in: rowView.bounds))
+                rowView.cacheDisplay(in: rowView.bounds, to: rowBitmap)
+                let rowData = try XCTUnwrap(rowBitmap.representation(using: .png, properties: [:]))
+                try rowData.write(
+                    to: URL(fileURLWithPath: directory).appendingPathComponent("native-interrupted-sidebar-row.png")
+                )
+                XCTAssertGreaterThan(rowData.count, 1000)
+                rowWindow.orderOut(nil)
+            }
         }
     }
 

@@ -18,6 +18,7 @@ extension AppModel {
         let runIds: [String]
         let status: RunStatus
         let activityStartedAt: Date?
+        let isRequestInFlight: Bool
     }
 
     struct HistoryDetail: Equatable {
@@ -86,7 +87,7 @@ extension AppModel {
         if cachedHistoryItemsRevision == historyPresentationRevision {
             return cachedAllHistoryItems
         }
-        let local = runs.filter { !$0.status.isActive }.flatMap { record in
+        let local = runs.filter { !$0.status.isActive && !$0.isRequestInFlight }.flatMap { record in
             record.runIds.map { runId in
                 HistoryItem(
                     rootRunId: historyRootRunId(for: runId), runId: runId,
@@ -116,7 +117,7 @@ extension AppModel {
                 ))
             }
         }
-        let active = Set(runs.filter { $0.status.isActive }.flatMap(\.runIds))
+        let active = Set(runs.filter { $0.status.isActive || $0.isRequestInFlight }.flatMap(\.runIds))
         cachedAllHistoryItems = mergeHistory([], items)
             .filter { !active.contains($0.id) && !active.contains($0.rootRunId) }
         cachedHistoryItemsRevision = historyPresentationRevision
@@ -388,7 +389,8 @@ extension AppModel {
                 sessionId: $0.sessionId,
                 runIds: $0.runIds,
                 status: $0.status,
-                activityStartedAt: $0.activityStartedAt
+                activityStartedAt: $0.activityStartedAt,
+                isRequestInFlight: $0.isRequestInFlight
             )
         }
     }

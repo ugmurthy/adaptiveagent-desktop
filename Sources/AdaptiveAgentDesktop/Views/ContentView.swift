@@ -258,7 +258,9 @@ struct ContentView: View {
         }
     }
 
-    private var activeRuns: [AppModel.RunRecord] { model.runs.filter { $0.status.isActive } }
+    private var activeRuns: [AppModel.RunRecord] {
+        model.runs.filter { $0.status.isActive || $0.isRequestInFlight }
+    }
     private var historySearchIsEmpty: Bool {
         model.historySearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }

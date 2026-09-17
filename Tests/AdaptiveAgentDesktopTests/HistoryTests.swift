@@ -148,6 +148,32 @@ for line in sys.stdin:
 
 final class HistoryTests: XCTestCase {
     @MainActor
+    func testInterruptedRunMovesToHistoryOnlyAfterItsRequestSettles() throws {
+        let model = AppModel(workingDirectoryURL: URL(fileURLWithPath: "/tmp"))
+        let recordID = UUID()
+        model.runs = [.init(
+            id: recordID,
+            kind: .run,
+            title: "Interrupted work",
+            runIds: ["interrupted-run"],
+            status: .interrupted,
+            activityStartedAt: Date(timeIntervalSince1970: 1_789_000_000),
+            isRequestInFlight: true
+        )]
+
+        XCTAssertTrue(
+            model.allHistoryItems.isEmpty,
+            "A terminal status must not move a row into History while the original request is still settling"
+        )
+
+        model.runs[0].isRequestInFlight = false
+
+        let item = try XCTUnwrap(model.allHistoryItems.first)
+        XCTAssertEqual(item.id, "interrupted-run")
+        XCTAssertEqual(item.status, "Interrupted")
+    }
+
+    @MainActor
     func testDraftTypingDoesNotRebuildHistoryPresentation() throws {
         let model = AppModel(workingDirectoryURL: URL(fileURLWithPath: "/tmp"))
         _ = model.historyTree
