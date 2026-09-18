@@ -179,6 +179,85 @@ struct AttachmentCapabilities: Codable, Equatable, Sendable {
     let reason: String?
 }
 
+enum ExecutionMode: String, Codable, Equatable, Sendable {
+    case direct
+    case catalog
+}
+
+enum ExecutionTraceTarget: Codable, Equatable, Sendable {
+    case rootRun(String)
+    case session(String)
+
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case rootRunId
+        case sessionId
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decode(String.self, forKey: .kind) {
+        case "root-run":
+            self = .rootRun(try container.decode(String.self, forKey: .rootRunId))
+        case "session":
+            self = .session(try container.decode(String.self, forKey: .sessionId))
+        default:
+            throw DecodingError.dataCorruptedError(
+                forKey: .kind,
+                in: container,
+                debugDescription: "Unsupported execution trace target"
+            )
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .rootRun(let rootRunId):
+            try container.encode("root-run", forKey: .kind)
+            try container.encode(rootRunId, forKey: .rootRunId)
+        case .session(let sessionId):
+            try container.encode("session", forKey: .kind)
+            try container.encode(sessionId, forKey: .sessionId)
+        }
+    }
+
+    var protocolValue: JSONValue {
+        switch self {
+        case .rootRun(let rootRunId):
+            .object(["kind": .string("root-run"), "rootRunId": .string(rootRunId)])
+        case .session(let sessionId):
+            .object(["kind": .string("session"), "sessionId": .string(sessionId)])
+        }
+    }
+
+    var identifier: String {
+        switch self {
+        case .rootRun(let rootRunId): rootRunId
+        case .session(let sessionId): sessionId
+        }
+    }
+}
+
+struct ExecutionStage: Codable, Equatable, Sendable {
+    let nodeId: String
+    let stage: String
+    let agentId: String
+    let runId: String
+    let rootRunId: String
+    let status: String
+}
+
+struct DesktopExecutionResult: Codable, Equatable, Sendable {
+    let executionId: String
+    let mode: ExecutionMode
+    let status: String
+    let finalRunId: String?
+    let traceTarget: ExecutionTraceTarget
+    let stages: [ExecutionStage]?
+    let result: JSONValue?
+}
+
 struct RuntimeInitializationResult: Codable, Equatable, Sendable {
     struct Agent: Codable, Equatable, Sendable {
         let id: String

@@ -232,6 +232,10 @@ final class AppModel: ObservableObject {
         var sessionId: String?
         var sessionName: String? = nil
         var authoritativeSessionTitle: String? = nil
+        var executionId: String? = nil
+        var executionMode: ExecutionMode? = nil
+        var traceTarget: ExecutionTraceTarget? = nil
+        var executionStages: [ExecutionStage] = []
         var submittedRunId: String? = nil
         var runIds: [String] = []
         var status: RunStatus = .queued
@@ -248,6 +252,8 @@ final class AppModel: ObservableObject {
         var isRequestInFlight = false
         var auxiliaryOperations: Set<AuxiliaryOperation> = []
         var auxiliaryErrorMessage: String?
+        var submissionDraftText: String? = nil
+        var submissionDraftAttachments: [AttachmentDescriptor] = []
 
         var latestRunId: String? { runIds.last }
         var commandRunId: String? { submittedRunId ?? latestRunId }
@@ -1270,11 +1276,14 @@ final class AppModel: ObservableObject {
             title: Self.neutralSessionTitle(sessionId),
             runGoal: kind == .run ? text : nil,
             sessionId: sessionId,
+            executionId: kind == .run ? runId : nil,
             status: .queued,
             attachments: attachments.map {
                 SubmittedAttachment(id: $0.attachmentId, kind: $0.kind, name: $0.name, sizeBytes: $0.sizeBytes)
             },
-            isRequestInFlight: true
+            isRequestInFlight: true,
+            submissionDraftText: text,
+            submissionDraftAttachments: attachments
         )
         if kind == .chat {
             record.chatMessages.append(ChatMessage(role: .user, content: text))
@@ -1289,7 +1298,8 @@ final class AppModel: ObservableObject {
         tabs[tabIndex].scrollPosition = nil
 
         let method = kind == .run ? "agent/run" : "agent/chat"
-        var fields: [String: JSONValue] = ["runId": .string(runId)]
+        let identityKey = kind == .run ? "executionId" : "runId"
+        var fields: [String: JSONValue] = [identityKey: .string(runId)]
         if kind == .run {
             fields["goal"] = .string(text)
             if !attachments.isEmpty {
@@ -1400,6 +1410,7 @@ final class AppModel: ObservableObject {
         let message = tab.steerMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let index = runs.firstIndex(where: { $0.id == recordID }),
               let runId = runs[index].commandRunId,
+              runs[index].executionMode != .catalog,
               !runs[index].auxiliaryOperations.contains(.steer),
               !message.isEmpty else { return }
         runs[index].auxiliaryOperations.insert(.steer)
@@ -1431,8 +1442,7 @@ final class AppModel: ObservableObject {
             }
             let recordID = runs[index].id
             selectRun(recordID)
-            if method == "run/inspect" { showInspection(for: recordID) }
-            sendRunCommand(method, runId: runId, recordID: recordID)
+            runCommand(method, for: recordID)
             return
         }
 
@@ -1468,6 +1478,14 @@ final class AppModel: ObservableObject {
 
     func runCommand(_ method: String, for recordID: UUID) {
         guard let index = runs.firstIndex(where: { $0.id == recordID }) else { return }
+        if let executionId = runs[index].executionId,
+           ["run/inspect", "run/interrupt", "run/resume"].contains(method) {
+            let executionMethod = method.replacingOccurrences(of: "run/", with: "execution/")
+            if method == "run/inspect" { showInspection(for: recordID) }
+            sendExecutionCommand(executionMethod, executionId: executionId, recordID: recordID)
+            return
+        }
+        guard runs[index].executionMode != .catalog else { return }
         let runId = method == "run/interrupt" ? runs[index].commandRunId : runs[index].latestRunId
         guard let runId else { return }
         if method == "run/inspect" { showInspection(for: recordID) }
@@ -1532,6 +1550,44 @@ final class AppModel: ObservableObject {
             } catch {
                 if let auxiliaryOperation {
                     auxiliaryRequestFailed(error, operation: auxiliaryOperation, for: recordID)
+                } else {
+                    recordRequestFailed(error, for: recordID)
+                }
+            }
+        }
+    }
+
+    private func sendExecutionCommand(_ method: String, executionId: String, recordID: UUID) {
+        guard let index = runs.firstIndex(where: { $0.id == recordID }) else { return }
+        let longRunning = method == "execution/resume"
+        let operation: AuxiliaryOperation? = switch method {
+        case "execution/inspect": .inspect
+        case "execution/interrupt": .interrupt
+        default: nil
+        }
+        if let operation {
+            guard !runs[index].auxiliaryOperations.contains(operation) else { return }
+            runs[index].auxiliaryOperations.insert(operation)
+            runs[index].auxiliaryErrorMessage = nil
+        } else {
+            guard !runs[index].isRequestInFlight else { return }
+            runs[index].isRequestInFlight = true
+            runs[index].errorMessage = nil
+            runs[index].status = .running
+            beginActivityTimer(at: index)
+        }
+        Task {
+            do {
+                guard let client = client(for: recordID) else { return }
+                let result = try await client.send(
+                    method: method,
+                    params: ["executionId": .string(executionId)],
+                    timeoutPolicy: longRunning ? .none : .standard
+                )
+                try acceptExecutionCommandResult(result, method: method, for: recordID)
+            } catch {
+                if let operation {
+                    auxiliaryRequestFailed(error, operation: operation, for: recordID)
                 } else {
                     recordRequestFailed(error, for: recordID)
                 }
@@ -1747,9 +1803,23 @@ final class AppModel: ObservableObject {
     // Internal for focused event/result tests.
     func acceptResult(_ result: JSONValue, for recordID: UUID) {
         appendEvent("Response\n\(result.prettyPrinted)")
+        if result.objectValue?["executionId"] != nil || result.objectValue?["mode"] != nil {
+            do {
+                let execution = try result.decode(DesktopExecutionResult.self)
+                try applyExecution(execution, rawValue: result, to: recordID, settlesRequest: true)
+            } catch {
+                recordRequestFailed(
+                    RuntimeClientError.protocolViolation("invalid execution result"),
+                    for: recordID
+                )
+            }
+            return
+        }
         removePendingAssignment(recordID)
         guard let object = result.objectValue,
               let index = runs.firstIndex(where: { $0.id == recordID }) else { return }
+        runs[index].submissionDraftText = nil
+        runs[index].submissionDraftAttachments = []
         let isInteractionAcknowledgement = runs[index].interaction?.isResolving == true
             && object["status"] == nil
         if !isInteractionAcknowledgement {
@@ -1811,6 +1881,63 @@ final class AppModel: ObservableObject {
             }
         default:
             break
+        }
+    }
+
+    private func applyExecution(
+        _ execution: DesktopExecutionResult,
+        rawValue: JSONValue,
+        to recordID: UUID,
+        settlesRequest: Bool
+    ) throws {
+        guard !execution.executionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let index = runs.firstIndex(where: { $0.id == recordID }) else {
+            throw RuntimeClientError.protocolViolation("execution result is missing its execution ID")
+        }
+        let expectedTraceTarget: ExecutionTraceTarget = execution.mode == .catalog
+            ? .session(execution.executionId) : .rootRun(execution.executionId)
+        guard execution.traceTarget == expectedTraceTarget else {
+            throw RuntimeClientError.protocolViolation("execution result has an inconsistent trace target")
+        }
+        runs[index].executionId = execution.executionId
+        runs[index].executionMode = execution.mode
+        runs[index].traceTarget = execution.traceTarget
+        if let stages = execution.stages {
+            runs[index].executionStages = stages
+        }
+        if execution.mode == .catalog {
+            runs[index].sessionId = execution.executionId
+        }
+        if execution.mode == .direct {
+            bind(rootRunId: execution.executionId, to: recordID)
+        }
+        for stage in execution.stages ?? [] {
+            bind(rootRunId: stage.rootRunId, to: recordID)
+            runToRoot[stage.runId] = stage.rootRunId
+        }
+        if let finalRunId = execution.finalRunId {
+            bind(rootRunId: finalRunId, to: recordID)
+        }
+        if settlesRequest {
+            if let nestedResult = execution.result {
+                acceptResult(nestedResult, for: recordID)
+            } else {
+                runs[index].isRequestInFlight = false
+                if let status = runtimeStatus(execution.status) {
+                    runs[index].status = status
+                    if !status.isActive { finishActivityTimer(at: index) }
+                }
+                runs[index].submissionDraftText = nil
+                runs[index].submissionDraftAttachments = []
+            }
+            if !runs[index].status.isActive {
+                scheduleHistoryRefresh(sessionID: runs[index].runtimeSessionID)
+            }
+        } else {
+            runs[index].inspection = rawValue
+            if let status = runtimeStatus(execution.status) {
+                runs[index].status = status
+            }
         }
     }
 
@@ -1883,6 +2010,42 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // Internal for focused execution-envelope tests.
+    func acceptExecutionCommandResult(
+        _ result: JSONValue,
+        method: String,
+        for recordID: UUID
+    ) throws {
+        appendEvent("\(method) response\n\(Self.protocolDiagnostic(result))")
+        switch method {
+        case "execution/inspect":
+            defer { finishAuxiliaryOperation(.inspect, for: recordID) }
+            let execution = try result.decode(DesktopExecutionResult.self)
+            try applyExecution(execution, rawValue: result, to: recordID, settlesRequest: false)
+        case "execution/interrupt":
+            defer { finishAuxiliaryOperation(.interrupt, for: recordID) }
+            guard let object = result.objectValue,
+                  object["interrupted"] == .bool(true),
+                  let executionId = object["executionId"]?.stringValue,
+                  let index = runs.firstIndex(where: { $0.id == recordID }),
+                  runs[index].executionId == executionId else {
+                throw RuntimeClientError.protocolViolation("execution/interrupt returned an invalid acknowledgement")
+            }
+            if runs[index].executionMode == .catalog, runs[index].status.isActive {
+                runs[index].status = .interrupted
+                runs[index].isRequestInFlight = false
+                runs[index].interaction = nil
+                finishActivityTimer(at: index)
+                scheduleHistoryRefresh(sessionID: runs[index].runtimeSessionID)
+            }
+        case "execution/resume":
+            let execution = try result.decode(DesktopExecutionResult.self)
+            try applyExecution(execution, rawValue: result, to: recordID, settlesRequest: true)
+        default:
+            throw RuntimeClientError.protocolViolation("unsupported execution command")
+        }
+    }
+
     // Internal for focused protocol result tests.
     func acceptSteeringResult(_ result: JSONValue, for recordID: UUID) {
         appendEvent("run/steer response\n\(result.prettyPrinted)")
@@ -1903,6 +2066,14 @@ final class AppModel: ObservableObject {
               let runId = event["runId"]?.stringValue else { return }
         eventGenerationByRunID[runId, default: 0] &+= 1
         let payload = event["payload"]?.objectValue ?? [:]
+        let eventExecutionId = event["executionId"]?.stringValue ?? payload["executionId"]?.stringValue
+        let isExecutionStageEvent = eventExecutionId != nil && eventExecutionId != runId
+        if let eventExecutionId,
+           let recordID = runs.first(where: { $0.executionId == eventExecutionId })?.id {
+            let rootRunId = payload["rootRunId"]?.stringValue ?? runId
+            bind(rootRunId: rootRunId, to: recordID)
+            runToRoot[runId] = rootRunId
+        }
 
         if type == "delegate.spawned",
            let childRunId = payload["childRunId"]?.stringValue,
@@ -1950,7 +2121,7 @@ final class AppModel: ObservableObject {
                 type: type,
                 payload: payload,
                 sourceRunId: runId,
-                isRootEvent: isRootEvent,
+                isRootEvent: isRootEvent && !isExecutionStageEvent,
                 at: index
             )
         }
@@ -1973,7 +2144,8 @@ final class AppModel: ObservableObject {
             runs[index].status = .running
             beginActivityTimer(at: index)
         case "run.completed":
-            guard isRootEvent, let index = recordIndex(forRunId: runId) else { return }
+            guard isRootEvent, !isExecutionStageEvent,
+                  let index = recordIndex(forRunId: runId) else { return }
             runs[index].status = .succeeded
             finishActivityTimer(at: index)
             runs[index].isRequestInFlight = false
@@ -1981,7 +2153,8 @@ final class AppModel: ObservableObject {
             if let output = payload["output"] { applyOutput(output, to: index) }
             scheduleHistoryRefresh(sessionID: receivingSessionID ?? runs[index].runtimeSessionID)
         case "run.failed", "replan.required":
-            guard isRootEvent, let index = recordIndex(forRunId: runId) else { return }
+            guard isRootEvent, !isExecutionStageEvent,
+                  let index = recordIndex(forRunId: runId) else { return }
             runs[index].status = payload["code"]?.stringValue == "INTERRUPTED" ? .interrupted : .failed
             finishActivityTimer(at: index)
             runs[index].isRequestInFlight = false
@@ -1989,14 +2162,14 @@ final class AppModel: ObservableObject {
             runs[index].errorMessage = payload["error"]?.stringValue ?? "The run failed."
             scheduleHistoryRefresh(sessionID: receivingSessionID ?? runs[index].runtimeSessionID)
         case "run.status_changed":
-            guard isRootEvent else { return }
+            guard isRootEvent, !isExecutionStageEvent else { return }
             handleStatusChange(payload["toStatus"]?.stringValue, runId: runId)
             if payload["toStatus"]?.stringValue == "running",
                let index = recordIndex(forRunId: runId) {
                 acknowledgeResolvingInteraction(at: index)
             }
         case "run.interrupted":
-            guard isRootEvent else { return }
+            guard isRootEvent, !isExecutionStageEvent else { return }
             handleStatusChange(payload["status"]?.stringValue ?? "interrupted", runId: runId)
         case "approval.requested":
             guard let index = recordIndex(forRunId: runId) else { return }
@@ -2265,14 +2438,17 @@ final class AppModel: ObservableObject {
             let sessionID = historyItem(rootRunId: rootRunId)?.runtimeSessionID
                 ?? selectedTab?.runtimeSessionID
             guard let sessionID, let session = sessions[sessionID] else { return }
+            let target = runs.first(where: {
+                $0.executionId == rootRunId || $0.runIds.contains(rootRunId)
+            })?.traceTarget ?? .rootRun(rootRunId)
             do {
-                let report = try await session.traceClient.getTrace(rootRunId: rootRunId)
+                let report = try await session.traceClient.getTrace(target: target)
                 historyReports[rootRunId] = report
             } catch {
                 historyReportErrors[rootRunId] = redactedErrorDescription(error)
             }
             do {
-                historyUsage[rootRunId] = try await session.traceClient.usage(rootRunId: rootRunId)
+                historyUsage[rootRunId] = try await session.traceClient.usage(target: target)
                 historyUsageErrors.removeValue(forKey: rootRunId)
             } catch {
                 historyUsageErrors[rootRunId] = redactedErrorDescription(error)
@@ -2892,6 +3068,33 @@ final class AppModel: ObservableObject {
     private func recordRequestFailed(_ error: Error, for recordID: UUID) {
         removePendingAssignment(recordID)
         guard let index = runs.firstIndex(where: { $0.id == recordID }) else { return }
+        if runs[index].kind == .run, let draftText = runs[index].submissionDraftText {
+            let attachments = runs[index].submissionDraftAttachments
+            let message = error.localizedDescription
+            for tabIndex in tabs.indices where tabs[tabIndex].selectedRunID == recordID {
+                tabs[tabIndex].selectedRunID = nil
+                tabs[tabIndex].draftKind = .run
+                tabs[tabIndex].draftText = draftText
+                tabs[tabIndex].draftAttachments = attachments
+                tabs[tabIndex].attachmentErrorMessage = message
+                tabs[tabIndex].isSubmittingDraft = !attachments.isEmpty
+            }
+            let roots = Set(recordByRoot.compactMap { $0.value == recordID ? $0.key : nil })
+            runToRoot = runToRoot.filter { !roots.contains($0.value) }
+            recordByRoot = recordByRoot.filter { $0.value != recordID }
+            runs.remove(at: index)
+            if !attachments.isEmpty, let attachmentStore {
+                Task {
+                    try? await attachmentStore.restoreDraftOwnership(attachments)
+                    for tabIndex in tabs.indices where tabs[tabIndex].selectedRunID == nil
+                        && tabs[tabIndex].draftAttachments == attachments {
+                        tabs[tabIndex].isSubmittingDraft = false
+                    }
+                }
+            }
+            appendEvent("Error: \(message)")
+            return
+        }
         restorePendingChatMessage(for: recordID, at: index)
         runs[index].isRequestInFlight = false
         runs[index].status = .failed

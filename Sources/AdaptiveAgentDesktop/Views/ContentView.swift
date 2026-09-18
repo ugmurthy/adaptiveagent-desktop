@@ -1393,7 +1393,9 @@ private struct RunDetailView: View {
             if record.kind == .chat {
                 Divider()
                 chatComposer
-            } else if record.status == .running, record.latestRunId != nil {
+            } else if record.status == .running,
+                      record.executionId != nil || record.latestRunId != nil,
+                      record.executionMode != .catalog {
                 Divider()
                 steerComposer
             }
@@ -1413,6 +1415,15 @@ private struct RunDetailView: View {
                     .lineLimit(1)
                 HStack(spacing: 6) {
                     StatusBadge(status: record.status)
+                    if let executionMode = record.executionMode {
+                        Text(executionMode.rawValue.uppercased())
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(.quaternary.opacity(0.5), in: Capsule())
+                            .accessibilityLabel("Execution mode \(executionMode.rawValue)")
+                    }
                     let resolvedAgent = record.selectedAgentName.isEmpty
                         ? record.selectedAgentId
                         : record.selectedAgentName
@@ -1455,7 +1466,7 @@ private struct RunDetailView: View {
             }
             Spacer()
             if record.hasRequestInFlight { ProgressView().controlSize(.small) }
-            if record.status.isActive, record.latestRunId != nil {
+            if record.status.isActive, record.executionId != nil || record.latestRunId != nil {
                 Button("Interrupt", systemImage: "stop.fill", role: .destructive) {
                     model.runCommand("run/interrupt", for: record.id)
                 }
@@ -1467,7 +1478,7 @@ private struct RunDetailView: View {
             }) { method in
                 model.runCommand(method, for: record.id)
             }
-            .disabled(record.latestRunId == nil)
+            .disabled(record.executionId == nil && record.latestRunId == nil)
         }
         .padding(.horizontal, 22)
         .frame(height: 66)
@@ -1842,11 +1853,13 @@ private struct RunActionsMenu: View {
             Button("Resume", systemImage: "play") { action("run/resume") }
                 .disabled(record?.isRequestInFlight == true)
             Button("Retry", systemImage: "arrow.clockwise") { action("run/retry") }
-                .disabled(record?.isRequestInFlight == true)
+                .disabled(record?.isRequestInFlight == true || record?.executionMode == .catalog)
             Button("Recover", systemImage: "lifepreserver") { action("run/recover") }
-                .disabled(model.isWaitingForRunIdentity || record?.isRequestInFlight == true)
+                .disabled(model.isWaitingForRunIdentity || record?.isRequestInFlight == true
+                          || record?.executionMode == .catalog)
             Button("Continue", systemImage: "arrow.right.circle") { action("run/continue") }
-                .disabled(model.isWaitingForRunIdentity || record?.isRequestInFlight == true)
+                .disabled(model.isWaitingForRunIdentity || record?.isRequestInFlight == true
+                          || record?.executionMode == .catalog)
             Divider()
             Button("Interrupt", systemImage: "stop.fill", role: .destructive) { action("run/interrupt") }
                 .disabled(record?.auxiliaryOperations.contains(.interrupt) == true)

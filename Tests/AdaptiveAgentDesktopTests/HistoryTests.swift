@@ -150,6 +150,40 @@ for line in sys.stdin:
 
 final class HistoryTests: XCTestCase {
     @MainActor
+    func testCatalogExecutionHistoryUsesItsSessionTraceTarget() async throws {
+        let fixture = try HistoryFixture()
+        do {
+            try await fixture.start()
+            let executionID = "catalog-execution"
+            fixture.model.runs = [.init(
+                id: UUID(),
+                runtimeSessionID: fixture.model.selectedTab?.runtimeSessionID,
+                kind: .run,
+                title: "Analyze media",
+                runGoal: "Analyze media",
+                sessionId: executionID,
+                executionId: executionID,
+                executionMode: .catalog,
+                traceTarget: .session(executionID),
+                runIds: ["image-stage"],
+                status: .succeeded
+            )]
+
+            fixture.model.loadHistoryReport("image-stage", force: true)
+            try await fixture.wait { fixture.model.historyReports["image-stage"] != nil }
+
+            let request = try XCTUnwrap(try fixture.requests("trace").last {
+                $0.objectValue?["method"] == .string("trace/get")
+            })
+            XCTAssertEqual(
+                request.objectValue?["params"]?.objectValue?["target"],
+                .object(["kind": .string("session"), "sessionId": .string(executionID)])
+            )
+        } catch { await fixture.close(); throw error }
+        await fixture.close()
+    }
+
+    @MainActor
     func testResumingPersistedRunPreservesAuthoritativeHistoryTitle() async throws {
         let fixture = try HistoryFixture()
         do {

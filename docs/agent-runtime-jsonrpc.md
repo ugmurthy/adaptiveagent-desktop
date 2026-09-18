@@ -137,7 +137,7 @@ steering, and in-memory run state.
 | `agent/createDraft`                | `brief`                              | `generatorAgent`, `id`, `provider`, `model`                                                                             |
 | `agent/validateConfig`             | `agent`                              | `generatorAgent`, `targetPath`                                                                                           |
 | `agent/saveConfig`                 | `agent`, `expectedPath`, `expectedTargetFingerprint` | `generatorAgent`, `targetPath`, `overwrite`                                                           |
-| `agent/run`                        | `runId`, `goal`                      | `sessionId`, `input`, `attachments`                                                                                     |
+| `agent/run`                        | `goal`, one of `runId`/`executionId` | `sessionId`, `input`, `attachments`                                                                                     |
 | `agent/chat`                       | `runId`, `transcript`                | `sessionId`                                                                                                             |
 | `run/resume`                       | `runId`                              | -                                                                                                                       |
 | `run/retry`                        | `runId`                              | -                                                                                                                       |
@@ -145,6 +145,9 @@ steering, and in-memory run state.
 | `run/continue`                     | `runId`                              | -                                                                                                                       |
 | `run/interrupt`                    | `runId`                              | -                                                                                                                       |
 | `run/inspect`                      | `runId`                              | -                                                                                                                       |
+| `execution/resume`                 | `executionId`                        | -                                                                                                                       |
+| `execution/interrupt`              | `executionId`                        | -                                                                                                                       |
+| `execution/inspect`                | `executionId`                        | -                                                                                                                       |
 | `run/delete`                       | `runId`                              | -                                                                                                                       |
 | `run/replay`                       | `runId`                              | -                                                                                                                       |
 | `run/steer`                        | `runId`, `message`                   | `role`, `metadata`                                                                                                      |
@@ -187,6 +190,16 @@ Example run request:
   }
 }
 ```
+
+Legacy callers may continue to use `runId`. Desktop-created runs use
+`executionId` to receive the execution envelope without choosing an execution
+mode. The runtime returns an execution envelope with
+`mode`, `status`, `finalRunId`, `traceTarget`, optional durable specialist
+`stages`, and the nested run `result`. Generic-only submissions remain direct;
+an image or audio attachment may select catalog execution. Direct traces target
+the execution's root run. Catalog traces target the session whose ID is the
+`executionId`. Inspect, interrupt, and resume use the execution-scoped methods
+above so catalog operations cover every durable stage.
 
 Managed attachment descriptors use `kind` values `file`, `image`, or `audio`.
 `audioFormat` is optional, audio-only, and accepts `wav`, `mp3`, `flac`, `m4a`,

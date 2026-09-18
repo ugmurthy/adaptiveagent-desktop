@@ -159,18 +159,19 @@ actor TraceSessionClient {
     }
 
     func getTrace(rootRunId: String) async throws -> TraceReport {
+        try await getTrace(target: .rootRun(rootRunId))
+    }
+
+    func getTrace(target: ExecutionTraceTarget) async throws -> TraceReport {
         try requireInitialized()
-        guard !rootRunId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw TraceSessionClientError.protocolViolation("rootRunId must not be empty")
+        guard !target.identifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw TraceSessionClientError.protocolViolation("trace target ID must not be empty")
         }
         return try decode(
             try await request(
                 method: "trace/get",
                 params: [
-                    "target": .object([
-                        "kind": .string("root-run"),
-                        "rootRunId": .string(rootRunId)
-                    ]),
+                    "target": target.protocolValue,
                     "include": .object([
                         "plans": .bool(false),
                         "messages": .bool(false),
@@ -184,10 +185,17 @@ actor TraceSessionClient {
     }
 
     func usage(rootRunId: String) async throws -> TraceUsageSummary {
+        try await usage(target: .rootRun(rootRunId))
+    }
+
+    func usage(target: ExecutionTraceTarget) async throws -> TraceUsageSummary {
         try requireInitialized()
+        guard !target.identifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw TraceSessionClientError.protocolViolation("trace target ID must not be empty")
+        }
         return try decode(
             try await request(method: "trace/usage", params: [
-                "target": .object(["kind": .string("root-run"), "rootRunId": .string(rootRunId)])
+                "target": target.protocolValue
             ]),
             method: "trace/usage"
         )

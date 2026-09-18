@@ -153,6 +153,19 @@ actor AttachmentStore {
         }
     }
 
+    func restoreDraftOwnership(_ descriptors: [AttachmentDescriptor]) throws {
+        for descriptor in descriptors {
+            let directory = directoryURL(for: descriptor)
+            let metadata = try readMetadata(in: directory)
+            guard metadata.descriptor == descriptor else {
+                throw AttachmentStoreError.storageFailure("staged attachment metadata does not match")
+            }
+            if metadata.ownership != .draft {
+                try writeMetadata(Metadata(descriptor: descriptor, ownership: .draft), in: directory)
+            }
+        }
+    }
+
     func validate(_ descriptors: [AttachmentDescriptor], capabilities: AttachmentCapabilities) throws {
         guard descriptors.count <= min(capabilities.maxAttachmentCount, Self.maximumAttachmentCount) else {
             throw AttachmentStoreError.tooManyFiles

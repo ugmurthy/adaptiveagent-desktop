@@ -484,12 +484,12 @@ while IFS= read -r line; do
   printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
-  run_id="$(printf '%s' "$line" | sed -E 's/.*"runId":"([^"]+)".*/\1/')"
+  run_id="$(printf '%s' "$line" | sed -E 's/.*"(runId|executionId)":"([^"]+)".*/\2/')"
   case "$method" in
     initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.19"}}' ;;
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[]}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
     runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.19","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
-    agent/run) printf '{"jsonrpc":"2.0","id":"%s","result":{"status":"success","runId":"%s","output":"Done"}}\n' "$id" "$run_id" ;;
+    agent/run) printf '{"jsonrpc":"2.0","id":"%s","result":{"executionId":"%s","mode":"direct","status":"success","finalRunId":"%s","traceTarget":{"kind":"root-run","rootRunId":"%s"},"result":{"status":"success","runId":"%s","output":"Done"}}}\n' "$id" "$run_id" "$run_id" "$run_id" "$run_id" ;;
     agent/chat) printf '{"jsonrpc":"2.0","id":"%s","result":{"status":"success","runId":"%s","output":"Reply"}}\n' "$id" "$run_id" ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
     *) exit 91 ;;
@@ -521,6 +521,8 @@ done
         XCTAssertTrue(model.runs.first?.title.hasPrefix("Session ") == true)
         XCTAssertNotEqual(model.runs.first?.title, "Run this task")
         XCTAssertEqual(model.runs.first?.runGoal, "Run this task")
+        XCTAssertEqual(model.runs.first?.executionMode, .direct)
+        XCTAssertEqual(model.runs.first?.traceTarget, model.runs.first?.executionId.map(ExecutionTraceTarget.rootRun))
 
         model.newChat()
         let chatTabID = try XCTUnwrap(model.selectedTabID)
@@ -544,7 +546,7 @@ done
             .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
         let runRequest = try XCTUnwrap(requests.first { $0.objectValue?["method"] == .string("agent/run") })
         let runParams = try XCTUnwrap(runRequest.objectValue?["params"]?.objectValue)
-        XCTAssertFalse(try XCTUnwrap(runParams["runId"]?.stringValue).isEmpty)
+        XCTAssertFalse(try XCTUnwrap(runParams["executionId"]?.stringValue).isEmpty)
         XCTAssertFalse(try XCTUnwrap(runParams["sessionId"]?.stringValue).isEmpty)
         XCTAssertEqual(runParams["goal"], .string("Run this task"))
         XCTAssertNil(runParams["attachments"])
@@ -593,12 +595,16 @@ while IFS= read -r line; do
   printf '%s\n' "$line" >> \#(shellQuote(requestLog.path))
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
-  run_id="$(printf '%s' "$line" | sed -E 's/.*"runId":"([^"]+)".*/\1/')"
+  run_id="$(printf '%s' "$line" | sed -E 's/.*"(runId|executionId)":"([^"]+)".*/\2/')"
   case "$method" in
     initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.19"}}' ;;
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[],"attachments":{"enabled":true,"maxFileBytes":10485760,"maxAttachmentCount":8,"maxSubmissionBytes":41943040,"acceptedKinds":["file","image","audio"],"supportedImageMimeTypes":["image/png"],"supportedAudioMimeTypes":["audio/wav"],"supportedAudioFormats":["wav"],"supportedGenericMimeTypes":["application/json"],"routing":{"taskGeneric":"direct","chatGeneric":"direct","taskImage":"direct","taskAudio":"direct","chatImage":"direct","chatAudio":"direct"}}}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
     runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.19","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
-    agent/run|agent/chat) printf '{"jsonrpc":"2.0","id":"%s","result":{"status":"success","runId":"%s","output":"Done"}}\n' "$id" "$run_id" ;;
+    agent/run) printf '{"jsonrpc":"2.0","id":"%s","result":{"executionId":"%s","mode":"catalog","status":"success","finalRunId":"synthesis-run","traceTarget":{"kind":"session","sessionId":"%s"},"stages":[{"nodeId":"image-analysis","stage":"specialist","agentId":"image-agent","runId":"image-run","rootRunId":"image-run","status":"succeeded"},{"nodeId":"audio-analysis","stage":"specialist","agentId":"audio-agent","runId":"audio-run","rootRunId":"audio-run","status":"succeeded"},{"nodeId":"synthesis","stage":"synthesis","agentId":"default","runId":"synthesis-run","rootRunId":"synthesis-run","status":"succeeded"}],"result":{"status":"success","runId":"synthesis-run","output":"Done"}}}\n' "$id" "$run_id" "$run_id" ;;
+    agent/chat) printf '{"jsonrpc":"2.0","id":"%s","result":{"status":"success","runId":"%s","output":"Done"}}\n' "$id" "$run_id" ;;
+    execution/inspect) printf '{"jsonrpc":"2.0","id":"%s","result":{"executionId":"%s","mode":"catalog","status":"success","finalRunId":"synthesis-run","traceTarget":{"kind":"session","sessionId":"%s"}}}\n' "$id" "$run_id" "$run_id" ;;
+    execution/interrupt) printf '{"jsonrpc":"2.0","id":"%s","result":{"executionId":"%s","interrupted":true}}\n' "$id" "$run_id" ;;
+    execution/resume) printf '{"jsonrpc":"2.0","id":"%s","result":{"executionId":"%s","mode":"catalog","status":"success","finalRunId":"synthesis-run","traceTarget":{"kind":"session","sessionId":"%s"},"result":{"status":"success","runId":"synthesis-run","output":"Resumed"}}}\n' "$id" "$run_id" "$run_id" ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
     *) exit 91 ;;
   esac
@@ -627,6 +633,25 @@ done
         model.submitDraft(in: runTabID)
         for _ in 0..<100 where model.runs.first?.status != .succeeded { try? await Task.sleep(for: .milliseconds(20)) }
         XCTAssertEqual(model.runs.first?.attachments.first?.name, "input.json")
+        XCTAssertEqual(model.runs.first?.attachments.map(\.kind), [.file, .image, .audio])
+        XCTAssertEqual(model.runs.first?.executionMode, .catalog)
+        XCTAssertEqual(model.runs.first?.traceTarget, model.runs.first?.executionId.map(ExecutionTraceTarget.session))
+        XCTAssertEqual(model.runs.first?.executionStages.map(\.agentId), ["image-agent", "audio-agent", "default"])
+        let recordID = try XCTUnwrap(model.runs.first?.id)
+        let executionID = try XCTUnwrap(model.runs.first?.executionId)
+        model.runCommand("run/inspect", for: recordID)
+        for _ in 0..<100 where model.runs.first?.auxiliaryOperations.contains(.inspect) == true {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        model.runCommand("run/interrupt", for: recordID)
+        for _ in 0..<100 where model.runs.first?.auxiliaryOperations.contains(.interrupt) == true {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        model.runCommand("run/resume", for: recordID)
+        for _ in 0..<100 where model.runs.first?.isRequestInFlight == true {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(model.runs.first?.output, .string("Resumed"))
 
         model.newChat()
         let chatTabID = try XCTUnwrap(model.selectedTabID)
@@ -660,10 +685,69 @@ done
         XCTAssertTrue(sent.allSatisfy { $0["stagedRelativePath"]?.stringValue?.hasPrefix("/") == false })
         let runParams = try XCTUnwrap(run.objectValue?["params"]?.objectValue)
         XCTAssertEqual(runParams["goal"], .string("Read the attachments"))
-        XCTAssertNotNil(runParams["runId"]?.stringValue)
-        XCTAssertEqual(Set(runParams.keys), ["runId", "sessionId", "goal", "attachments"])
+        XCTAssertNotNil(runParams["executionId"]?.stringValue)
+        XCTAssertNil(runParams["runId"])
+        XCTAssertEqual(Set(runParams.keys), ["executionId", "sessionId", "goal", "attachments"])
         let chat = try XCTUnwrap(requests.first { $0.objectValue?["method"] == .string("agent/chat") })
         XCTAssertNil(chat.objectValue?["params"]?.objectValue?["attachments"])
+        for method in ["execution/inspect", "execution/interrupt", "execution/resume"] {
+            let request = try XCTUnwrap(requests.first { $0.objectValue?["method"] == .string(method) })
+            XCTAssertEqual(request.objectValue?["params"]?.objectValue?["executionId"], .string(executionID))
+            XCTAssertNil(request.objectValue?["params"]?.objectValue?["runId"])
+        }
+        await model.shutdown()
+    }
+
+    @MainActor
+    func testFailedRunSubmissionRestoresTextAndAttachmentDraft() async throws {
+        let workspace = try temporaryDirectoryURL()
+        let managedRoot = try temporaryDirectoryURL().appendingPathComponent("managed", isDirectory: true)
+        let source = workspace.appendingPathComponent("input.json")
+        try Data(#"{"value":1}"#.utf8).write(to: source)
+        let executable = try makeRuntimeScript(#"""
+printf '%s\n' '{"jsonrpc":"2.0","method":"runtime/ready","params":{"protocolVersion":"1.19","bridgeVersion":"0.1.0","pid":123}}'
+while IFS= read -r line; do
+  id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
+  method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
+  case "$method" in
+    initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.19"}}' ;;
+    runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[],"attachments":{"enabled":true,"maxFileBytes":10485760,"maxAttachmentCount":8,"maxSubmissionBytes":41943040,"acceptedKinds":["file"],"supportedGenericMimeTypes":["application/json"]}}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
+    runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.19","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
+    agent/run) printf '{"jsonrpc":"2.0","id":"%s","error":{"code":-32000,"message":"Submission rejected","data":{"protocolCode":"COMMAND_REJECTED"}}}\n' "$id" ;;
+    runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
+    *) exit 91 ;;
+  esac
+done
+"""#)
+        let model = AppModel(
+            client: RuntimeClient(executableURL: executable, responseTimeout: .seconds(2)),
+            workingDirectoryURL: workspace,
+            attachmentStoreRootURL: managedRoot
+        )
+        model.bootstrap()
+        for _ in 0..<100 where !model.attachmentsEnabled {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        let tabID = try XCTUnwrap(model.selectedTabID)
+        await model.importAttachments([source], forTab: tabID)
+        let attachment = try XCTUnwrap(model.selectedTab?.draftAttachments.first)
+        model.setDraftText("Keep this draft", forTab: tabID)
+        model.submitDraft(in: tabID)
+        for _ in 0..<100 where model.selectedTab?.attachmentErrorMessage == nil {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+
+        XCTAssertTrue(model.runs.isEmpty)
+        XCTAssertNil(model.selectedTab?.selectedRunID)
+        XCTAssertEqual(model.selectedTab?.draftText, "Keep this draft")
+        XCTAssertEqual(model.selectedTab?.draftAttachments, [attachment])
+        XCTAssertEqual(model.selectedTab?.attachmentErrorMessage, "COMMAND_REJECTED: Submission rejected")
+
+        for _ in 0..<100 where model.selectedTab?.isSubmittingDraft == true {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        model.removeAttachment(attachment, fromTab: tabID)
+        XCTAssertTrue(model.selectedTab?.draftAttachments.isEmpty == true)
         await model.shutdown()
     }
 
@@ -844,7 +928,7 @@ while IFS= read -r line; do
   printf '%s\n' "$line" >> \#(shellQuote(byokLog.path))
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
-  run_id="$(printf '%s' "$line" | sed -E 's/.*"runId":"([^"]+)".*/\1/')"
+  run_id="$(printf '%s' "$line" | sed -E 's/.*"(runId|executionId)":"([^"]+)".*/\2/')"
   case "$method" in
     initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.19"}}' ;;
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"byok-agent","name":"BYOK Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[]}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
@@ -861,7 +945,7 @@ while IFS= read -r line; do
   printf '%s\n' "$line" >> \#(shellQuote(defaultLog.path))
   id="$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]+)".*/\1/')"
   method="$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/' | tr -d '\\')"
-  run_id="$(printf '%s' "$line" | sed -E 's/.*"runId":"([^"]+)".*/\1/')"
+  run_id="$(printf '%s' "$line" | sed -E 's/.*"(runId|executionId)":"([^"]+)".*/\2/')"
   case "$method" in
     initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.19"}}' ;;
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[]}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
@@ -989,7 +1073,7 @@ while IFS= read -r line; do
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"first","name":"First Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[]}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
     runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.19","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"first","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
     agent/run)
-      run_id="$(printf '%s' "$line" | sed -E 's/.*"runId":"([^"]+)".*/\1/')"
+      run_id="$(printf '%s' "$line" | sed -E 's/.*"(runId|executionId)":"([^"]+)".*/\2/')"
       printf '{"jsonrpc":"2.0","method":"agent/event","params":{"schemaVersion":1,"type":"run.started","runId":"%s","payload":{"rootRunId":"%s"}}}\n' "$run_id" "$run_id"
       ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
@@ -1569,6 +1653,38 @@ done
         XCTAssertNil(model.runs[0].interaction)
         XCTAssertEqual(model.runs[0].status, .running)
         XCTAssertTrue(model.runs[0].isRequestInFlight)
+    }
+
+    @MainActor
+    func testCatalogStageCompletionDoesNotCompleteWholeExecution() throws {
+        let model = AppModel(workingDirectoryURL: try temporaryDirectoryURL())
+        let recordID = UUID()
+        model.runs = [.init(
+            id: recordID,
+            kind: .run,
+            title: "Analyze mixed media",
+            executionId: "catalog-execution",
+            executionMode: .catalog,
+            traceTarget: .session("catalog-execution"),
+            status: .running,
+            isRequestInFlight: true
+        )]
+
+        model.receive(method: "agent/event", params: .object([
+            "type": .string("run.completed"),
+            "executionId": .string("catalog-execution"),
+            "runId": .string("image-stage"),
+            "payload": .object([
+                "rootRunId": .string("image-stage"),
+                "output": .string("Image analysis")
+            ])
+        ]))
+
+        XCTAssertEqual(model.runs[0].status, .running)
+        XCTAssertTrue(model.runs[0].isRequestInFlight)
+        XCTAssertNil(model.runs[0].output)
+        XCTAssertFalse(model.runs[0].activities.contains(where: { $0.isFinalAssistantMessage }))
+        XCTAssertTrue(model.runs[0].runIds.contains("image-stage"))
     }
 
     @MainActor

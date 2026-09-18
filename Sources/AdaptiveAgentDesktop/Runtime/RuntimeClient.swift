@@ -327,7 +327,8 @@ actor RuntimeClient {
         guard method != "initialize", method != "runtime/initialize", method != "runtime/shutdown" else {
             throw RuntimeClientError.protocolViolation("\(method) is managed by RuntimeClient")
         }
-        if method.hasPrefix("agent/") || method.hasPrefix("run/") || method.hasPrefix("interaction/") {
+        if method.hasPrefix("agent/") || method.hasPrefix("run/")
+            || method.hasPrefix("execution/") || method.hasPrefix("interaction/") {
             guard runtimeInitialized else { throw RuntimeClientError.notInitialized("Agent runtime") }
         }
         return try await request(method: method, params: params, timeoutPolicy: timeoutPolicy)
