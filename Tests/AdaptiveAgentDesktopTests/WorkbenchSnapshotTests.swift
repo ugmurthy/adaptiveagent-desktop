@@ -14,7 +14,7 @@ final class WorkbenchSnapshotTests: XCTestCase {
         if let icon = Bundle.main.url(forResource: "AppIcon", withExtension: "icns") {
             NSApplication.shared.applicationIconImage = NSImage(contentsOf: icon)
         }
-        for state in ["ready", "chat", "disconnected", "active", "interrupted", "attention", "timeline", "dark", "expanded", "inspector"] {
+        for state in ["ready", "chat", "disconnected", "active", "thinking", "interrupted", "attention", "timeline", "dark", "expanded", "inspector"] {
             let model = AppModel(
                 client: RuntimeClient(executableURL: URL(fileURLWithPath: "/nonexistent/development-preview-runtime")),
                 workingDirectoryURL: URL(fileURLWithPath: "/tmp/Workbench Preview")
@@ -33,16 +33,20 @@ final class WorkbenchSnapshotTests: XCTestCase {
                 model.agentName = "Research Assistant with a deliberately long profile name for narrow windows"
                 model.setDraftText("Review this workspace and suggest three useful next steps.", forTab: tabID)
             }
-            if state == "active" || state == "interrupted" || state == "attention" || state == "timeline" {
+            if state == "active" || state == "thinking" || state == "interrupted" || state == "attention" || state == "timeline" {
                 var record = AppModel.RunRecord(
                     id: UUID(), agentName: "Research Assistant", modelName: "claude-sonnet-4.5", kind: .run,
                     title: "Review the workspace and recommend next steps")
                 record.runIds = ["development-preview"]
                 record.selectedAgentId = "research-assistant"
                 record.selectedAgentName = "Research Assistant"
-                record.status = state == "active" || state == "interrupted" ? .running : state == "timeline" ? .succeeded : .waitingForApproval
+                record.status = ["active", "thinking", "interrupted"].contains(state) ? .running : state == "timeline" ? .succeeded : .waitingForApproval
                 record.isRequestInFlight = state == "interrupted"
                 record.activityStartedAt = state == "interrupted" ? Date() : nil
+                if state == "thinking" {
+                    record.activityStartedAt = Date().addingTimeInterval(-125)
+                    record.thinkingStartedAt = Date().addingTimeInterval(-8)
+                }
                 if state == "interrupted" {
                     record.sessionId = "development-session"
                     record.sessionName = "review-workspace"
@@ -107,6 +111,11 @@ final class WorkbenchSnapshotTests: XCTestCase {
             window.contentView = view
             window.makeKeyAndOrderFront(nil)
             RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+            if state == "thinking" {
+                // Trigger the selected-agent pulse after the view has mounted.
+                model.runs[0].agentSelectionCount += 1
+                RunLoop.current.run(until: Date().addingTimeInterval(0.38))
+            }
             if state == "interrupted" {
                 model.runs[0].status = .interrupted
                 RunLoop.current.run(until: Date().addingTimeInterval(0.15))

@@ -1346,11 +1346,13 @@ done
         XCTAssertEqual(model.runs[0].selectedAgentId, "distance-running-coach")
         XCTAssertEqual(model.runs[0].selectedAgentName, "Distance Running Coach")
         XCTAssertEqual(model.runs[0].agentName, "Distance Running Coach")
+        XCTAssertEqual(model.runs[0].agentSelectionCount, 1)
         model.receive(method: "agent/event", params: .object([
             "type": .string("run.started"),
             "runId": .string("root-run"),
             "payload": .object(["rootRunId": .string("root-run")])
         ]))
+        XCTAssertNotNil(model.runs[0].thinkingStartedAt)
 
         let assistantContent = "I’ll check the documentation and then inspect the local file."
         model.receive(method: "agent/event", params: .object([
@@ -1482,6 +1484,86 @@ done
         XCTAssertNotNil(model.runs[0].activityFinishedAt)
         XCTAssertEqual(model.runs[0].activities.last?.content, "Finished the research.")
         XCTAssertEqual(model.runs[0].activities.last?.isFinalAssistantMessage, true)
+        XCTAssertNil(model.runs[0].thinkingStartedAt)
+    }
+
+    @MainActor
+    func testThinkingTimerTracksCurrentThinkingPeriodRatherThanWholeRun() throws {
+        let model = AppModel(workingDirectoryURL: try temporaryDirectoryURL())
+        let recordID = UUID()
+        model.runs = [AppModel.RunRecord(id: recordID, kind: .run, title: "Research")]
+        model.acceptResult(.object(["runId": .string("root-run")]), for: recordID)
+        model.receive(method: "agent/event", params: .object([
+            "type": .string("run.started"), "runId": .string("root-run"), "payload": .object([:])
+        ]))
+        let runStartedAt = Date().addingTimeInterval(-140)
+        model.runs[0].activityStartedAt = runStartedAt
+
+        model.receive(method: "agent/event", params: .object([
+            "type": .string("tool.started"), "runId": .string("root-run"),
+            "toolCallId": .string("search"),
+            "payload": .object(["toolName": .string("web_search")])
+        ]))
+        XCTAssertNil(model.runs[0].thinkingStartedAt)
+        model.receive(method: "agent/event", params: .object([
+            "type": .string("tool.completed"), "runId": .string("root-run"),
+            "toolCallId": .string("search"),
+            "payload": .object(["toolName": .string("web_search")])
+        ]))
+        let thinkingStartedAt = try XCTUnwrap(model.runs[0].thinkingStartedAt)
+        XCTAssertGreaterThan(thinkingStartedAt.timeIntervalSince(runStartedAt), 130)
+        XCTAssertLessThan(Date().timeIntervalSince(thinkingStartedAt), 2)
+        XCTAssertEqual(model.runs[0].activities.last?.toolState, .succeeded)
+
+        model.runs[0].thinkingStartedAt = Date().addingTimeInterval(-40)
+        model.receive(method: "agent/event", params: .object([
+            "type": .string("run.progress"), "runId": .string("root-run"),
+            "payload": .object(["assistantContent": .string("I found the answer.")])
+        ]))
+        XCTAssertLessThan(Date().timeIntervalSince(try XCTUnwrap(model.runs[0].thinkingStartedAt)), 2)
+
+        model.receive(method: "agent/event", params: .object([
+            "type": .string("clarification.requested"), "runId": .string("root-run"),
+            "payload": .object(["message": .string("Which topic?")])
+        ]))
+        XCTAssertNil(model.runs[0].thinkingStartedAt)
+        model.receive(method: "agent/event", params: .object([
+            "type": .string("run.resumed"), "runId": .string("root-run"),
+            "payload": .object(["rootRunId": .string("root-run")])
+        ]))
+        XCTAssertNotNil(model.runs[0].thinkingStartedAt)
+        XCTAssertEqual(model.runs[0].activityStartedAt, runStartedAt)
+    }
+
+    @MainActor
+    func testInspectionReplayDoesNotRestartThinkingAndWaitingResultStopsIt() throws {
+        let model = AppModel(workingDirectoryURL: try temporaryDirectoryURL())
+        let recordID = UUID()
+        model.runs = [AppModel.RunRecord(id: recordID, kind: .run, title: "Research")]
+        model.acceptResult(.object(["runId": .string("root-run")]), for: recordID)
+        model.receive(method: "agent/event", params: .object([
+            "type": .string("run.started"), "runId": .string("root-run"), "payload": .object([:])
+        ]))
+        let thinkingStartedAt = Date().addingTimeInterval(-35)
+        model.runs[0].thinkingStartedAt = thinkingStartedAt
+        try model.acceptRunCommandResult(.object([
+            "run": .object(["id": .string("root-run"), "status": .string("running")]),
+            "events": .array([
+                .object(["type": .string("tool.started"), "runId": .string("root-run"),
+                         "toolCallId": .string("search"), "payload": .object(["toolName": .string("web_search")])]),
+                .object(["type": .string("tool.completed"), "runId": .string("root-run"),
+                         "toolCallId": .string("search"), "payload": .object(["toolName": .string("web_search")])]),
+                .object(["type": .string("run.progress"), "runId": .string("root-run"),
+                         "payload": .object(["assistantContent": .string("Found it")])])
+            ])
+        ]), method: "run/inspect", for: recordID)
+        XCTAssertEqual(model.runs[0].thinkingStartedAt, thinkingStartedAt)
+
+        model.acceptResult(.object([
+            "runId": .string("root-run"), "status": .string("clarification_requested"),
+            "message": .string("Which topic?")
+        ]), for: recordID)
+        XCTAssertNil(model.runs[0].thinkingStartedAt)
     }
 
     @MainActor

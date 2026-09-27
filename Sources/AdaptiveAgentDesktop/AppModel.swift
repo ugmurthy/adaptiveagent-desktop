@@ -225,6 +225,7 @@ final class AppModel: ObservableObject {
         var agentName = ""
         var selectedAgentId = ""
         var selectedAgentName = ""
+        var agentSelectionCount = 0
         var modelName = ""
         let kind: RunKind
         var title: String
@@ -249,6 +250,7 @@ final class AppModel: ObservableObject {
         var activities: [RunActivity] = []
         var activityStartedAt: Date?
         var activityFinishedAt: Date?
+        var thinkingStartedAt: Date?
         var isRequestInFlight = false
         var auxiliaryOperations: Set<AuxiliaryOperation> = []
         var auxiliaryErrorMessage: String?
@@ -1865,7 +1867,10 @@ final class AppModel: ObservableObject {
                     kind: .approval(toolName: object["toolName"]?.stringValue, input: nil, assistantContent: nil)
                 )
             }
-            if !resolvedInteractions.contains(recordID) { runs[index].status = .waitingForApproval }
+            if !resolvedInteractions.contains(recordID) {
+                runs[index].status = .waitingForApproval
+                runs[index].thinkingStartedAt = nil
+            }
         case "clarification_requested":
             if resolvedInteractions.contains(recordID) {
                 runs[index].interaction = nil
@@ -1878,6 +1883,7 @@ final class AppModel: ObservableObject {
                     message: message,
                     kind: .clarification(suggestedQuestions: suggestions)
                 )
+                runs[index].thinkingStartedAt = nil
             }
         default:
             break
@@ -2135,6 +2141,7 @@ final class AppModel: ObservableObject {
             runs[index].selectedAgentId = payload["agentId"]?.stringValue ?? ""
             runs[index].selectedAgentName = payload["agentName"]?.stringValue ?? runs[index].selectedAgentId
             runs[index].agentName = runs[index].selectedAgentName
+            if !runs[index].selectedAgentId.isEmpty { runs[index].agentSelectionCount += 1 }
         case "run.started":
             guard isRootEvent else { return }
             updateStatus(.running, forRunId: runId)
@@ -2180,6 +2187,7 @@ final class AppModel: ObservableObject {
             resolvedInteractions.remove(runs[index].id)
             let toolName = payload["toolName"]?.stringValue
             runs[index].status = .waitingForApproval
+            runs[index].thinkingStartedAt = nil
             runs[index].interaction = Interaction(
                 runId: runId,
                 approvalId: payload["approvalId"]?.stringValue,
@@ -2194,6 +2202,7 @@ final class AppModel: ObservableObject {
             guard let index = recordIndex(forRunId: runId) else { return }
             resolvedInteractions.remove(runs[index].id)
             runs[index].status = .waitingForClarification
+            runs[index].thinkingStartedAt = nil
             runs[index].interaction = Interaction(
                 runId: runId,
                 message: payload["message"]?.stringValue ?? "The agent needs more information to continue.",
@@ -2714,6 +2723,8 @@ final class AppModel: ObservableObject {
         runs[index].status = status
         if status == .running {
             beginActivityTimer(at: index)
+        } else if status == .waitingForApproval || status == .waitingForClarification {
+            runs[index].thinkingStartedAt = nil
         } else if !status.isActive {
             finishActivityTimer(at: index)
             if status == .interrupted {
@@ -2757,6 +2768,7 @@ final class AppModel: ObservableObject {
                     payload: event["payload"]?.objectValue ?? [:],
                     sourceRunId: sourceRunId,
                     isRootEvent: sourceRunId == runId,
+                    updateThinkingTimer: false,
                     at: index
                 )
                 if type == "tool.completed" {
@@ -2804,6 +2816,7 @@ final class AppModel: ObservableObject {
         payload: [String: JSONValue],
         sourceRunId: String,
         isRootEvent: Bool,
+        updateThinkingTimer: Bool = true,
         at index: Int
     ) {
         if let content = payload["assistantContent"]?.stringValue {
@@ -2819,6 +2832,9 @@ final class AppModel: ObservableObject {
                 eventSeq: Self.activitySequence(event["seq"]),
                 at: index
             )
+            if updateThinkingTimer && !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                runs[index].thinkingStartedAt = .now
+            }
         }
 
         if type == "run.completed",
@@ -2850,6 +2866,9 @@ final class AppModel: ObservableObject {
         let detail = Self.compactToolDetail(toolName: toolName, input: payload["input"]?.objectValue)
         let eventDate = Self.activityDate(event["createdAt"]?.stringValue)
         let eventSeq = Self.activitySequence(event["seq"])
+        if updateThinkingTimer {
+            runs[index].thinkingStartedAt = state == .running || state == .awaitingApproval ? nil : .now
+        }
 
         if let activityIndex = runs[index].activities.firstIndex(where: { $0.id == id }) {
             runs[index].activities[activityIndex].toolName = toolName
@@ -2981,6 +3000,9 @@ final class AppModel: ObservableObject {
             runs[index].activityStartedAt = Date()
             runs[index].activityFinishedAt = nil
         }
+        if runs[index].thinkingStartedAt == nil {
+            runs[index].thinkingStartedAt = .now
+        }
     }
 
     private func finishActivityTimer(at index: Int) {
@@ -2988,6 +3010,7 @@ final class AppModel: ObservableObject {
               runs[index].activityStartedAt != nil,
               runs[index].activityFinishedAt == nil else { return }
         runs[index].activityFinishedAt = Date()
+        runs[index].thinkingStartedAt = nil
     }
 
     private func captureFiles(

@@ -1280,6 +1280,7 @@ private struct HistoricalRunDetailView: View {
 
 private struct RunDetailView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let record: AppModel.RunRecord
     let tabID: UUID
     @StateObject private var dictation = DictationController()
@@ -1432,14 +1433,21 @@ private struct RunDetailView: View {
                             resolvedAgent, symbol: "person.crop.circle",
                             accessibilityLabel: "Selected agent \(resolvedAgent)", target: "run-activity"
                         )
+                        .phaseAnimator([false, true, false, true, false], trigger: record.agentSelectionCount) { chip, highlighted in
+                            chip
+                                .scaleEffect(highlighted && !reduceMotion ? 1.08 : 1)
+                                .background(Color.teal.opacity(highlighted ? 0.2 : 0), in: Capsule())
+                        } animation: { _ in .easeInOut(duration: 0.3) }
                     }
                     if let startedAt = record.activityStartedAt {
-                        summaryChip(
-                            ThinkingActivityRow.durationText(max(0, (record.activityFinishedAt ?? .now).timeIntervalSince(startedAt))),
-                            symbol: "clock",
-                            accessibilityLabel: "Run duration",
-                            target: "run-goal"
-                        )
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            summaryChip(
+                                ThinkingActivityRow.durationText(max(0, (record.activityFinishedAt ?? context.date).timeIntervalSince(startedAt))),
+                                symbol: "clock",
+                                accessibilityLabel: "Run duration",
+                                target: "run-goal"
+                            )
+                        }
                     }
                     let toolCount = record.activities.filter { $0.kind == .tool }.count
                     if toolCount > 0, let firstTool = record.activities.first(where: { $0.kind == .tool }) {
@@ -2080,7 +2088,7 @@ private struct RunActivityFeed: View {
                     .id("auxiliary-error")
                 }
                 if isThinking {
-                    ThinkingActivityRow(startedAt: record.activityStartedAt)
+                    ThinkingActivityRow(startedAt: record.thinkingStartedAt)
                         .id("thinking")
                 } else if showsDuration,
                           let startedAt = record.activityStartedAt,
