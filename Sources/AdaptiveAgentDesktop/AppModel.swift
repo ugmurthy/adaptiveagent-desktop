@@ -1894,8 +1894,15 @@ final class AppModel: ObservableObject {
               let index = runs.firstIndex(where: { $0.id == recordID }) else {
             throw RuntimeClientError.protocolViolation("execution result is missing its execution ID")
         }
-        let expectedTraceTarget: ExecutionTraceTarget = execution.mode == .catalog
-            ? .session(execution.executionId) : .rootRun(execution.executionId)
+        let expectedTraceTarget: ExecutionTraceTarget
+        if execution.mode == .catalog {
+            guard let sessionId = runs[index].sessionId, !sessionId.isEmpty else {
+                throw RuntimeClientError.protocolViolation("catalog execution is missing its task session ID")
+            }
+            expectedTraceTarget = .session(sessionId)
+        } else {
+            expectedTraceTarget = .rootRun(execution.executionId)
+        }
         guard execution.traceTarget == expectedTraceTarget else {
             throw RuntimeClientError.protocolViolation("execution result has an inconsistent trace target")
         }
@@ -1904,9 +1911,6 @@ final class AppModel: ObservableObject {
         runs[index].traceTarget = execution.traceTarget
         if let stages = execution.stages {
             runs[index].executionStages = stages
-        }
-        if execution.mode == .catalog {
-            runs[index].sessionId = execution.executionId
         }
         if execution.mode == .direct {
             bind(rootRunId: execution.executionId, to: recordID)

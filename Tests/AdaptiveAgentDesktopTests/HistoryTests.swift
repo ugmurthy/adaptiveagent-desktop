@@ -121,7 +121,7 @@ for line in sys.stdin:
             else: result=groups
         elif not runtime and method=="trace/get":
             result=dict(report)
-            if params["target"]["rootRunId"]=="root-b":
+            if params["target"].get("rootRunId")=="root-b":
                 result["runTree"]=[dict(rootRunId="root-b",runId="run-b",parentRunId=None,depth=0,status="succeeded",createdAt="2026-09-08T09:00:00Z")]
         elif not runtime and method=="trace/usage":
             result=dict(usage)
@@ -155,16 +155,17 @@ final class HistoryTests: XCTestCase {
         do {
             try await fixture.start()
             let executionID = "catalog-execution"
+            let taskSessionID = "task-session"
             fixture.model.runs = [.init(
                 id: UUID(),
                 runtimeSessionID: fixture.model.selectedTab?.runtimeSessionID,
                 kind: .run,
                 title: "Analyze media",
                 runGoal: "Analyze media",
-                sessionId: executionID,
+                sessionId: taskSessionID,
                 executionId: executionID,
                 executionMode: .catalog,
-                traceTarget: .session(executionID),
+                traceTarget: .session(taskSessionID),
                 runIds: ["image-stage"],
                 status: .succeeded
             )]
@@ -177,7 +178,7 @@ final class HistoryTests: XCTestCase {
             })
             XCTAssertEqual(
                 request.objectValue?["params"]?.objectValue?["target"],
-                .object(["kind": .string("session"), "sessionId": .string(executionID)])
+                .object(["kind": .string("session"), "sessionId": .string(taskSessionID)])
             )
         } catch { await fixture.close(); throw error }
         await fixture.close()

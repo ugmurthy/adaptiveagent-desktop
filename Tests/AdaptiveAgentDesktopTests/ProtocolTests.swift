@@ -600,11 +600,11 @@ while IFS= read -r line; do
     initialize) printf '%s\n' '{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"1.19"}}' ;;
     runtime/initialize) printf '{"jsonrpc":"2.0","id":"%s","result":{"agent":{"id":"default","name":"Default Agent"},"runtimeMode":"memory","workspaceRoot":"%s","shellCwd":"%s","registeredToolNames":[],"attachments":{"enabled":true,"maxFileBytes":10485760,"maxAttachmentCount":8,"maxSubmissionBytes":41943040,"acceptedKinds":["file","image","audio"],"supportedImageMimeTypes":["image/png"],"supportedAudioMimeTypes":["audio/wav"],"supportedAudioFormats":["wav"],"supportedGenericMimeTypes":["application/json"],"routing":{"taskGeneric":"direct","chatGeneric":"direct","taskImage":"direct","taskAudio":"direct","chatImage":"direct","chatAudio":"direct"}}}}\n' "$id" \#(shellQuote(workspace.path)) \#(shellQuote(workspace.path)) ;;
     runtime/info) printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"1.19","bridgeVersion":"0.1.0","initialized":true,"clientInfo":{"name":"adaptive-agent-desktop"},"runtimeMode":"memory","agentId":"default","workspaceRoot":"%s"}}\n' "$id" \#(shellQuote(workspace.path)) ;;
-    agent/run) printf '{"jsonrpc":"2.0","id":"%s","result":{"executionId":"%s","mode":"catalog","status":"success","finalRunId":"synthesis-run","traceTarget":{"kind":"session","sessionId":"%s"},"stages":[{"nodeId":"image-analysis","stage":"specialist","agentId":"image-agent","runId":"image-run","rootRunId":"image-run","status":"succeeded"},{"nodeId":"audio-analysis","stage":"specialist","agentId":"audio-agent","runId":"audio-run","rootRunId":"audio-run","status":"succeeded"},{"nodeId":"synthesis","stage":"synthesis","agentId":"default","runId":"synthesis-run","rootRunId":"synthesis-run","status":"succeeded"}],"result":{"status":"success","runId":"synthesis-run","output":"Done"}}}\n' "$id" "$run_id" "$run_id" ;;
+    agent/run) task_session_id="$(printf '%s' "$line" | sed -E 's/.*"sessionId":"([^"]+)".*/\1/')"; printf '{"jsonrpc":"2.0","id":"%s","result":{"executionId":"%s","mode":"catalog","status":"success","finalRunId":"synthesis-run","traceTarget":{"kind":"session","sessionId":"%s"},"stages":[{"nodeId":"image-analysis","stage":"specialist","agentId":"image-agent","runId":"image-run","rootRunId":"image-run","status":"succeeded"},{"nodeId":"audio-analysis","stage":"specialist","agentId":"audio-agent","runId":"audio-run","rootRunId":"audio-run","status":"succeeded"},{"nodeId":"synthesis","stage":"synthesis","agentId":"default","runId":"synthesis-run","rootRunId":"synthesis-run","status":"succeeded"}],"result":{"status":"success","runId":"synthesis-run","output":"Done"}}}\n' "$id" "$run_id" "$task_session_id" ;;
     agent/chat) printf '{"jsonrpc":"2.0","id":"%s","result":{"status":"success","runId":"%s","output":"Done"}}\n' "$id" "$run_id" ;;
-    execution/inspect) printf '{"jsonrpc":"2.0","id":"%s","result":{"executionId":"%s","mode":"catalog","status":"success","finalRunId":"synthesis-run","traceTarget":{"kind":"session","sessionId":"%s"}}}\n' "$id" "$run_id" "$run_id" ;;
+    execution/inspect) printf '{"jsonrpc":"2.0","id":"%s","result":{"executionId":"%s","mode":"catalog","status":"success","finalRunId":"synthesis-run","traceTarget":{"kind":"session","sessionId":"%s"}}}\n' "$id" "$run_id" "$task_session_id" ;;
     execution/interrupt) printf '{"jsonrpc":"2.0","id":"%s","result":{"executionId":"%s","interrupted":true}}\n' "$id" "$run_id" ;;
-    execution/resume) printf '{"jsonrpc":"2.0","id":"%s","result":{"executionId":"%s","mode":"catalog","status":"success","finalRunId":"synthesis-run","traceTarget":{"kind":"session","sessionId":"%s"},"result":{"status":"success","runId":"synthesis-run","output":"Resumed"}}}\n' "$id" "$run_id" "$run_id" ;;
+    execution/resume) printf '{"jsonrpc":"2.0","id":"%s","result":{"executionId":"%s","mode":"catalog","status":"success","finalRunId":"synthesis-run","traceTarget":{"kind":"session","sessionId":"%s"},"result":{"status":"success","runId":"synthesis-run","output":"Resumed"}}}\n' "$id" "$run_id" "$task_session_id" ;;
     runtime/shutdown) printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"; exit 0 ;;
     *) exit 91 ;;
   esac
@@ -635,14 +635,21 @@ done
         XCTAssertEqual(model.runs.first?.attachments.first?.name, "input.json")
         XCTAssertEqual(model.runs.first?.attachments.map(\.kind), [.file, .image, .audio])
         XCTAssertEqual(model.runs.first?.executionMode, .catalog)
-        XCTAssertEqual(model.runs.first?.traceTarget, model.runs.first?.executionId.map(ExecutionTraceTarget.session))
+        let taskSessionID = try XCTUnwrap(model.runs.first?.sessionId)
+        let executionID = try XCTUnwrap(model.runs.first?.executionId)
+        XCTAssertNotEqual(executionID, taskSessionID)
+        XCTAssertEqual(model.runs.first?.traceTarget, .session(taskSessionID))
+        XCTAssertNil(model.runs.first?.errorMessage)
         XCTAssertEqual(model.runs.first?.executionStages.map(\.agentId), ["image-agent", "audio-agent", "default"])
         let recordID = try XCTUnwrap(model.runs.first?.id)
-        let executionID = try XCTUnwrap(model.runs.first?.executionId)
         model.runCommand("run/inspect", for: recordID)
         for _ in 0..<100 where model.runs.first?.auxiliaryOperations.contains(.inspect) == true {
             try? await Task.sleep(for: .milliseconds(20))
         }
+        XCTAssertNotNil(model.runs.first?.inspection)
+        XCTAssertNil(model.runs.first?.auxiliaryErrorMessage)
+        XCTAssertEqual(model.runs.first?.sessionId, taskSessionID)
+        XCTAssertEqual(model.runs.first?.traceTarget, .session(taskSessionID))
         model.runCommand("run/interrupt", for: recordID)
         for _ in 0..<100 where model.runs.first?.auxiliaryOperations.contains(.interrupt) == true {
             try? await Task.sleep(for: .milliseconds(20))
@@ -652,6 +659,10 @@ done
             try? await Task.sleep(for: .milliseconds(20))
         }
         XCTAssertEqual(model.runs.first?.output, .string("Resumed"))
+        XCTAssertEqual(model.runs.first?.sessionId, taskSessionID)
+        XCTAssertEqual(model.runs.first?.executionId, executionID)
+        XCTAssertEqual(model.runs.first?.traceTarget, .session(taskSessionID))
+        XCTAssertNil(model.runs.first?.errorMessage)
 
         model.newChat()
         let chatTabID = try XCTUnwrap(model.selectedTabID)
@@ -685,7 +696,8 @@ done
         XCTAssertTrue(sent.allSatisfy { $0["stagedRelativePath"]?.stringValue?.hasPrefix("/") == false })
         let runParams = try XCTUnwrap(run.objectValue?["params"]?.objectValue)
         XCTAssertEqual(runParams["goal"], .string("Read the attachments"))
-        XCTAssertNotNil(runParams["executionId"]?.stringValue)
+        XCTAssertEqual(runParams["executionId"], .string(executionID))
+        XCTAssertEqual(runParams["sessionId"], .string(taskSessionID))
         XCTAssertNil(runParams["runId"])
         XCTAssertEqual(Set(runParams.keys), ["executionId", "sessionId", "goal", "attachments"])
         let chat = try XCTUnwrap(requests.first { $0.objectValue?["method"] == .string("agent/chat") })
