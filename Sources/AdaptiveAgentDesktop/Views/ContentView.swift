@@ -869,6 +869,17 @@ private struct WorkspaceContextView: View {
         return "Agent from settings"
     }
 
+    @ViewBuilder private var agentLabel: some View {
+        if !model.agentName.isEmpty || !model.agentConfigPath.isEmpty {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles")
+                AnimatedGradientBadge(text: agent)
+            }
+        } else {
+            Label(agent, systemImage: "sparkles")
+        }
+    }
+
     @ViewBuilder var body: some View {
         if compact {
             compactContent
@@ -879,6 +890,13 @@ private struct WorkspaceContextView: View {
 
     private var compactContent: some View {
         HStack(spacing: 8) {
+            Button { model.showConfiguration = true } label: {
+                agentLabel
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Choose agent: \(agent)")
+            .help(model.agentConfigPath.isEmpty ? "Agent selected by runtime settings" : model.agentConfigPath)
+
             Menu {
                 Button("Create Agent Profile…", systemImage: "person.crop.circle.badge.plus") {
                     model.presentAgentCreator()
@@ -889,9 +907,12 @@ private struct WorkspaceContextView: View {
                 Divider()
                 Button("Runtime Settings…", systemImage: "gearshape.2") { model.showConfiguration = true }
             } label: {
-                Label(agent, systemImage: "sparkles")
+                Image(systemName: "chevron.down")
             }
-            .help(model.agentConfigPath.isEmpty ? "Agent selected by runtime settings" : model.agentConfigPath)
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Agent actions")
 
             Menu {
                 Button("Change Workspace…", systemImage: "folder") { model.showConfiguration = true }
@@ -948,7 +969,7 @@ private struct WorkspaceContextView: View {
     private var standardContent: some View {
         HStack(spacing: 16) {
             VStack(alignment: .leading, spacing: 8) {
-                Label(agent, systemImage: "sparkles")
+                agentLabel
                     .font(.callout.weight(.semibold))
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -968,6 +989,36 @@ private struct WorkspaceContextView: View {
         }
         .padding(16)
         .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+private struct AnimatedGradientBadge: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let text: String
+    @State private var flip = false
+
+    var body: some View {
+        Text(text)
+            .font(.caption.weight(.bold))
+            .foregroundStyle(.white)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background {
+                Capsule()
+                    .fill(LinearGradient(
+                        colors: flip ? [.orange, .pink] : [.pink, .orange],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ))
+            }
+            .onAppear {
+                guard !reduceMotion else { return }
+                withAnimation(.easeInOut(duration: 2).repeatForever(autoreverses: true)) {
+                    flip.toggle()
+                }
+            }
     }
 }
 
