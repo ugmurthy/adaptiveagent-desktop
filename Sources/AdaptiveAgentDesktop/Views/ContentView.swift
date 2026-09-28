@@ -995,14 +995,18 @@ private struct WorkspaceContextView: View {
 private struct AnimatedGradientBadge: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let text: String
+    var systemImage: String? = nil
     @State private var flip = false
 
     var body: some View {
-        Text(text)
+        HStack(spacing: 4) {
+            if let systemImage { Image(systemName: systemImage) }
+            Text(text)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
             .font(.caption.weight(.bold))
             .foregroundStyle(.white)
-            .lineLimit(1)
-            .truncationMode(.middle)
             .padding(.horizontal, 7)
             .padding(.vertical, 4)
             .background {
@@ -1480,10 +1484,13 @@ private struct RunDetailView: View {
                         ? record.selectedAgentId
                         : record.selectedAgentName
                     if !resolvedAgent.isEmpty {
-                        summaryChip(
-                            resolvedAgent, symbol: "person.crop.circle",
-                            accessibilityLabel: "Selected agent \(resolvedAgent)", target: "run-activity"
-                        )
+                        Button {
+                            model.setScrollPosition("run-activity", forTab: tabID)
+                        } label: {
+                            AnimatedGradientBadge(text: resolvedAgent, systemImage: "person.crop.circle")
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Selected agent \(resolvedAgent)")
                         .phaseAnimator([false, true, false, true, false], trigger: record.agentSelectionCount) { chip, highlighted in
                             chip
                                 .scaleEffect(highlighted && !reduceMotion ? 1.08 : 1)
