@@ -1252,13 +1252,22 @@ private struct HistoricalRunDetailView: View {
             TimelineRow(date: startedAt == .distantPast ? nil : startedAt, symbol: "person", accessibilityLabel: "Goal") {
                 Text(item.title).textSelection(.enabled).padding(.vertical, 5)
             }
-            ForEach(activities) { activity in
-                RunActivityRow(
-                    activity: activity,
-                    agentName: "Agent",
-                    modelName: report.rootRuns.first(where: { $0.runId == item.id })?.modelName ?? "",
-                    files: historyFiles(for: activity, activities: activities)
-                )
+            ForEach(ToolTimelineItem.grouped(activities.map { .activity($0) })) { entry in
+                switch entry {
+                case .activity(let activity):
+                    RunActivityRow(
+                        activity: activity,
+                        agentName: "Agent",
+                        modelName: report.rootRuns.first(where: { $0.runId == item.id })?.modelName ?? "",
+                        files: historyFiles(for: activity, activities: activities)
+                    )
+                case .tools(let tools):
+                    ToolActivityGroupRow(activities: tools) { activity in
+                        historyFiles(for: activity, activities: activities)
+                    }
+                case .message:
+                    EmptyView()
+                }
             }
             ForEach(unattachedHistoryFiles(activities: activities)) { file in
                 TimelineRow(date: nil, symbol: "doc", accessibilityLabel: "File artifact") {
@@ -2078,17 +2087,23 @@ private struct RunActivityFeed: View {
         !record.status.isActive && record.activityStartedAt != nil && record.activityFinishedAt != nil
     }
 
-    private var feedItems: [TimelineFeedItem] {
+    private var feedItems: [ToolTimelineItem] {
         let activities = record.activities.enumerated().map {
             TimelineFeedItem.activity($0.element, order: $0.offset)
         }
         let messages = record.chatMessages.enumerated().map {
             TimelineFeedItem.message($0.element, order: record.activities.count + $0.offset)
         }
-        return (activities + messages).sorted { left, right in
+        let sorted = (activities + messages).sorted { left, right in
             if left.date == right.date { return left.order < right.order }
             return left.date < right.date
         }
+        return ToolTimelineItem.grouped(sorted.map { item in
+            switch item {
+            case .activity(let activity, _): .activity(activity)
+            case .message(let message, _): .message(message)
+            }
+        })
     }
 
     var body: some View {
@@ -2104,17 +2119,17 @@ private struct RunActivityFeed: View {
                 }
                 ForEach(feedItems) { item in
                     switch item {
-                    case .activity(let activity, _):
+                    case .activity(let activity):
                         RunActivityRow(
                             activity: activity,
                             agentName: agentName,
                             modelName: modelName,
                             files: files(for: activity)
                         )
-                        .id(activity.id)
-                    case .message(let message, _):
+                    case .tools(let tools):
+                        ToolActivityGroupRow(activities: tools, files: files(for:))
+                    case .message(let message):
                         ChatTimelineRow(message: message, agentName: agentName, modelName: modelName)
-                            .id("message-\(message.id.uuidString)")
                     }
                 }
                 ForEach(unattachedFiles) { file in
@@ -2352,6 +2367,58 @@ private struct ToolActivityRow: View {
         case .failed: return "xmark"
         case .skipped: return "forward"
         case nil: return "circle"
+        }
+    }
+}
+
+private struct ToolActivityGroupRow: View {
+    let activities: [AppModel.RunActivity]
+    let files: (AppModel.RunActivity) -> [AppModel.RunFile]
+    @State private var isExpanded = false
+    @State private var isHovered = false
+
+    private var summary: ToolActivitySummary { ToolActivitySummary(activities: activities) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            TimelineRow(
+                date: activities.first?.createdAt,
+                symbol: "wrench.and.screwdriver",
+                showsProgress: activities.contains { $0.toolState == .running },
+                accessibilityLabel: "Tool activity"
+            ) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) { isExpanded.toggle() }
+                } label: {
+                    HStack(spacing: 9) {
+                        Text(summary.title)
+                            .font(.callout)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Spacer(minLength: 8)
+                        Text(summary.stateLabel)
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(activities.contains { $0.toolState == .failed } ? Color.red : Color.secondary)
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .opacity(isHovered ? 1 : 0)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(isExpanded ? "Hide tool calls" : "Show tool calls")
+                .onHover { isHovered = $0 }
+                .accessibilityLabel("\(summary.title), \(summary.stateLabel), \(activities.count) tool calls")
+                .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+                .padding(.vertical, 6)
+            }
+            if isExpanded {
+                ForEach(activities) { activity in
+                    ToolActivityRow(activity: activity, files: files(activity))
+                }
+                .transition(.opacity)
+            }
         }
     }
 }

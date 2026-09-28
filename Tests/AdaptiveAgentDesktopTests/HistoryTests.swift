@@ -523,6 +523,62 @@ final class HistoryTests: XCTestCase {
     }
 
     @MainActor
+    func testToolTimelineGroupsOnlyAdjacentCallsFromSameRun() {
+        func tool(_ id: String, _ run: String) -> AppModel.RunActivity {
+            .init(id: id, kind: .tool, sourceRunId: run, toolName: "read_file", toolState: .succeeded)
+        }
+        let assistant = AppModel.RunActivity(id: "narration", kind: .assistant, sourceRunId: "a", content: "Next step")
+        let items: [ToolTimelineItem] = [
+            .activity(tool("one", "a")), .activity(tool("two", "a")),
+            .activity(assistant), .activity(tool("three", "a")),
+            .activity(tool("four", "b"))
+        ]
+        let grouped = ToolTimelineItem.grouped(items)
+        XCTAssertEqual(grouped.map(\.id), ["one", "narration", "three", "four"])
+        if case .tools(let calls) = grouped[0] {
+            XCTAssertEqual(calls.map(\.id), ["one", "two"])
+        } else { XCTFail("Expected first two calls in one expandable group") }
+        let message = AppModel.ChatMessage(role: .assistant, content: "Now read the result")
+        let chat = ToolTimelineItem.grouped([
+            .activity(tool("before", "a")), .message(message), .activity(tool("after", "a"))
+        ])
+        XCTAssertEqual(chat.count, 3)
+        XCTAssertEqual(chat.first?.id, "before")
+        XCTAssertEqual(chat.last?.id, "after")
+    }
+
+    @MainActor
+    func testToolSummariesUseCompletedEvidenceAndPlainLabels() {
+        func tool(_ name: String, input: [String: JSONValue] = [:], state: AppModel.RunActivity.ToolState = .succeeded) -> AppModel.RunActivity {
+            .init(id: UUID().uuidString, kind: .tool, sourceRunId: "run", toolName: name,
+                  toolState: state, input: .object(input))
+        }
+        let page = tool("read_web_page", input: ["preview": .object(["url": .string("https://www.docs.typesafe.ai/guide")])])
+        XCTAssertEqual(ToolActivitySummary(activities: [tool("web_search"), page]).title,
+                       "Searched the web and fetched 1 page from docs.typesafe.ai")
+        XCTAssertEqual(ToolActivitySummary(activities: [page, page, page, page]).title,
+                       "Fetched 4 pages from docs.typesafe.ai")
+        XCTAssertEqual(ToolActivitySummary(activities: [page, tool("read_web_page", input: ["url": .string("https://other.example/guide")])]).title,
+                       "Fetched 2 pages")
+        let sameFile = tool("write_file", input: ["path": .string("/work/report.md")])
+        XCTAssertEqual(ToolActivitySummary(activities: [sameFile, sameFile]).title, "Wrote 1 file")
+        XCTAssertEqual(ToolActivitySummary(activities: [tool("search_files")]).title, "Searched files")
+        XCTAssertEqual(ToolActivitySummary(activities: [tool("list_directory"), tool("read_file")]).title,
+                       "Listed 1 folder and read 1 file")
+        XCTAssertEqual(ToolActivitySummary(activities: [tool("edit_file"), tool("shell_exec")]).title,
+                       "Edited 1 file and ran 1 command")
+        XCTAssertEqual(ToolActivitySummary(activities: [tool("shell_exec"), tool("edit_file")]).title,
+                       "Ran 1 command and edited 1 file")
+        XCTAssertEqual(ToolActivitySummary(activities: [tool("custom_action")]).title, "Used 1 other tool")
+        let partial = ToolActivitySummary(activities: [sameFile, tool("write_file", state: .failed)])
+        XCTAssertEqual(partial.title, "Wrote 1 file")
+        XCTAssertEqual(partial.stateLabel, "1 failed")
+        XCTAssertEqual(ToolActivitySummary(activities: [tool("write_file", state: .failed)]).title, "Tool activity")
+        XCTAssertEqual(ToolActivitySummary(activities: [tool("shell_exec", state: .running)]).stateLabel, "Running")
+        XCTAssertEqual(ToolActivitySummary(activities: [tool("shell_exec", state: .running)]).title, "Working with 1 tool…")
+    }
+
+    @MainActor
     func testHistorySectionsBucketByRecencyPinsAndFilters() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "UTC"))
