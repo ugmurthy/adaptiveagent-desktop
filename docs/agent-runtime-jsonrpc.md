@@ -139,7 +139,7 @@ steering, and in-memory run state.
 | `agent/saveConfig`                 | `agent`, `expectedPath`, `expectedTargetFingerprint` | `generatorAgent`, `targetPath`, `overwrite`                                                           |
 | `agent/run`                        | `goal`, one of `runId`/`executionId` | `sessionId`, `input`, `attachments`                                                                                     |
 | `agent/chat`                       | `runId`, `transcript`                | `sessionId`                                                                                                             |
-| `run/resume`                       | `runId`                              | -                                                                                                                       |
+| `run/resume`                       | `runId`                              | `allowConfigurationDrift` (explicit confirmation for non-gateway runs; protocol 1.19)                                  |
 | `run/retry`                        | `runId`                              | -                                                                                                                       |
 | `run/recover`                      | `runId`                              | `strategy` (`auto`, `resume`, `retry`, `continue`), `dryRun`                                                            |
 | `run/continue`                     | `runId`                              | -                                                                                                                       |

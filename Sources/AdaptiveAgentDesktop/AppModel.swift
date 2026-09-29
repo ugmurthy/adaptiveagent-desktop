@@ -419,6 +419,7 @@ final class AppModel: ObservableObject {
     @Published var historySearchQuery = ""
     @Published private(set) var deletingRunIDs: Set<String> = []
     @Published private(set) var runDeletionError: String?
+    @Published private(set) var pendingConfigurationDrift: (recordID: UUID, runId: String)?
 
     private var sessions: [UUID: RuntimeSession] = [:]
     private let runtimeClientFactory: () -> RuntimeClient
@@ -1499,7 +1500,20 @@ final class AppModel: ObservableObject {
         setDetailMode(.inspection, forTab: tabID)
     }
 
-    private func sendRunCommand(_ method: String, runId: String, recordID: UUID) {
+    func confirmResumeWithCurrentConfiguration() {
+        guard let pending = pendingConfigurationDrift,
+              let record = runs.first(where: { $0.id == pending.recordID }),
+              record.latestRunId == pending.runId,
+              client(for: pending.recordID) != nil else { return }
+        pendingConfigurationDrift = nil
+        sendRunCommand("run/resume", runId: pending.runId, recordID: pending.recordID, allowConfigurationDrift: true)
+    }
+
+    func dismissConfigurationDrift() {
+        pendingConfigurationDrift = nil
+    }
+
+    private func sendRunCommand(_ method: String, runId: String, recordID: UUID, allowConfigurationDrift: Bool = false) {
         guard let index = runs.firstIndex(where: { $0.id == recordID }) else { return }
         if method == "run/inspect", canReuseInspection(for: recordID, runId: runId, at: index) {
             runs[index].auxiliaryErrorMessage = nil
@@ -1513,6 +1527,7 @@ final class AppModel: ObservableObject {
         default: nil
         }
         guard !mayCreateRun || !isWaitingForRunIdentity else { return }
+        let previousStatus = runs[index].status
         if let auxiliaryOperation {
             guard !runs[index].auxiliaryOperations.contains(auxiliaryOperation) else { return }
             if method != "run/inspect" {
@@ -1539,7 +1554,9 @@ final class AppModel: ObservableObject {
                 guard let client = client(for: recordID) else { return }
                 let result = try await client.send(
                     method: method,
-                    params: ["runId": .string(runId)],
+                    params: allowConfigurationDrift
+                        ? ["runId": .string(runId), "allowConfigurationDrift": .bool(true)]
+                        : ["runId": .string(runId)],
                     timeoutPolicy: longRunning ? .none : .standard
                 )
                 try acceptRunCommandResult(
@@ -1549,6 +1566,12 @@ final class AppModel: ObservableObject {
                     requestedRunId: runId,
                     inspectionEventGeneration: inspectionEventGeneration
                 )
+            } catch RuntimeClientError.remote(_, let protocolCode, _) where method == "run/resume" && protocolCode == "RUN_CONFIGURATION_DRIFT" && !allowConfigurationDrift {
+                guard let index = runs.firstIndex(where: { $0.id == recordID }) else { return }
+                runs[index].isRequestInFlight = false
+                runs[index].status = previousStatus
+                finishActivityTimer(at: index)
+                pendingConfigurationDrift = (recordID, runId)
             } catch {
                 if let auxiliaryOperation {
                     auxiliaryRequestFailed(error, operation: auxiliaryOperation, for: recordID)

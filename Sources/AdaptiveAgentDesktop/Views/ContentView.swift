@@ -55,6 +55,15 @@ struct ContentView: View {
         } message: {
             Text("One or more runs still need attention or are in progress. The agent runtime will be shut down before the app exits.")
         }
+        .alert("Run Configuration Has Changed", isPresented: Binding(
+            get: { model.pendingConfigurationDrift != nil },
+            set: { if !$0 { model.dismissConfigurationDrift() } }
+        )) {
+            Button("Cancel", role: .cancel, action: model.dismissConfigurationDrift)
+            Button("Resume with Current Configuration", action: model.confirmResumeWithCurrentConfiguration)
+        } message: {
+            Text("The historical agent path and model are available, but the resolved configuration no longer matches this run. Its profile instructions, tools, inference, or interaction settings may have changed. Resuming will use the current configuration and may behave differently.")
+        }
         .confirmationDialog(
             deletionConfirmationTitle,
             isPresented: $deletionConfirmationPresented,
